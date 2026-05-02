@@ -133,3 +133,21 @@ HID connection is optional: the engine is fully functional via keyboard alone (S
   - Loop button (bit 8) emits `ParamSelect(4) + ParamValueDelta(1)` as a cycle increment; full 3-state machine deferred to state.rs future work
   - `SequencerState` and `Arc/RwLock` imports are gated under `#[cfg(feature = "hw-io")]` to avoid unused-import warnings in test builds
 
+### Code Review (2026-05-02)
+
+- **Verdict**: REQUEST-CHANGES
+- **Findings**: 0 critical, 1 warning, 3 info
+- **Test run**: 182 passed, 0 failed (matches expected)
+
+#### [WARNING] BUG-006 — `run_hid` buf reuse; partial reads leave stale bytes (hid.rs:307–323)
+`buf` is allocated once before the loop and never zeroed between iterations. `read_timeout` writes only `n` bytes; if `n > 0` but `n < 64`, bytes beyond `n` retain values from the previous report. `InReport::from_bytes` then silently mixes fields from two different reports. Fix: zero `buf` at loop top or guard `n < 64` with a `continue`.
+
+#### [INFO] Overlay-aware encoder routing not implemented (hid.rs:185–195)
+`translate_in_report` always emits `NoteDelta`, never `ParamValueDelta`, regardless of `active_overlay`. Documented as future work in both the task spec and code comments. Acceptable for this step.
+
+#### [INFO] `expect()` on poisoned RwLock in `run_hid` (hid.rs:336, 361, 374)
+Three `expect()` calls will panic if the lock is poisoned. Per code_standards ("use expect() with a message"), this is compliant. Lock poisoning only occurs if another thread panicked while holding the write lock, so this is an acceptable last-resort failure mode.
+
+#### [INFO] No test for simultaneous encoder deltas on multiple steps
+No test verifies that encoder deltas on steps 0, 7, and 15 simultaneously all produce their `StepSelect`+`NoteDelta` pairs in order. The existing tests exercise one encoder at a time. Low risk (it's a simple loop), but a multi-encoder test would increase coverage.
+
