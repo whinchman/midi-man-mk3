@@ -1,5 +1,13 @@
+/// USB HID report structures for the MIDI controller.
 pub mod hid;
-pub mod midi_out;
+/// Music theory primitives: keys, modes, scale tables, and note navigation.
 pub mod music_theory;
-pub mod sequencer;
+/// Sequencer state — the shared truth for all threads.
 pub mod state;
+/// Sequencer module — higher-level engine wiring and re-exports.
+pub mod sequencer;
+/// Real-time clock thread driving the sequencer forward.
+pub mod clock;
+/// MIDI output thread — sends NoteOn/NoteOff via midir.
+#[cfg(feature = "hw-io")]
+pub mod midi_out;
