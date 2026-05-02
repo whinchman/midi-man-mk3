@@ -162,7 +162,6 @@ fn render_steps(frame: &mut Frame, state: &SequencerState, area: Rect) {
         let is_selected = state.selected_step == i;
 
         // Determine display note: pending preview overrides for selected step.
-        let display_note: &str;
         let pending_in_this_step = match state.pending_edit {
             PendingEdit::Note { step: s, midi_note } if s == i => Some(midi_note),
             _ => None,
@@ -184,14 +183,11 @@ fn render_steps(frame: &mut Frame, state: &SequencerState, area: Rect) {
             Style::default()
         };
 
-        let note_str: String;
-        if let Some(pn) = pending_in_this_step {
-            display_note = note_name(pn);
-            note_str = format!("{:<4}", display_note);
+        let note_str = if let Some(pn) = pending_in_this_step {
+            format!("{:<4}", note_name(pn))
         } else {
-            display_note = note_name(step.midi_note);
-            note_str = format!("{:<4}", display_note);
-        }
+            format!("{:<4}", note_name(step.midi_note))
+        };
 
         note_spans.push(Span::styled(note_str, note_style));
 
