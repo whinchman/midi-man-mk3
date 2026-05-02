@@ -1,7 +1,7 @@
 # Task: Music Theory Tables
 
 - **Type**: coder
-- **Status**: pending
+- **Status**: done
 - **Repo**: midi-man-mk3
 - **Parallel Group**: 1
 - **Feature Branch**: feature/engine-phase1
@@ -63,3 +63,20 @@ Note naming: use sharp notation for black keys (C#, D#, F#, G#, A#). Octave numb
 
 ## Notes
 
+Implementation complete on branch `feat/music-theory-tables` (worktree at `.workflow/worktrees/music-theory-tables`).
+
+Files created:
+- `engine/src/music_theory.rs` — full implementation
+- `Cargo.toml` (workspace stub), `engine/Cargo.toml`, `engine/src/main.rs` — minimal scaffold to compile independently before step1 lands
+
+All 13 unit tests pass (`cargo test -p engine`):
+- All 7 mode interval rows sum to 12
+- C Major notes_in_key returns [60,62,64,65,67,69,71]
+- note_name boundary values (0 = "C-1", 60 = "C4", 127 = "G9")
+- next_note wraps up from B4 (71) to C5 (72)
+- next_note wraps down from C4 (60) to B3 (59)
+- next_note clamps at MIDI 0 and 127
+- D Dorian and A NaturalMinor scale verification
+- Heap-free type-level sanity check
+
+No heap allocations — all return types are `[u8; 7]`, `u8`, or `&'static str` backed by a 128-entry static array.
