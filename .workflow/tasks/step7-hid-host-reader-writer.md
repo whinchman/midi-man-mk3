@@ -1,7 +1,7 @@
 # Task: HID Host Reader/Writer (Engine)
 
 - **Type**: coder
-- **Status**: pending
+- **Status**: done
 - **Repo**: midi-man-mk3
 - **Parallel Group**: 5
 - **Feature Branch**: feature/engine-phase1
@@ -116,4 +116,20 @@ HID connection is optional: the engine is fully functional via keyboard alone (S
 `hidapi` crate 2.x (wraps libhidapi) is already declared as an engine dependency (added in Step 1).
 
 ## Notes
+
+### Implementation Summary (branch: hid-host-reader-writer)
+
+- **Worktree**: `.workflow/worktrees/hid-host` on branch `hid-host-reader-writer` (based on `engine-phase1/input-command-abstraction` which includes `input.rs`)
+- **Files changed**: `engine/src/hid.rs` only
+- **New functions**:
+  - `translate_in_report(report, active_overlay) -> Vec<InputCommand>` — pure, no hw-io dependency
+  - `compute_led_bytes(steps_enabled) -> [u8; 2]` — pure, no hw-io dependency
+  - `run_hid(cmd_tx, state, ui_notify)` — gated under `#[cfg(feature = "hw-io")]`
+- **Test results**: 182 passed, 0 failed (164 baseline + 18 new)
+- **Notable decisions**:
+  - Encoder deltas always emit `NoteDelta` (not `ParamValueDelta`); overlay-aware routing documented as a future improvement per task spec
+  - `tempo_delta`, `pause` (bit 10), and `stop/start` (bit 11) are applied as direct state writes under write lock in `run_hid`; `stop/start` emits no `InputCommand`
+  - Param button bit 11 (stop/start) resets `playhead = 0` and clears `paused` on stop
+  - Loop button (bit 8) emits `ParamSelect(4) + ParamValueDelta(1)` as a cycle increment; full 3-state machine deferred to state.rs future work
+  - `SequencerState` and `Arc/RwLock` imports are gated under `#[cfg(feature = "hw-io")]` to avoid unused-import warnings in test builds
 
