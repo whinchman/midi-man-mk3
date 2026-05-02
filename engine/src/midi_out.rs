@@ -47,11 +47,16 @@ impl MidiSender for MidirSender {
     }
 }
 
-/// Open the first available ALSA MIDI output port and return a boxed sender.
+/// Open an ALSA MIDI output port.
 ///
-/// Returns `None` if no ports are available or if opening the port fails.
+/// When `port_name` is `Some(filter)`, searches for a port whose name contains
+/// `filter` (case-insensitive substring match).  If no matching port is found,
+/// logs a warning and falls back to the first available port.  When `port_name`
+/// is `None`, opens the first available port.
+///
+/// Returns `None` if no ports are available or if opening the chosen port fails.
 #[cfg(feature = "hw-io")]
-fn open_first_port() -> Option<Box<dyn MidiSender>> {
+fn open_port(port_name: Option<&str>) -> Option<Box<dyn MidiSender>> {
     let output = match midir::MidiOutput::new("midi-man-mk3") {
         Ok(o) => o,
         Err(e) => {
@@ -66,17 +71,40 @@ fn open_first_port() -> Option<Box<dyn MidiSender>> {
         return None;
     }
 
-    let port = &ports[0];
-    let port_name = output.port_name(port).unwrap_or_else(|_| "<unknown>".to_owned());
-    println!("[midi_out] opening port: {port_name}");
+    // Determine which port to open.
+    let chosen_idx = if let Some(filter) = port_name {
+        let filter_lower = filter.to_lowercase();
+        let found = ports.iter().enumerate().find(|(_, p)| {
+            output.port_name(p)
+                .unwrap_or_default()
+                .to_lowercase()
+                .contains(&filter_lower)
+        });
+        match found {
+            Some((idx, _)) => idx,
+            None => {
+                eprintln!(
+                    "[midi_out] no port matching '{}' found — falling back to first port",
+                    filter
+                );
+                0
+            }
+        }
+    } else {
+        0
+    };
+
+    let port = &ports[chosen_idx];
+    let chosen_name = output.port_name(port).unwrap_or_else(|_| "<unknown>".to_owned());
+    println!("[midi_out] opening port: {chosen_name}");
 
     match output.connect(port, "midi-man-mk3-out") {
         Ok(conn) => {
-            println!("[midi_out] connected to port: {port_name}");
+            println!("[midi_out] connected to port: {chosen_name}");
             Some(Box::new(MidirSender { conn: Arc::new(Mutex::new(conn)) }))
         }
         Err(e) => {
-            eprintln!("[midi_out] failed to connect to port '{port_name}': {e}");
+            eprintln!("[midi_out] failed to connect to port '{chosen_name}': {e}");
             None
         }
     }
@@ -128,15 +156,18 @@ pub fn dispatch(sender: &mut Box<dyn MidiSender>, event: MidiEvent) {
 
 /// Run the MIDI output thread using a real ALSA port.
 ///
-/// Opens the first available ALSA MIDI output port via `midir`, then loops
-/// dispatching `MidiEvent` values received on `rx`. If no ports are available,
-/// logs an error and returns without panicking. Exits when `rx` is
+/// When `port_name` is `Some(filter)`, searches for a port whose name contains
+/// `filter` (case-insensitive substring match); falls back to the first port if
+/// no match is found.  When `None`, opens the first available port.
+///
+/// Loops dispatching `MidiEvent` values received on `rx`. If no ports are
+/// available, logs an error and returns without panicking. Exits when `rx` is
 /// disconnected (sender dropped).
 ///
 /// Requires the `hw-io` feature (ALSA/midir).
 #[cfg(feature = "hw-io")]
-pub fn run_midi_out(rx: Receiver<MidiEvent>) {
-    let mut sender = match open_first_port() {
+pub fn run_midi_out(rx: Receiver<MidiEvent>, port_name: Option<String>) {
+    let mut sender = match open_port(port_name.as_deref()) {
         Some(s) => s,
         None => return,
     };
@@ -424,7 +455,7 @@ mod tests {
     /// Even if a port were available, dropping the sender before calling
     /// `run_midi_out` causes the receive loop to exit immediately.
     ///
-    /// Requires the hw-io feature because `run_midi_out` calls `open_first_port`
+    /// Requires the hw-io feature because `run_midi_out` calls `open_port`
     /// which uses `midir`. Without hw-io, the no-ports path is tested implicitly
     /// by `loop_exits_when_channel_closes` via `run_midi_out_with_sender`.
     #[cfg(feature = "hw-io")]
@@ -435,6 +466,6 @@ mod tests {
         // receive loop it exits immediately rather than blocking.
         drop(tx);
         // Must not panic regardless of whether ALSA ports are present.
-        run_midi_out(rx);
+        run_midi_out(rx, None);
     }
 }
