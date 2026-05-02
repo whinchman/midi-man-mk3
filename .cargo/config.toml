@@ -1,0 +1,6 @@
+[build]
+# Default build targets the host. The firmware crate must be built explicitly
+# with `-p firmware` after setting its own .cargo/config.toml target.
+
+[target.x86_64-unknown-linux-gnu]
+# No special linker needed for the engine on the host.

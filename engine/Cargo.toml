@@ -1,0 +1,15 @@
+[package]
+name = "engine"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "engine"
+path = "src/main.rs"
+
+[dependencies]
+midir = "0.11"
+hidapi = { version = "2.6", features = ["linux-static-hidraw"] }
+ratatui = "0.30"
+crossterm = "0.29"
+libc = "0.2"
