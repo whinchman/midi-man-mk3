@@ -109,17 +109,15 @@ fn add_nanos(ts: libc::timespec, nanos: u64) -> libc::timespec {
     }
 }
 
-/// Adds a signed nanosecond offset to a `timespec`, clamped so tv_nsec stays
-/// non-negative (we never schedule a wake time before the beat boundary).
+/// Adds a signed nanosecond offset to a `timespec`, clamped so the result
+/// never falls before the epoch (total nanoseconds are clamped to zero).
+/// Correctly carries borrows across the second boundary.
 fn add_nanos_signed(ts: libc::timespec, nanos: i64) -> libc::timespec {
-    let tv_nsec_i64 = ts.tv_nsec + nanos;
-    // Clamp to the beat boundary if swing would pull before it.
-    let tv_nsec_clamped = tv_nsec_i64.max(0);
-    let sec_delta = tv_nsec_clamped / 1_000_000_000;
-    let nsec_rem = tv_nsec_clamped % 1_000_000_000;
+    let total_ns: i64 = ts.tv_sec as i64 * 1_000_000_000 + ts.tv_nsec as i64 + nanos;
+    let total_ns = total_ns.max(0);
     libc::timespec {
-        tv_sec: ts.tv_sec + sec_delta as libc::time_t,
-        tv_nsec: nsec_rem as libc::c_long,
+        tv_sec: (total_ns / 1_000_000_000) as libc::time_t,
+        tv_nsec: (total_ns % 1_000_000_000) as libc::c_long,
     }
 }
 
@@ -291,6 +289,14 @@ mod tests {
         let ts = libc::timespec { tv_sec: 1, tv_nsec: 100_000_000 };
         let result = add_nanos_signed(ts, -200_000_000);
         assert!(result.tv_nsec >= 0, "tv_nsec must not be negative");
+    }
+
+    #[test]
+    fn add_nanos_signed_negative_crosses_second_boundary() {
+        let ts = libc::timespec { tv_sec: 5, tv_nsec: 10_000_000 }; // 5.010s
+        let result = add_nanos_signed(ts, -62_500_000); // subtract 62.5ms
+        assert_eq!(result.tv_sec, 4);
+        assert_eq!(result.tv_nsec, 947_500_000);
     }
 
     // --- playhead wraps after 32 ticks ---
