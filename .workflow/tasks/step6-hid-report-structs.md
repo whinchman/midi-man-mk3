@@ -2,6 +2,7 @@
 
 - **Type**: coder
 - **Status**: done
+- **Review Status**: approved
 - **Repo**: midi-man-mk3
 - **Parallel Group**: 1
 - **Feature Branch**: feature/engine-phase1
@@ -123,3 +124,58 @@ Implemented on branch `hid-report-structs` (worktree at `.workflow/worktrees/hid
 - `hid_vid_pid_constants` — VID=0x2E8A, PID=0x000A
 
 `cargo check -p firmware`: clean compile.
+
+### Code Review — 2026-05-02
+
+**Reviewer:** code-reviewer agent
+**Verdict:** APPROVE
+
+**Summary:** 0 critical, 0 warning, 1 info finding.
+
+#### Byte Layout Verification
+
+Field offsets computed by instrumented Rust program confirm exact match to the HID spec in Section 4:
+
+| Field | Spec bytes | Actual offset | Size |
+|---|---|---|---|
+| `report_id` | 0 | 0 | 1 |
+| `seq` | 1 | 1 | 1 |
+| `flags` | 2 | 2 | 1 |
+| `step_buttons` | 3–4 | 3 | 2 |
+| `step_enable_state` | 5–6 | 5 | 2 |
+| `param_buttons` | 7–8 | 7 | 2 |
+| `encoder_deltas` | 9–24 | 9 | 16 |
+| `tempo_delta` | 25 | 25 | 1 |
+| `param_knob_delta` | 26 | 26 | 1 |
+| `reserved` | 27–63 | 27 | 37 |
+
+`sizeof(InReport)` = 64. `sizeof(OutReport)` = 64. No padding inserted by compiler.
+
+`OutReport` fields verified: `report_id`@0, `seq_echo`@1, `led_state`@2, `reserved`@4.
+
+#### `repr(C)` Correctness
+
+`#[repr(C)]` is applied on both structs on both sides. All field types are primitive scalars or arrays of primitives with no internal padding risk. The layout is guaranteed stable across platforms.
+
+#### `from_bytes` / `to_bytes` Safety
+
+- `InReport::from_bytes` correctly indexes every field at its spec-defined offset. Signed bytes are cast via `as i8` (correct two's-complement reinterpretation). No unsafe code, no heap allocation.
+- `OutReport::to_bytes` correctly packs all four fields at spec offsets; `reserved` is copied from the struct field via `copy_from_slice`. Stack-only allocation.
+- Round-trip tests verify all fields survive encode/decode with non-zero values in every position.
+
+#### Firmware Struct Identity
+
+`firmware/src/report.rs` struct definitions are field-for-field, type-for-type, order-for-order identical to `engine/src/hid.rs`. The spec comment is present as required.
+
+#### VID/PID Constants
+
+`HID_VID = 0x2E8A`, `HID_PID = 0x000A` match the plan assumption (Raspberry Pi HID test device PID).
+
+#### Tests
+
+All 6 tests pass. Coverage hits every field of `InReport` with non-zero values (round-trip), zero-value construction, `OutReport` encode, size assertion, signature compile check, and constant values.
+
+#### [INFO] engine/src/hid.rs — No `OutReport::from_bytes` on firmware side
+
+`firmware/src/report.rs` defines `OutReport` as a struct but has no `from_bytes` method for deserializing the host-sent OUT report into the struct. This is not required by this task's acceptance criteria (Step 13 will add the firmware USB HID task). However, when Step 13 is implemented, a `from_bytes` counterpart should be added to `firmware/src/report.rs` to maintain symmetry and avoid unsafe pointer casts in the USB handler.
+No action needed now — flag for Step 13 implementer.
