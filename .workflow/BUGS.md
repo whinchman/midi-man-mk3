@@ -82,3 +82,43 @@ fn add_nanos_signed(ts: libc::timespec, nanos: i64) -> libc::timespec {
 Also update the existing test to assert the corrected `tv_sec` value alongside `tv_nsec`.
 
 ---
+
+## BUG-003 — [WARNING] `.cargo/config.toml` hardcodes `/tmp` paths that break builds on clean systems
+
+- **File:** `.cargo/config.toml`, lines 11 and 17
+- **Branch:** `engine-phase1/midi-output`
+- **Discovered:** 2026-05-02 by code-reviewer agent (step5-midi-output review)
+- **Severity:** warning
+
+### Description
+
+`PKG_CONFIG_PATH = "/tmp/alsa-pkg"` and `rustflags = ["-L", "/tmp/alsa-lib"]` are unconditional entries in the workspace `.cargo/config.toml`. These are host-specific workarounds for a system missing `alsa-lib-devel` that were committed to source. On any other system (CI, another developer's machine, a container with `alsa-lib-devel` properly installed):
+
+- `/tmp/alsa-pkg` will not exist — `pkg-config` will use an empty extra search path (harmless but noisy).
+- `/tmp/alsa-lib` will not exist — the linker receives a spurious `-L /tmp/alsa-lib` flag. If the directory does not exist the linker ignores it; if it exists and contains a stale symlink the build may silently link the wrong `libasound.so`.
+- Any CI system that installs `alsa-lib-devel` normally will have `alsa.pc` in its default `PKG_CONFIG_PATH` already; the `/tmp/alsa-pkg` override is benign only if the override path is missing, but it creates confusion.
+
+The real risk is a developer on a system where `/tmp/alsa-lib` happens to contain something gets a build that links against an unexpected library version.
+
+### Reproduction
+
+1. Checkout `engine-phase1/midi-output` on a system with `alsa-lib-devel` installed.
+2. Run `cargo build -p engine --verbose`.
+3. Observe `-L /tmp/alsa-lib` in the linker invocation regardless of whether that path is meaningful on the current host.
+
+### Suggested Fix
+
+Remove the `[env]` `PKG_CONFIG_PATH` and `[target.x86_64-unknown-linux-gnu]` `rustflags` entries from `.cargo/config.toml`. Document the workaround in a comment in `engine/src/midi_out.rs` or in build notes. Developers needing the workaround can set variables in their shell or in a gitignored local override file:
+
+```toml
+# .cargo/config.local.toml  (gitignored)
+[env]
+PKG_CONFIG_PATH = "/tmp/alsa-pkg"
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-L", "/tmp/alsa-lib"]
+```
+
+Add `.cargo/config.local.toml` to `.gitignore` and document this pattern in the build notes.
+
+---
