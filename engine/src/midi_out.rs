@@ -7,9 +7,11 @@
 //! bytes over ALSA via `midir`. Note-off scheduling is owned here.
 
 use std::sync::mpsc::Receiver;
-use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
+
+#[cfg(feature = "hw-io")]
+use std::sync::{Arc, Mutex};
 
 use crate::state::MidiEvent;
 
@@ -26,10 +28,12 @@ pub trait MidiSender: Send + 'static {
 
 /// Production implementation wrapping `midir::MidiOutputConnection` behind an
 /// `Arc<Mutex<…>>` so spawned note-off threads can share it.
+#[cfg(feature = "hw-io")]
 struct MidirSender {
     conn: Arc<Mutex<midir::MidiOutputConnection>>,
 }
 
+#[cfg(feature = "hw-io")]
 impl MidiSender for MidirSender {
     fn send_bytes(&mut self, data: &[u8]) {
         let mut guard = self.conn.lock().expect("MidiOutputConnection mutex poisoned");
@@ -46,6 +50,7 @@ impl MidiSender for MidirSender {
 /// Open the first available ALSA MIDI output port and return a boxed sender.
 ///
 /// Returns `None` if no ports are available or if opening the port fails.
+#[cfg(feature = "hw-io")]
 fn open_first_port() -> Option<Box<dyn MidiSender>> {
     let output = match midir::MidiOutput::new("midi-man-mk3") {
         Ok(o) => o,
@@ -127,6 +132,9 @@ pub fn dispatch(sender: &mut Box<dyn MidiSender>, event: MidiEvent) {
 /// dispatching `MidiEvent` values received on `rx`. If no ports are available,
 /// logs an error and returns without panicking. Exits when `rx` is
 /// disconnected (sender dropped).
+///
+/// Requires the `hw-io` feature (ALSA/midir).
+#[cfg(feature = "hw-io")]
 pub fn run_midi_out(rx: Receiver<MidiEvent>) {
     let mut sender = match open_first_port() {
         Some(s) => s,
@@ -415,6 +423,11 @@ mod tests {
     /// already closed and (on this CI host) no ALSA ports are available.
     /// Even if a port were available, dropping the sender before calling
     /// `run_midi_out` causes the receive loop to exit immediately.
+    ///
+    /// Requires the hw-io feature because `run_midi_out` calls `open_first_port`
+    /// which uses `midir`. Without hw-io, the no-ports path is tested implicitly
+    /// by `loop_exits_when_channel_closes` via `run_midi_out_with_sender`.
+    #[cfg(feature = "hw-io")]
     #[test]
     fn run_midi_out_no_ports_does_not_panic() {
         let (tx, rx) = std::sync::mpsc::channel::<MidiEvent>();
