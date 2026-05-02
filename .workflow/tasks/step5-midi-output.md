@@ -1,7 +1,7 @@
 # Task: MIDI Output
 
 - **Type**: coder
-- **Status**: in-progress
+- **Status**: done
 - **Repo**: midi-man-mk3
 - **Parallel Group**: 3
 - **Feature Branch**: feature/engine-phase1
@@ -76,3 +76,31 @@ Build-time note: `midir` with the ALSA backend requires `libasound2-dev` install
 
 ## Notes
 
+### Implementation Summary
+
+**Branch:** `engine-phase1/midi-output` (worktree at `.workflow/worktrees/midi-output`)
+
+**What was implemented:**
+
+- `engine/src/midi_out.rs` — `pub fn run_midi_out(rx: Receiver<MidiEvent>)` and `pub fn run_midi_out_with_sender(rx, sender)` (testable entry point).
+- `MidiSender` trait abstracts the send path; production impl wraps `midir::MidiOutputConnection` behind `Arc<Mutex<…>>` so spawned note-off threads can share it without Clone.
+- `dispatch()` handles all five `MidiEvent` variants: NoteOn (immediate send + spawned note-off thread), NoteOff, Start (0xFA), Stop (0xFC), Continue (0xFB). All messages are `[u8; N]` stack arrays — no heap on send path.
+- On no ALSA ports: logs error and returns (no panic).
+- Also brought in `state.rs` and `sequencer.rs` from `sequencer-state-and-engine` branch; updated `lib.rs` to declare all modules.
+- `.cargo/config.toml` updated with `[env] PKG_CONFIG_PATH = "/tmp/alsa-pkg"` and `rustflags = ["-L", "/tmp/alsa-lib"]` workaround (alsa-lib-devel not installed on this host; symlink `/tmp/alsa-lib/libasound.so -> /usr/lib64/libasound.so.2`).
+
+**Test results:** 80 tests pass (`cargo test -p engine`); clippy clean; release build succeeds.
+
+**Acceptance criteria checklist:**
+- [x] `run_midi_out(rx: Receiver<MidiEvent>)` implemented
+- [x] Opens first ALSA port, logs name
+- [x] No ports → log error, return (no panic)
+- [x] NoteOn → `[0x90|ch, note, vel]` immediately + spawned note-off thread
+- [x] NoteOff → `[0x80|ch, note, 0]`
+- [x] Start → `[0xFA]`
+- [x] Stop → `[0xFC]`
+- [x] Continue → `[0xFB]`
+- [x] All messages on stack — no Vec/Box on send path
+- [x] Thread exits when rx disconnected
+- [x] Unit tests via MockSender trait double (11 tests)
+- [x] `cargo test -p engine` passes
