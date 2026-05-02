@@ -1,7 +1,7 @@
 # Task: Clock Thread
 
 - **Type**: coder
-- **Status**: pending
+- **Status**: in-progress
 - **Repo**: midi-man-mk3
 - **Parallel Group**: 3
 - **Feature Branch**: feature/engine-phase1

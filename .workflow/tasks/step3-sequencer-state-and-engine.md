@@ -131,3 +131,89 @@ Note-off events are owned by `midi_out.rs` (Step 5). `tick()` returns a `NoteOn`
 - `tick()` returns `NoteOn` with `duration_nanos: 0` as placeholder; the clock thread overwrites before forwarding.
 
 **Test results (`cargo test -p engine`):** 15 passed, 0 failed, clippy clean.
+
+---
+
+### QA Augmentation (2026-05-02)
+
+**Agent**: qa subagent
+
+**9 new tests added** (`engine/src/state.rs`) covering gaps identified in the post-implementation review:
+
+| New test | Scenario covered |
+|---|---|
+| `tick_all_16_steps_enabled_visits_every_step` | Playhead visits all steps 0–15 exactly once and wraps to 0 |
+| `tick_loop_full_range_loop_in0_loop_out15` | Full-range loop behaves like non-loop mode |
+| `tick_loop_single_step_loop_in7_loop_out7` | Single-step loop stays pinned at step 7 |
+| `tick_loop_inverted_loop_in3_loop_out2` | Inverted loop (loop_in > loop_out) documents current wrap behavior |
+| `apply_encoder_delta_zero_is_noop` | delta=0 leaves note unchanged |
+| `apply_encoder_delta_large_positive_wraps_octave` | delta=+7 in C Major wraps one octave to C5=72 |
+| `apply_encoder_delta_large_negative_clamps_at_zero` | Large negative delta clamps at MIDI 0, no underflow |
+| `toggle_step_double_toggle_returns_to_original` | Two toggles restore original enabled state |
+| `default_state_all_fields_match_spec` | Every field of SequencerState::default() checked against spec |
+
+**Final test results:** 24 passed, 0 failed.
+
+**Note on inverted loop**: `loop_in=3, loop_out=2` causes the playhead to immediately wrap on every tick (next=4 > loop_out=2), pinning it at loop_in=3. This is undocumented behavior that should be guarded or documented in Step 9 when the command processor is wired up.
+
+---
+
+### Code Review (2026-05-02)
+
+**Reviewer**: code-reviewer agent
+**Files reviewed**: `engine/src/state.rs`, `engine/src/sequencer.rs`, `engine/src/music_theory.rs`, `engine/src/lib.rs`, `engine/Cargo.toml`, `Cargo.toml`
+
+#### Checklist Verification
+
+- [x] `SequencerState` has all required fields including `active_overlay: Option<OverlayMode>`
+- [x] `MidiEvent::NoteOn` includes `duration_nanos: u64`
+- [x] `tick()` correctly advances playhead and handles loop wrap at `loop_out+1` back to `loop_in`
+- [x] `tick()` returns `None` for disabled steps
+- [x] `apply_encoder_delta` calls `music_theory::next_note` correctly
+- [x] No heap allocation in any hot-path method (`[StepData; 16]` stack array, all methods use `&mut self` with no Vec/Box/String)
+- [x] `OverlayMode` defined as a local stub (`Regular`, `Shift`) with comment that Step 6b replaces it
+- [x] `Default` impl is correct (120 BPM, C Major, Sixteenth, all steps disabled, not playing, paused=false)
+
+#### Findings
+
+##### [INFO] engine/src/state.rs:158-188 — tick() loop-entry behavior when playhead is outside loop boundaries
+
+When `loop_active=true` and the playhead starts outside `[loop_in, loop_out]`, `tick()` will advance through steps between playhead and `loop_out` before entering the loop. For example, with `loop_in=5, loop_out=10, playhead=0`, the sequencer plays steps 1–10 before the loop kicks in at step 5. This is not explicitly specified in the task and may be intentional, but it could surprise callers who activate loop mode mid-sequence. No fix required for this step — document when wiring the command processor in Step 9.
+
+##### [INFO] engine/src/state.rs:164 — `next` computed as u8 addition without overflow concern
+
+`let next = self.playhead + 1;` — since `playhead` is bounded 0–15 and `tick()` returns early if not playing, `next` reaches at most 16, well within `u8` range. No issue.
+
+##### [INFO] engine/Cargo.toml — no `[lib]` section but `src/lib.rs` exists
+
+Cargo's convention-based autodiscovery finds `src/lib.rs` and builds it as the library crate root alongside the `[[bin]]` target in `main.rs`. This is valid and intentional. No issue.
+
+##### [INFO] engine/src/state.rs — `tick_note_on_has_correct_fields` test is slightly convoluted
+
+The test calls `s.tick()` once (advancing to step 1), then manually resets `s.playhead = 0` before calling `tick()` again to get the event under test. The logic is correct but could be simplified to start with `playhead=0` and tick once directly. Minor style note only.
+
+#### Summary
+
+**Total findings:** 0 critical, 0 warning, 4 info
+
+All acceptance criteria are met. Logic is correct, heap-free, well-tested (15 tests, all edge cases covered), and the `OverlayMode` stub pattern is properly implemented. The loop-entry behavior when playhead is outside the loop region is the only potentially surprising design point, but it is not specified and does not constitute a bug at this stage.
+
+**Verdict: APPROVE**
+
+---
+
+## PR Feedback
+
+PR: https://github.com/whinchman/midi-man-mk3/pull/4
+
+### Comments Requiring Action
+
+_(none)_
+
+### CI Failures
+
+_(none — no CI checks configured on this repository)_
+
+### Questions / Acknowledged
+
+_(none)_
