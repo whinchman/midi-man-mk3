@@ -1,7 +1,7 @@
 # Task: Workspace Scaffold and Build Proof
 
 - **Type**: coder
-- **Status**: pending
+- **Status**: done
 - **Repo**: midi-man-mk3
 - **Parallel Group**: 1
 - **Feature Branch**: feature/engine-phase1
@@ -66,3 +66,21 @@ The firmware crate must NOT be built by default when running `cargo build` at th
 
 ## Notes
 
+Implemented on branch `ws/workspace-scaffold` (worktree at `.workflow/worktrees/workspace-scaffold`).
+
+All acceptance criteria met:
+- Workspace root `Cargo.toml`: `members = ["engine", "firmware"]`, `default-members = ["engine"]`, `resolver = "2"`.
+- `engine/Cargo.toml`: midir 0.11, hidapi 2.6, ratatui 0.30, crossterm 0.29, libc 0.2.
+- `firmware/Cargo.toml`: embassy-executor 0.10, embassy-rp 0.10 (rp2040 + time-driver + defmt), embassy-usb 0.6, embassy-time 0.5, embedded-hal 1.0, defmt, defmt-rtt, panic-probe, cortex-m, cortex-m-rt. flip-link linker configured in firmware/.cargo/config.toml. mcp23017 commented in with note.
+- `.cargo/config.toml` at workspace root: host build defaults.
+- `firmware/.cargo/config.toml`: `target = "thumbv6m-none-eabi"`, linker = `flip-link`, rustflags for link.x and defmt.x.
+- `firmware/memory.x`: RP2040 layout — 2 MB flash at 0x10000000, 264 KB SRAM at 0x20000000, Boot2 section.
+- `firmware/build.rs`: copies memory.x to OUT_DIR and emits rustc-link-search.
+- `engine/src/main.rs`: trivial `fn main() {}`.
+- `firmware/src/main.rs`: minimal Embassy entry with USBCTRL_IRQ bind and empty loop.
+
+Build results:
+- `cargo build -p engine` — SUCCESS (requires `PKG_CONFIG_PATH=/tmp/alsa-pkg` workaround on this host because `alsa-lib-devel` is not installed; `libasound.so.2` is present but `alsa.pc` is missing).
+- `cargo build -p firmware --target thumbv6m-none-eabi` — SUCCESS.
+
+**Note for reviewer:** Install `alsa-lib-devel` (`sudo dnf install alsa-lib-devel`) on this host to remove the `PKG_CONFIG_PATH` workaround requirement. The scaffold itself is correct — this is a host environment gap, not a code issue.
