@@ -1,0 +1,181 @@
+/// Key represents the 12 chromatic pitch classes.
+/// C4 = MIDI note 60.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Key {
+    C,
+    Cs,
+    D,
+    Ds,
+    E,
+    F,
+    Fs,
+    G,
+    Gs,
+    A,
+    As,
+    B,
+}
+
+/// Mode represents the 7 diatonic modes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Mode {
+    Major,
+    NaturalMinor,
+    Dorian,
+    Phrygian,
+    Lydian,
+    Mixolydian,
+    Locrian,
+}
+
+/// Semitone intervals between successive scale degrees for each of the 7 modes.
+/// Each row sums to 12 (one octave).
+/// Order: [Major, NaturalMinor, Dorian, Phrygian, Lydian, Mixolydian, Locrian]
+pub const SCALE_INTERVALS: [[u8; 7]; 7] = [
+    [2, 2, 1, 2, 2, 2, 1], // Major
+    [2, 1, 2, 2, 1, 2, 2], // NaturalMinor
+    [2, 1, 2, 2, 2, 1, 2], // Dorian
+    [1, 2, 2, 2, 1, 2, 2], // Phrygian
+    [2, 2, 2, 1, 2, 2, 1], // Lydian
+    [2, 2, 1, 2, 2, 1, 2], // Mixolydian
+    [1, 2, 2, 1, 2, 2, 2], // Locrian
+];
+
+/// MIDI root note for each Key, anchored at octave 4 (C4 = 60).
+const KEY_ROOT: [u8; 12] = [
+    60, // C
+    61, // C#
+    62, // D
+    63, // D#
+    64, // E
+    65, // F
+    66, // F#
+    67, // G
+    68, // G#
+    69, // A
+    70, // A#
+    71, // B
+];
+
+fn key_index(key: Key) -> usize {
+    match key {
+        Key::C => 0,
+        Key::Cs => 1,
+        Key::D => 2,
+        Key::Ds => 3,
+        Key::E => 4,
+        Key::F => 5,
+        Key::Fs => 6,
+        Key::G => 7,
+        Key::Gs => 8,
+        Key::A => 9,
+        Key::As => 10,
+        Key::B => 11,
+    }
+}
+
+fn mode_index(mode: Mode) -> usize {
+    match mode {
+        Mode::Major => 0,
+        Mode::NaturalMinor => 1,
+        Mode::Dorian => 2,
+        Mode::Phrygian => 3,
+        Mode::Lydian => 4,
+        Mode::Mixolydian => 5,
+        Mode::Locrian => 6,
+    }
+}
+
+/// Returns the 7 MIDI note numbers for one octave of the given key and mode,
+/// starting at the key root in octave 4 (C4 = 60).
+pub fn notes_in_key(key: Key, mode: Mode) -> [u8; 7] {
+    let root = KEY_ROOT[key_index(key)];
+    let intervals = SCALE_INTERVALS[mode_index(mode)];
+    let mut notes = [0u8; 7];
+    notes[0] = root;
+    for i in 1..7 {
+        notes[i] = notes[i - 1].saturating_add(intervals[i - 1]);
+    }
+    notes
+}
+
+/// Returns the note name string for a MIDI note number (0–127).
+/// Uses sharp notation for accidentals (e.g. "C#4", "A#5").
+/// C4 = MIDI 60, C-1 = MIDI 0.
+pub fn note_name(midi_note: u8) -> &'static str {
+    NOTE_NAMES[midi_note as usize]
+}
+
+/// All 128 MIDI note name strings as static string slices.
+static NOTE_NAMES: [&str; 128] = [
+    // Octave -1: MIDI 0–11
+    "C-1", "C#-1", "D-1", "D#-1", "E-1", "F-1", "F#-1", "G-1", "G#-1", "A-1", "A#-1", "B-1",
+    // Octave 0: MIDI 12–23
+    "C0", "C#0", "D0", "D#0", "E0", "F0", "F#0", "G0", "G#0", "A0", "A#0", "B0",
+    // Octave 1: MIDI 24–35
+    "C1", "C#1", "D1", "D#1", "E1", "F1", "F#1", "G1", "G#1", "A1", "A#1", "B1",
+    // Octave 2: MIDI 36–47
+    "C2", "C#2", "D2", "D#2", "E2", "F2", "F#2", "G2", "G#2", "A2", "A#2", "B2",
+    // Octave 3: MIDI 48–59
+    "C3", "C#3", "D3", "D#3", "E3", "F3", "F#3", "G3", "G#3", "A3", "A#3", "B3",
+    // Octave 4: MIDI 60–71
+    "C4", "C#4", "D4", "D#4", "E4", "F4", "F#4", "G4", "G#4", "A4", "A#4", "B4",
+    // Octave 5: MIDI 72–83
+    "C5", "C#5", "D5", "D#5", "E5", "F5", "F#5", "G5", "G#5", "A5", "A#5", "B5",
+    // Octave 6: MIDI 84–95
+    "C6", "C#6", "D6", "D#6", "E6", "F6", "F#6", "G6", "G#6", "A6", "A#6", "B6",
+    // Octave 7: MIDI 96–107
+    "C7", "C#7", "D7", "D#7", "E7", "F7", "F#7", "G7", "G#7", "A7", "A#7", "B7",
+    // Octave 8: MIDI 108–119
+    "C8", "C#8", "D8", "D#8", "E8", "F8", "F#8", "G8", "G#8", "A8", "A#8", "B8",
+    // Octave 9: MIDI 120–127 (partial)
+    "C9", "C#9", "D9", "D#9", "E9", "F9", "F#9", "G9",
+];
+
+/// Advances or retreats within the 7-note scale, wrapping across octaves.
+///
+/// Finds the closest scale degree to `current` in the given key/mode, then
+/// steps `direction` degrees (positive = up, negative = down), wrapping
+/// octaves as needed. The result is clamped to MIDI 0–127.
+pub fn next_note(current: u8, key: Key, mode: Mode, direction: i8) -> u8 {
+    let scale = notes_in_key(key, mode);
+    let intervals = SCALE_INTERVALS[mode_index(mode)];
+    let root = scale[0] as i32;
+
+    let current_i32 = current as i32;
+    let semitones_from_root = current_i32 - root;
+    let octave_offset = if semitones_from_root >= 0 {
+        semitones_from_root / 12
+    } else {
+        (semitones_from_root - 11) / 12
+    };
+    let within_octave = semitones_from_root - octave_offset * 12;
+
+    let mut cum: [i32; 7] = [0; 7];
+    cum[0] = 0;
+    for i in 1..7 {
+        cum[i] = cum[i - 1] + intervals[i - 1] as i32;
+    }
+
+    let mut best_degree: usize = 0;
+    let mut best_dist = i32::MAX;
+    for (i, &c) in cum.iter().enumerate() {
+        let dist = (within_octave - c).abs();
+        if dist < best_dist {
+            best_dist = dist;
+            best_degree = i;
+        }
+    }
+
+    let total_degree = octave_offset * 7 + best_degree as i32 + direction as i32;
+
+    let target_octave = if total_degree >= 0 {
+        total_degree / 7
+    } else {
+        (total_degree - 6) / 7
+    };
+    let target_degree_in_oct = (total_degree - target_octave * 7) as usize;
+
+    let midi = root + target_octave * 12 + cum[target_degree_in_oct];
+    midi.clamp(0, 127) as u8
+}
