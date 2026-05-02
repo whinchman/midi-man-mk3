@@ -1,7 +1,7 @@
-// Build note: midir requires alsa-lib-devel (libasound2-dev) installed on the
-// build host. On this host the pkg-config metadata is available via:
-//   PKG_CONFIG_PATH=/tmp/alsa-pkg cargo build -p engine
-// The .cargo/config.toml [env] section sets this automatically.
+// Build requirement: midir requires alsa-lib-devel (or libasound2-dev on Debian).
+// On Fedora: sudo dnf install alsa-lib-devel
+// On Ubuntu: sudo apt install libasound2-dev
+// For development without ALSA: build without the hw-io feature flag.
 
 //! MIDI output thread — receives `MidiEvent` values and dispatches raw MIDI
 //! bytes over ALSA via `midir`. Note-off scheduling is owned here.
@@ -313,5 +313,115 @@ mod tests {
 
         let bytes = log.lock().expect("lock").clone();
         assert_eq!(&bytes[..], &[0xFA, 0xFC], "Start then Stop through channel");
+    }
+
+    // --- NoteOff timing boundary ---
+
+    /// Verify that the spawned note-off thread does NOT fire before `duration_nanos`
+    /// has elapsed. We use a 50 ms duration and sample the log after only 10 ms —
+    /// only the NoteOn bytes should be present. After 100 ms the NoteOff bytes
+    /// must also be present.
+    #[test]
+    fn note_off_not_sent_before_duration_elapses() {
+        let (mock, log) = MockSender::new();
+        let mut sender = boxed(mock);
+        let duration_nanos: u64 = 50_000_000; // 50 ms
+        dispatch(
+            &mut sender,
+            MidiEvent::NoteOn { channel: 0, note: 48, velocity: 64, duration_nanos },
+        );
+        // Sample before duration: only NoteOn (3 bytes).
+        thread::sleep(Duration::from_millis(10));
+        {
+            let bytes = log.lock().expect("lock").clone();
+            assert_eq!(
+                bytes.len(),
+                3,
+                "NoteOff must not be sent before duration_nanos ({duration_nanos} ns) elapses"
+            );
+        }
+        // Sample after duration: NoteOff (3 more bytes) must now be present.
+        thread::sleep(Duration::from_millis(100));
+        let bytes = log.lock().expect("lock").clone();
+        assert_eq!(
+            bytes.len(),
+            6,
+            "NoteOff must be sent after duration_nanos ({duration_nanos} ns) elapses"
+        );
+        assert_eq!(&bytes[3..6], &[0x80, 48, 0], "NoteOff bytes incorrect after duration");
+    }
+
+    // --- Multiple concurrent NoteOn events ---
+
+    /// Send three NoteOn events with distinct durations (10 ms, 30 ms, 60 ms)
+    /// concurrently. After all durations have elapsed every NoteOff must be
+    /// present and must appear in deadline order (shortest duration first).
+    #[test]
+    fn concurrent_note_ons_all_note_offs_arrive_in_deadline_order() {
+        let (mock, log) = MockSender::new();
+        let mut sender = boxed(mock);
+
+        // Dispatch three NoteOn events back-to-back before any duration elapses.
+        dispatch(
+            &mut sender,
+            MidiEvent::NoteOn { channel: 0, note: 60, velocity: 100, duration_nanos: 10_000_000 }, // 10 ms
+        );
+        dispatch(
+            &mut sender,
+            MidiEvent::NoteOn { channel: 0, note: 62, velocity: 100, duration_nanos: 30_000_000 }, // 30 ms
+        );
+        dispatch(
+            &mut sender,
+            MidiEvent::NoteOn { channel: 0, note: 64, velocity: 100, duration_nanos: 60_000_000 }, // 60 ms
+        );
+
+        // All three NoteOn bytes should be present immediately (9 bytes total).
+        {
+            let bytes = log.lock().expect("lock").clone();
+            assert_eq!(bytes.len(), 9, "all three NoteOn messages should be sent immediately");
+        }
+
+        // Wait for all note-off threads to complete (longest = 60 ms + margin).
+        thread::sleep(Duration::from_millis(150));
+
+        let bytes = log.lock().expect("lock").clone();
+        // 3 NoteOn (9 bytes) + 3 NoteOff (9 bytes) = 18 bytes total.
+        assert_eq!(bytes.len(), 18, "all three NoteOff messages should have arrived");
+
+        // Collect NoteOff bytes (positions 9, 12, 15).
+        let off0 = &bytes[9..12];
+        let off1 = &bytes[12..15];
+        let off2 = &bytes[15..18];
+
+        // NoteOff status byte is 0x80 for channel 0.
+        assert_eq!(off0[0], 0x80, "first NoteOff status byte");
+        assert_eq!(off1[0], 0x80, "second NoteOff status byte");
+        assert_eq!(off2[0], 0x80, "third NoteOff status byte");
+
+        // Notes must arrive in ascending deadline order: 60, 62, 64.
+        assert_eq!(off0[1], 60, "first NoteOff (shortest duration) note");
+        assert_eq!(off1[1], 62, "second NoteOff note");
+        assert_eq!(off2[1], 64, "third NoteOff (longest duration) note");
+
+        // Velocity byte must be 0 for all NoteOff messages.
+        assert_eq!(off0[2], 0);
+        assert_eq!(off1[2], 0);
+        assert_eq!(off2[2], 0);
+    }
+
+    // --- run_midi_out with no ALSA ports ---
+
+    /// Verify that `run_midi_out` returns without panicking when the channel is
+    /// already closed and (on this CI host) no ALSA ports are available.
+    /// Even if a port were available, dropping the sender before calling
+    /// `run_midi_out` causes the receive loop to exit immediately.
+    #[test]
+    fn run_midi_out_no_ports_does_not_panic() {
+        let (tx, rx) = std::sync::mpsc::channel::<MidiEvent>();
+        // Drop the sender so that if the function opens a port and enters the
+        // receive loop it exits immediately rather than blocking.
+        drop(tx);
+        // Must not panic regardless of whether ALSA ports are present.
+        run_midi_out(rx);
     }
 }
