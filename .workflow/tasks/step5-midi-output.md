@@ -20,7 +20,8 @@ Implement `engine/src/midi_out.rs`. This thread receives `MidiEvent` values from
 - [ ] Opens the first available ALSA MIDI output port via `midir::MidiOutput::new()` and `connect()`; logs the port name to stdout at startup.
 - [ ] If no MIDI ports are available, logs an error and returns (does not panic).
 - [ ] `MidiEvent::NoteOn { channel, note, velocity }` encoded as `[0x90 | channel, note, velocity]` and sent via `connection.send()`.
-- [ ] `MidiEvent::NoteOff { channel, note }` encoded as `[0x80 | channel, note, 0]` and sent.
+- [ ] `MidiEvent::NoteOn` handling: send note-on bytes immediately, then spawn a short-lived `std::thread` that sleeps `duration_nanos` (via `std::thread::sleep(Duration::from_nanos(duration_nanos))`) then sends `[0x80 | channel, note, 0]` (NoteOff) on a clone of the `MidiOutputConnection`. The spawned thread is fire-and-forget; no join handle needed.
+- [ ] `MidiEvent::NoteOff { channel, note }` encoded as `[0x80 | channel, note, 0]` and sent (kept for direct use if ever needed).
 - [ ] `MidiEvent::Start` encoded as `[0xFA]` and sent (single-byte message).
 - [ ] `MidiEvent::Stop` encoded as `[0xFC]` and sent.
 - [ ] `MidiEvent::Continue` encoded as `[0xFB]` and sent.
@@ -43,7 +44,7 @@ pub fn run_midi_out(rx: Receiver<MidiEvent>);
 `MidiEvent` enum (from Step 3, `engine/src/state.rs`):
 ```rust
 pub enum MidiEvent {
-    NoteOn { channel: u8, note: u8, velocity: u8 },
+    NoteOn { channel: u8, note: u8, velocity: u8, duration_nanos: u64 },
     NoteOff { channel: u8, note: u8 },
     Start,
     Stop,
@@ -68,6 +69,8 @@ Channel is fixed to 0 for MVP (from plan Section 5).
 From plan Section 5: `midir` 0.10 with ALSA backend. `MidiOutputConnection::send(&[u8])` copies into a kernel buffer — the slice lives on the stack, no dynamic allocation.
 
 The MIDI output thread is decoupled from the clock thread via a `SyncSender<MidiEvent>` / `Receiver<MidiEvent>` pair. The clock thread produces events; this thread consumes them. Thread join ordering in `main.rs` is handled in Step 9.
+
+Note-off ownership: `midi_out.rs` owns note-off scheduling. On `NoteOn`, it sends the note-on immediately, then spawns a short-lived thread that sleeps `duration_nanos` and sends NoteOff. `midir::MidiOutputConnection` is `Send` — clone it for the spawned thread. This design supports future per-note duration (e.g. gate length) without changes to the clock or sequencer.
 
 Build-time note: `midir` with the ALSA backend requires `libasound2-dev` installed on the build host. This is a known risk from the plan (Section 10). Document this requirement in a comment at the top of `midi_out.rs`.
 

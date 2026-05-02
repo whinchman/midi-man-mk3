@@ -125,3 +125,27 @@ The workspace-root `[profile.release]` sets `debug = 2` (full debug info). Becau
 ### Summary
 
 The scaffold is correct and complete. All required files are present with the right structure, dependency versions resolve cleanly in `Cargo.lock`, the RP2040 memory layout is arithmetically verified, and the build.rs follows the standard Embassy pattern. The one warning (debug symbols in release firmware) is low-risk at scaffold stage but should be addressed before the first real firmware release build.
+
+---
+
+## PR Feedback
+
+PR: https://github.com/whinchman/midi-man-mk3/pull/2
+
+### Local Test Gate: PASSED
+
+- `PKG_CONFIG_PATH=/tmp/alsa-pkg cargo build -p engine` — exit 0
+- `cargo build -p firmware --target thumbv6m-none-eabi` — exit 0
+- `PKG_CONFIG_PATH=/tmp/alsa-pkg cargo test -p engine` — exit 0 (0 tests; scaffold stage)
+
+### Comments Requiring Action
+
+(none)
+
+### CI Failures
+
+(none — no CI pipeline configured for this repository)
+
+### Questions / Acknowledged
+
+(none)
