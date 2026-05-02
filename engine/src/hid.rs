@@ -19,6 +19,17 @@
 //   Byte  1   : sequence number echo
 //   Bytes 2-3  : led_state[15:0]
 //   Bytes 4-63 : reserved
+//
+// Translation note: overlay-aware routing (NoteDelta vs ParamValueDelta for
+// encoders when an overlay is open) is a future improvement. The HID thread
+// reads `state.active_overlay` to determine context; sending NoteDelta
+// unconditionally here is the stub behaviour documented in the task spec.
+
+use crate::input::{InputCommand, OverlayMode};
+#[cfg(feature = "hw-io")]
+use crate::state::SequencerState;
+#[cfg(feature = "hw-io")]
+use std::sync::{Arc, RwLock};
 
 /// USB Vendor ID — Raspberry Pi
 pub const HID_VID: u16 = 0x2E8A;
@@ -139,6 +150,247 @@ pub fn open_device() -> Option<hidapi::HidDevice> {
             );
             None
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pure translation helpers — no hw-io dependency; fully unit-testable.
+// ---------------------------------------------------------------------------
+
+/// Translate one `InReport` into a sequence of `InputCommand` values.
+///
+/// Pure function: no I/O, no locks, no side effects.  The `active_overlay`
+/// argument is the current overlay state (read from shared state by the caller).
+///
+/// Param-button mapping (0-indexed from LSB of the two `param_buttons` bytes):
+/// - Bit 0  → OpenOverlay(Regular) + ParamSelect(0) (Key)
+/// - Bit 1  → ParamSelect(1) (Mode)
+/// - Bit 2  → ParamSelect(2) (Swing)
+/// - Bit 3  → ParamSelect(3) (Step Size)
+/// - Bits 4–7 → reserved (ignored)
+/// - Bit 8  → loop cycle: active_overlay determines in/out/clear cycling
+/// - Bit 9  → reserved (ignored)
+/// - Bit 10 → pause toggle (ParamValueDelta(1) stub — full state write in run_hid)
+/// - Bit 11 → stop/start toggle (handled via direct state write in run_hid)
+///
+/// Tempo delta and stop/start/pause are handled by `run_hid` with a write
+/// lock; they do NOT appear in the returned Vec.
+pub fn translate_in_report(
+    report: &InReport,
+    active_overlay: Option<OverlayMode>,
+) -> Vec<InputCommand> {
+    let mut cmds: Vec<InputCommand> = Vec::new();
+
+    // --- Encoder deltas (steps 0–15): note delta per step.
+    // Overlay-aware routing is a future improvement; always send NoteDelta.
+    for (i, &delta) in report.encoder_deltas.iter().enumerate() {
+        if delta != 0 {
+            // When an overlay is active the encoder controls param value;
+            // without overlay it controls the note for that step.
+            // Future: route to ParamValueDelta when overlay is open.
+            let _ = active_overlay; // suppress unused-variable lint
+            cmds.push(InputCommand::StepSelect(i));
+            cmds.push(InputCommand::NoteDelta(delta));
+        }
+    }
+
+    // --- Step buttons (bits 0–15 across two bytes).
+    let step_word = (report.step_buttons[0] as u16) | ((report.step_buttons[1] as u16) << 8);
+    for bit in 0..16u16 {
+        if step_word & (1 << bit) != 0 {
+            cmds.push(InputCommand::StepSelect(bit as usize));
+            cmds.push(InputCommand::ToggleStep);
+        }
+    }
+
+    // --- Param buttons (bits 0–11 across two bytes).
+    let param_word = (report.param_buttons[0] as u16) | ((report.param_buttons[1] as u16) << 8);
+
+    // Bits 0–3: overlay + param select.
+    // Bit 0: Key (index 0) — also opens overlay.
+    if param_word & (1 << 0) != 0 {
+        cmds.push(InputCommand::OpenOverlay(OverlayMode::Regular));
+        cmds.push(InputCommand::ParamSelect(0));
+    }
+    // Bits 1–3: Mode, Swing, Step Size (indices 1–3).
+    for idx in 1u8..=3 {
+        if param_word & (1 << idx) != 0 {
+            cmds.push(InputCommand::ParamSelect(idx));
+        }
+    }
+
+    // Bit 8: loop in/out/clear cycling.
+    // Loop cycle is a 3-state machine: set loop_in → set loop_out → clear.
+    // The HID thread advances the cycle by emitting ParamSelect(4) (loop param)
+    // + ParamValueDelta(1). Full loop-state machine lives in state.rs (future).
+    if param_word & (1 << 8) != 0 {
+        cmds.push(InputCommand::ParamSelect(4));
+        cmds.push(InputCommand::ParamValueDelta(1));
+    }
+
+    // Bit 9: reserved — ignored.
+
+    // Bit 10: pause toggle — emit ParamValueDelta on param index 5 (pause).
+    // Direct state mutation (paused flag) is performed by run_hid under write lock.
+    if param_word & (1 << 10) != 0 {
+        cmds.push(InputCommand::ParamSelect(5));
+        cmds.push(InputCommand::ParamValueDelta(1));
+    }
+
+    // Bit 11: stop/start — direct state mutation in run_hid; no InputCommand emitted.
+    // (The playing flag toggle is a direct write, not expressible as InputCommand yet.)
+
+    // --- Param knob delta.
+    if report.param_knob_delta != 0 {
+        cmds.push(InputCommand::ParamValueDelta(report.param_knob_delta));
+    }
+
+    cmds
+}
+
+/// Compute the two LED state bytes from the current step-enable bitmap.
+///
+/// `steps_enabled[i]` is `true` if step `i` is enabled.  Bit `i` of the
+/// returned `[u8; 2]` reflects `steps_enabled[i]`.
+pub fn compute_led_bytes(steps_enabled: &[bool; 16]) -> [u8; 2] {
+    let mut lo: u8 = 0;
+    let mut hi: u8 = 0;
+    for i in 0..8 {
+        if steps_enabled[i] {
+            lo |= 1 << i;
+        }
+        if steps_enabled[i + 8] {
+            hi |= 1 << (i);
+        }
+    }
+    [lo, hi]
+}
+
+// ---------------------------------------------------------------------------
+// Hardware I/O — only compiled with the `hw-io` feature.
+// ---------------------------------------------------------------------------
+
+/// Run the HID host read/translate/write loop.
+///
+/// Opens the Pico HID device by VID/PID.  If the device is not found, logs a
+/// warning and returns immediately without panicking.  Otherwise, polls for
+/// `InReport` data in a 5 ms timeout loop, translates each report into
+/// `InputCommand` values sent on `cmd_tx`, writes back an `OutReport` with
+/// the current LED state, and sends on `ui_notify` to wake the UI thread.
+///
+/// The thread exits cleanly when `cmd_tx` becomes disconnected.
+#[cfg(feature = "hw-io")]
+pub fn run_hid(
+    cmd_tx: std::sync::mpsc::SyncSender<InputCommand>,
+    state: Arc<RwLock<SequencerState>>,
+    ui_notify: std::sync::mpsc::SyncSender<()>,
+) {
+    use hidapi::HidApi;
+
+    let api = match HidApi::new() {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("[hid] hidapi init failed: {e}; HID thread exiting");
+            return;
+        }
+    };
+
+    let device = match api.open(HID_VID, HID_PID) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("[hid] device {HID_VID:#06x}:{HID_PID:#06x} not found: {e}; HID thread exiting");
+            return;
+        }
+    };
+
+    let mut last_seq: Option<u8> = None;
+    let mut buf = [0u8; 64];
+
+    loop {
+        let n = match device.read_timeout(&mut buf, 5) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("[hid] read error: {e}; HID thread exiting");
+                return;
+            }
+        };
+
+        if n == 0 {
+            // Timeout — no data this cycle.
+            continue;
+        }
+
+        let report = InReport::from_bytes(&buf);
+
+        // Sequence-number duplicate check.
+        if let Some(prev) = last_seq {
+            if prev == report.seq {
+                eprintln!("[hid] duplicate sequence number {}: possible stale report", report.seq);
+            }
+        }
+        last_seq = Some(report.seq);
+
+        // --- Direct state writes (tempo, pause, stop/start). ---
+        let param_word = (report.param_buttons[0] as u16) | ((report.param_buttons[1] as u16) << 8);
+        {
+            let mut st = state.write().expect("hid: state write lock poisoned");
+
+            // Tempo delta — direct write, clamped to 20–300 BPM.
+            if report.tempo_delta != 0 {
+                let new_bpm = (st.tempo_bpm as i32 + report.tempo_delta as i32)
+                    .clamp(20, 300) as u16;
+                st.tempo_bpm = new_bpm;
+            }
+
+            // Bit 10: pause toggle.
+            if param_word & (1 << 10) != 0 {
+                st.paused = !st.paused;
+            }
+
+            // Bit 11: stop/start toggle.
+            if param_word & (1 << 11) != 0 {
+                st.playing = !st.playing;
+                if !st.playing {
+                    st.paused = false;
+                    st.playhead = 0;
+                }
+            }
+        }
+
+        // Read active_overlay for translation context.
+        let active_overlay = state.read().expect("hid: state read lock poisoned").active_overlay;
+
+        // --- Translate to InputCommand and send. ---
+        let cmds = translate_in_report(&report, active_overlay);
+        for cmd in cmds {
+            if cmd_tx.send(cmd).is_err() {
+                // Receiver dropped — engine is shutting down.
+                return;
+            }
+        }
+
+        // --- Build and write OutReport (LED state). ---
+        {
+            let st = state.read().expect("hid: state read lock poisoned");
+            let mut enabled = [false; 16];
+            for (i, step) in st.steps.iter().enumerate() {
+                enabled[i] = step.enabled;
+            }
+            let led_bytes = compute_led_bytes(&enabled);
+            let out = OutReport {
+                report_id: 0x02,
+                seq_echo: report.seq,
+                led_state: led_bytes,
+                reserved: [0u8; 60],
+            };
+            let out_buf = out.to_bytes();
+            if let Err(e) = device.write(&out_buf) {
+                eprintln!("[hid] write error: {e}");
+            }
+        }
+
+        // Wake the UI thread.
+        let _ = ui_notify.send(());
     }
 }
 
@@ -484,5 +736,218 @@ mod tests {
         let buf = report.to_bytes();
         assert_eq!(buf[2], 0b1010_1010, "led_state[0] alternating pattern must be preserved");
         assert_eq!(buf[3], 0b0101_0101, "led_state[1] alternating pattern must be preserved");
+    }
+
+    // -----------------------------------------------------------------------
+    // translate_in_report — pure translation logic tests (no hw-io needed).
+    // -----------------------------------------------------------------------
+
+    /// Build a zeroed InReport for easy field-level mutation in tests.
+    fn zero_report() -> InReport {
+        InReport::from_bytes(&[0u8; 64])
+    }
+
+    #[test]
+    fn translate_encoder_delta_step0_emits_step_select_and_note_delta() {
+        let mut buf = [0u8; 64];
+        buf[9] = 3i8 as u8; // encoder_deltas[0] = +3
+        let report = InReport::from_bytes(&buf);
+        let cmds = translate_in_report(&report, None);
+
+        // Should see StepSelect(0) then NoteDelta(3).
+        let mut iter = cmds.iter();
+        assert!(matches!(iter.next(), Some(InputCommand::StepSelect(0))));
+        assert!(matches!(iter.next(), Some(InputCommand::NoteDelta(3))));
+    }
+
+    #[test]
+    fn translate_encoder_delta_negative_emits_correct_delta() {
+        let mut buf = [0u8; 64];
+        buf[9 + 5] = (-2i8) as u8; // encoder_deltas[5] = -2
+        let report = InReport::from_bytes(&buf);
+        let cmds = translate_in_report(&report, None);
+
+        assert!(matches!(cmds[0], InputCommand::StepSelect(5)));
+        assert!(matches!(cmds[1], InputCommand::NoteDelta(-2)));
+    }
+
+    #[test]
+    fn translate_zero_encoder_deltas_produces_no_encoder_commands() {
+        let report = zero_report();
+        let cmds = translate_in_report(&report, None);
+        // With all-zero input, no commands should be produced.
+        assert!(cmds.is_empty(), "expected no commands for zeroed report, got {cmds:?}");
+    }
+
+    #[test]
+    fn translate_step_button_bit3_emits_step_select_and_toggle() {
+        let mut buf = [0u8; 64];
+        buf[3] = 0b0000_1000; // step_buttons low: bit 3 set → step 3
+        let report = InReport::from_bytes(&buf);
+        let cmds = translate_in_report(&report, None);
+
+        assert_eq!(cmds.len(), 2, "expected StepSelect + ToggleStep");
+        assert!(matches!(cmds[0], InputCommand::StepSelect(3)));
+        assert!(matches!(cmds[1], InputCommand::ToggleStep));
+    }
+
+    #[test]
+    fn translate_step_button_high_byte_bit_emits_correct_step_index() {
+        // Step 9 = bit 1 of the high byte (buf[4]).
+        let mut buf = [0u8; 64];
+        buf[4] = 0b0000_0010; // bit 9 overall
+        let report = InReport::from_bytes(&buf);
+        let cmds = translate_in_report(&report, None);
+
+        assert_eq!(cmds.len(), 2);
+        assert!(matches!(cmds[0], InputCommand::StepSelect(9)));
+        assert!(matches!(cmds[1], InputCommand::ToggleStep));
+    }
+
+    #[test]
+    fn translate_param_button_bit0_opens_overlay_and_selects_param0() {
+        let mut buf = [0u8; 64];
+        buf[7] = 0b0000_0001; // param_buttons[0] bit 0 = Key
+        let report = InReport::from_bytes(&buf);
+        let cmds = translate_in_report(&report, None);
+
+        assert_eq!(cmds.len(), 2);
+        assert!(matches!(cmds[0], InputCommand::OpenOverlay(OverlayMode::Regular)));
+        assert!(matches!(cmds[1], InputCommand::ParamSelect(0)));
+    }
+
+    #[test]
+    fn translate_param_button_bit1_selects_param1() {
+        let mut buf = [0u8; 64];
+        buf[7] = 0b0000_0010; // bit 1 = Mode
+        let report = InReport::from_bytes(&buf);
+        let cmds = translate_in_report(&report, None);
+
+        assert_eq!(cmds.len(), 1);
+        assert!(matches!(cmds[0], InputCommand::ParamSelect(1)));
+    }
+
+    #[test]
+    fn translate_param_button_bit8_emits_loop_param_cycle() {
+        // Bit 8 = byte index 1 (buf[8]), bit 0 of that byte.
+        let mut buf = [0u8; 64];
+        buf[8] = 0b0000_0001; // param_buttons high byte bit 0 = overall bit 8
+        let report = InReport::from_bytes(&buf);
+        let cmds = translate_in_report(&report, None);
+
+        assert_eq!(cmds.len(), 2);
+        assert!(matches!(cmds[0], InputCommand::ParamSelect(4)));
+        assert!(matches!(cmds[1], InputCommand::ParamValueDelta(1)));
+    }
+
+    #[test]
+    fn translate_param_button_bit10_emits_pause_param_cycle() {
+        // Bit 10 = buf[8] bit 2.
+        let mut buf = [0u8; 64];
+        buf[8] = 0b0000_0100;
+        let report = InReport::from_bytes(&buf);
+        let cmds = translate_in_report(&report, None);
+
+        assert_eq!(cmds.len(), 2);
+        assert!(matches!(cmds[0], InputCommand::ParamSelect(5)));
+        assert!(matches!(cmds[1], InputCommand::ParamValueDelta(1)));
+    }
+
+    #[test]
+    fn translate_param_button_bit11_emits_no_input_command() {
+        // Bit 11 = buf[8] bit 3. Stop/start handled by direct state write in run_hid.
+        let mut buf = [0u8; 64];
+        buf[8] = 0b0000_1000;
+        let report = InReport::from_bytes(&buf);
+        let cmds = translate_in_report(&report, None);
+        // bit11 alone should produce no InputCommand entries.
+        assert!(cmds.is_empty(), "stop/start should not emit InputCommand, got {cmds:?}");
+    }
+
+    #[test]
+    fn translate_param_knob_delta_emits_param_value_delta() {
+        let mut buf = [0u8; 64];
+        buf[26] = 7i8 as u8; // param_knob_delta = +7
+        let report = InReport::from_bytes(&buf);
+        let cmds = translate_in_report(&report, None);
+
+        assert_eq!(cmds.len(), 1);
+        assert!(matches!(cmds[0], InputCommand::ParamValueDelta(7)));
+    }
+
+    #[test]
+    fn translate_synthetic_full_report_encoder_step_param() {
+        // Encoder delta on step 0, step button 3 press, param button 1 press.
+        let mut buf = [0u8; 64];
+        buf[9] = 1i8 as u8;    // encoder_deltas[0] = +1
+        buf[3] = 0b0000_1000;  // step_buttons bit 3 = step 3
+        buf[7] = 0b0000_0010;  // param_buttons bit 1 = Mode
+        let report = InReport::from_bytes(&buf);
+        let cmds = translate_in_report(&report, None);
+
+        // Expected: StepSelect(0), NoteDelta(1), StepSelect(3), ToggleStep, ParamSelect(1).
+        assert_eq!(cmds.len(), 5, "expected 5 commands, got {cmds:?}");
+        assert!(matches!(cmds[0], InputCommand::StepSelect(0)));
+        assert!(matches!(cmds[1], InputCommand::NoteDelta(1)));
+        assert!(matches!(cmds[2], InputCommand::StepSelect(3)));
+        assert!(matches!(cmds[3], InputCommand::ToggleStep));
+        assert!(matches!(cmds[4], InputCommand::ParamSelect(1)));
+    }
+
+    // -----------------------------------------------------------------------
+    // compute_led_bytes — LED bit packing tests.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn compute_led_bytes_all_enabled_returns_ff_ff() {
+        let enabled = [true; 16];
+        assert_eq!(compute_led_bytes(&enabled), [0xFF, 0xFF]);
+    }
+
+    #[test]
+    fn compute_led_bytes_all_disabled_returns_00_00() {
+        let enabled = [false; 16];
+        assert_eq!(compute_led_bytes(&enabled), [0x00, 0x00]);
+    }
+
+    #[test]
+    fn compute_led_bytes_only_step0_sets_lo_bit0() {
+        let mut enabled = [false; 16];
+        enabled[0] = true;
+        let [lo, hi] = compute_led_bytes(&enabled);
+        assert_eq!(lo, 0b0000_0001, "step 0 should set bit 0 of lo byte");
+        assert_eq!(hi, 0x00);
+    }
+
+    #[test]
+    fn compute_led_bytes_only_step8_sets_hi_bit0() {
+        let mut enabled = [false; 16];
+        enabled[8] = true;
+        let [lo, hi] = compute_led_bytes(&enabled);
+        assert_eq!(lo, 0x00);
+        assert_eq!(hi, 0b0000_0001, "step 8 should set bit 0 of hi byte");
+    }
+
+    #[test]
+    fn compute_led_bytes_only_step15_sets_hi_bit7() {
+        let mut enabled = [false; 16];
+        enabled[15] = true;
+        let [lo, hi] = compute_led_bytes(&enabled);
+        assert_eq!(lo, 0x00);
+        assert_eq!(hi, 0b1000_0000, "step 15 should set bit 7 of hi byte");
+    }
+
+    #[test]
+    fn compute_led_bytes_alternating_steps_match_expected_pattern() {
+        let mut enabled = [false; 16];
+        // Enable even steps: 0, 2, 4, 6, 8, 10, 12, 14.
+        for i in (0..16).step_by(2) {
+            enabled[i] = true;
+        }
+        let [lo, hi] = compute_led_bytes(&enabled);
+        // Steps 0, 2, 4, 6 → bits 0, 2, 4, 6 of lo.
+        assert_eq!(lo, 0b0101_0101);
+        // Steps 8, 10, 12, 14 → bits 0, 2, 4, 6 of hi.
+        assert_eq!(hi, 0b0101_0101);
     }
 }
