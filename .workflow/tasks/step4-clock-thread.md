@@ -1,7 +1,7 @@
 # Task: Clock Thread
 
 - **Type**: coder
-- **Status**: in-progress
+- **Status**: done
 - **Repo**: midi-man-mk3
 - **Parallel Group**: 3
 - **Feature Branch**: feature/engine-phase1
@@ -76,3 +76,23 @@ The clock thread holds the write lock only for the duration of calling `state.ti
 
 ## Notes
 
+### Implementation Summary
+
+Implemented on branch `clock-thread` (worktree at `.workflow/worktrees/clock-thread`),
+based off `feature/engine-phase1`.
+
+**Files added/modified:**
+- `engine/src/clock.rs` — `run_clock()` + pure helper functions + 17 unit tests
+- `engine/src/state.rs` — copied from step3 worktree (SequencerState, MidiEvent, StepSize)
+- `engine/src/sequencer.rs` — copied from step3 worktree (re-exports)
+- `engine/src/lib.rs` — added state, sequencer, clock module declarations
+- `engine/Cargo.toml` — made midir/hidapi/ratatui/crossterm optional under `hw-io` feature so `cargo test -p engine` runs without system ALSA/hidraw dev packages
+
+**Key design decisions honored:**
+- `libc::clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME)` with absolute wake times
+- Tick period recomputed each iteration; swing offset on odd steps
+- NoteOn carries `duration_nanos = tick_nanos`; no NoteOff sent
+- SCHED_FIFO priority 50 attempted; non-fatal if denied
+- Thread exits on `midi_tx` disconnect
+
+**Test results:** 87 tests pass (`cargo test -p engine`); clippy clean; release build succeeds.
