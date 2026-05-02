@@ -47,11 +47,49 @@ impl MidiSender for MidirSender {
     }
 }
 
-/// Open the first available ALSA MIDI output port and return a boxed sender.
+/// Choose which port index to open given a list of port names and an optional
+/// filter string.
 ///
-/// Returns `None` if no ports are available or if opening the port fails.
+/// Returns `None` when `port_names` is empty (caller should disable MIDI).
+/// When `filter` is `Some(f)`, returns the index of the first port whose name
+/// contains `f` (case-insensitive substring match), or `Some(0)` when no port
+/// matches (falling back to the first port with a logged warning).
+/// When `filter` is `None`, returns `Some(0)`.
+pub fn select_port_idx(port_names: &[&str], filter: Option<&str>) -> Option<usize> {
+    if port_names.is_empty() {
+        return None;
+    }
+    match filter {
+        None => Some(0),
+        Some(f) => {
+            let f_lower = f.to_lowercase();
+            let found = port_names.iter().enumerate().find(|(_, name)| {
+                name.to_lowercase().contains(&f_lower)
+            });
+            match found {
+                Some((idx, _)) => Some(idx),
+                None => {
+                    eprintln!(
+                        "[midi_out] no port matching '{}' found — falling back to first port",
+                        f
+                    );
+                    Some(0)
+                }
+            }
+        }
+    }
+}
+
+/// Open an ALSA MIDI output port.
+///
+/// When `port_name` is `Some(filter)`, searches for a port whose name contains
+/// `filter` (case-insensitive substring match).  If no matching port is found,
+/// logs a warning and falls back to the first available port.  When `port_name`
+/// is `None`, opens the first available port.
+///
+/// Returns `None` if no ports are available or if opening the chosen port fails.
 #[cfg(feature = "hw-io")]
-fn open_first_port() -> Option<Box<dyn MidiSender>> {
+fn open_port(port_name: Option<&str>) -> Option<Box<dyn MidiSender>> {
     let output = match midir::MidiOutput::new("midi-man-mk3") {
         Ok(o) => o,
         Err(e) => {
@@ -66,17 +104,27 @@ fn open_first_port() -> Option<Box<dyn MidiSender>> {
         return None;
     }
 
-    let port = &ports[0];
-    let port_name = output.port_name(port).unwrap_or_else(|_| "<unknown>".to_owned());
-    println!("[midi_out] opening port: {port_name}");
+    // Collect port names so select_port_idx can operate on plain string slices.
+    let port_name_strings: Vec<String> = ports.iter()
+        .map(|p| output.port_name(p).unwrap_or_default())
+        .collect();
+    let port_name_refs: Vec<&str> = port_name_strings.iter().map(String::as_str).collect();
+
+    // Determine which port to open using the pure selection helper.
+    let chosen_idx = select_port_idx(&port_name_refs, port_name)
+        .expect("ports is non-empty; select_port_idx always returns Some for non-empty slice");
+
+    let port = &ports[chosen_idx];
+    let chosen_name = output.port_name(port).unwrap_or_else(|_| "<unknown>".to_owned());
+    println!("[midi_out] opening port: {chosen_name}");
 
     match output.connect(port, "midi-man-mk3-out") {
         Ok(conn) => {
-            println!("[midi_out] connected to port: {port_name}");
+            println!("[midi_out] connected to port: {chosen_name}");
             Some(Box::new(MidirSender { conn: Arc::new(Mutex::new(conn)) }))
         }
         Err(e) => {
-            eprintln!("[midi_out] failed to connect to port '{port_name}': {e}");
+            eprintln!("[midi_out] failed to connect to port '{chosen_name}': {e}");
             None
         }
     }
@@ -128,15 +176,18 @@ pub fn dispatch(sender: &mut Box<dyn MidiSender>, event: MidiEvent) {
 
 /// Run the MIDI output thread using a real ALSA port.
 ///
-/// Opens the first available ALSA MIDI output port via `midir`, then loops
-/// dispatching `MidiEvent` values received on `rx`. If no ports are available,
-/// logs an error and returns without panicking. Exits when `rx` is
+/// When `port_name` is `Some(filter)`, searches for a port whose name contains
+/// `filter` (case-insensitive substring match); falls back to the first port if
+/// no match is found.  When `None`, opens the first available port.
+///
+/// Loops dispatching `MidiEvent` values received on `rx`. If no ports are
+/// available, logs an error and returns without panicking. Exits when `rx` is
 /// disconnected (sender dropped).
 ///
 /// Requires the `hw-io` feature (ALSA/midir).
 #[cfg(feature = "hw-io")]
-pub fn run_midi_out(rx: Receiver<MidiEvent>) {
-    let mut sender = match open_first_port() {
+pub fn run_midi_out(rx: Receiver<MidiEvent>, port_name: Option<String>) {
+    let mut sender = match open_port(port_name.as_deref()) {
         Some(s) => s,
         None => return,
     };
@@ -424,7 +475,7 @@ mod tests {
     /// Even if a port were available, dropping the sender before calling
     /// `run_midi_out` causes the receive loop to exit immediately.
     ///
-    /// Requires the hw-io feature because `run_midi_out` calls `open_first_port`
+    /// Requires the hw-io feature because `run_midi_out` calls `open_port`
     /// which uses `midir`. Without hw-io, the no-ports path is tested implicitly
     /// by `loop_exits_when_channel_closes` via `run_midi_out_with_sender`.
     #[cfg(feature = "hw-io")]
@@ -435,6 +486,69 @@ mod tests {
         // receive loop it exits immediately rather than blocking.
         drop(tx);
         // Must not panic regardless of whether ALSA ports are present.
-        run_midi_out(rx);
+        run_midi_out(rx, None);
+    }
+
+    // --- select_port_idx ---
+
+    /// Empty port list returns None.
+    #[test]
+    fn select_port_idx_empty_list_returns_none() {
+        assert_eq!(select_port_idx(&[], None), None);
+        assert_eq!(select_port_idx(&[], Some("anything")), None);
+    }
+
+    /// No filter: always returns index 0.
+    #[test]
+    fn select_port_idx_no_filter_returns_first() {
+        let ports = ["PortA", "PortB", "PortC"];
+        assert_eq!(select_port_idx(&ports, None), Some(0));
+    }
+
+    /// Case-insensitive substring match finds the correct port.
+    #[test]
+    fn select_port_idx_case_insensitive_match() {
+        let ports = ["FluidSynth virtual port", "USB MIDI", "Timidity"];
+        // Lowercase filter matches uppercase port name.
+        assert_eq!(select_port_idx(&ports, Some("fluidsynth")), Some(0));
+        // Uppercase filter matches mixed-case port name.
+        assert_eq!(select_port_idx(&ports, Some("MIDI")), Some(1));
+        // Partial substring match.
+        assert_eq!(select_port_idx(&ports, Some("imid")), Some(2));
+    }
+
+    /// Exact match (full port name) is found.
+    #[test]
+    fn select_port_idx_exact_name_match() {
+        let ports = ["Alpha", "Beta", "Gamma"];
+        assert_eq!(select_port_idx(&ports, Some("Beta")), Some(1));
+    }
+
+    /// When no port matches the filter, falls back to index 0.
+    #[test]
+    fn select_port_idx_no_match_falls_back_to_zero() {
+        let ports = ["PortA", "PortB"];
+        assert_eq!(select_port_idx(&ports, Some("ZZZ_nonexistent")), Some(0));
+    }
+
+    /// Single-port list with matching filter.
+    #[test]
+    fn select_port_idx_single_port_matches() {
+        let ports = ["OnlyPort"];
+        assert_eq!(select_port_idx(&ports, Some("only")), Some(0));
+    }
+
+    /// Single-port list with non-matching filter still returns 0 (fallback).
+    #[test]
+    fn select_port_idx_single_port_no_match_falls_back() {
+        let ports = ["OnlyPort"];
+        assert_eq!(select_port_idx(&ports, Some("other")), Some(0));
+    }
+
+    /// Filter matches the last port in the list.
+    #[test]
+    fn select_port_idx_matches_last_port() {
+        let ports = ["Alpha", "Beta", "Gamma", "Delta"];
+        assert_eq!(select_port_idx(&ports, Some("delta")), Some(3));
     }
 }

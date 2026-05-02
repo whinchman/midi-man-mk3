@@ -195,3 +195,78 @@ assert_eq!(offset_of!(InReport, reserved), 27);
 ```
 
 ---
+
+## BUG-006 — [WARNING] `run_hid` reuses `buf` across loop iterations; partial reads leave stale bytes
+
+- **File:** `engine/src/hid.rs`, lines 307–323
+- **Branch:** `hid-host-reader-writer`
+- **Discovered:** 2026-05-02 by code-reviewer agent (step7-hid-host-reader-writer review)
+- **Severity:** warning
+
+### Description
+
+`buf` is declared once before the loop (`let mut buf = [0u8; 64];`) and passed to `device.read_timeout` each iteration. `hidapi`'s `read_timeout` only writes `n` bytes into the buffer; the remaining `64 - n` bytes retain their previous values. The code guards only `n == 0` (timeout) and proceeds to `InReport::from_bytes(&buf)` for any `n > 0`. If the device sends a short report (n > 0 but n < 64), fields beyond byte `n` are parsed from the previous iteration's data, silently producing a corrupt `InReport` with fields drawn from two different reports.
+
+In practice the RP2040 firmware always sends exactly 64-byte reports, but defensive code should zero the buffer each cycle to avoid latent bugs if the firmware changes or if a different host OS's HID layer pads differently.
+
+### Reproduction
+
+Simulate a short read: fill `buf` with `0xFF` before a report, call `read_timeout` with a mock returning `n = 1` (only the report_id byte written); `from_bytes(&buf)` will see `seq`, `encoder_deltas`, etc. from the `0xFF` fill rather than valid data.
+
+### Suggested Fix
+
+Zero `buf` at the start of each loop iteration before calling `read_timeout`:
+
+```rust
+loop {
+    buf = [0u8; 64];  // clear stale data from previous iteration
+    let n = match device.read_timeout(&mut buf, 5) { ... };
+    ...
+}
+```
+
+Or add a short-read guard after the `n == 0` check:
+
+```rust
+if n < 64 {
+    eprintln!("[hid] short read ({n} bytes); skipping report");
+    continue;
+}
+```
+
+---
+
+## BUG-007 — [WARNING] `ratatui` default features pull in `crossterm` unconditionally despite stated intent
+
+- **File:** `engine/Cargo.toml`
+- **Branch:** `feat/terminal-ui`
+- **Discovered:** 2026-05-02 by code-reviewer agent (step8-terminal-ui review)
+- **Severity:** warning
+
+### Description
+
+The Cargo.toml comment reads "Only crossterm (the real terminal backend) is gated behind hw-io" but `ratatui = "0.30"` uses ratatui's default feature set, which includes the `crossterm` feature. This causes `ratatui-crossterm v0.1.0` and `crossterm v0.29.0` to appear in the dependency tree even without the `hw-io` feature enabled. The stated goal — keeping crossterm gated — is not achieved.
+
+### Reproduction
+
+```
+cd .workflow/worktrees/terminal-ui
+cargo tree -p engine | grep crossterm
+# Outputs: ratatui-crossterm v0.1.0 and crossterm v0.29.0 even without hw-io
+```
+
+### Suggested Fix
+
+Declare ratatui without default features and activate the crossterm feature only via `hw-io`:
+
+```toml
+ratatui = { version = "0.30", default-features = false, features = ["all-widgets", "macros", "layout-cache", "underline-color"] }
+crossterm = { version = "0.29", optional = true }
+
+[features]
+hw-io = ["midir", "hidapi", "crossterm", "ratatui/crossterm"]
+```
+
+Verify with `cargo tree -p engine` (no hw-io) that crossterm no longer appears, and `cargo test -p engine` still passes (TestBackend does not need crossterm).
+
+---

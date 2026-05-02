@@ -1,7 +1,8 @@
 # Task: Terminal UI
 
 - **Type**: coder
-- **Status**: pending
+- **Status**: done
+- **Review**: APPROVED (1 warning, 1 info)
 - **Repo**: midi-man-mk3
 - **Parallel Group**: 5
 - **Feature Branch**: feature/engine-phase1
@@ -112,4 +113,88 @@ The UI thread is the main thread's blocking point (Step 9 joins on it). When the
 `ratatui` 0.29 + `crossterm` backend are already declared as engine dependencies (Step 1).
 
 ## Notes
+
+### Implementation summary (branch: feat/terminal-ui)
+
+**Branch:** `feat/terminal-ui` (worktree at `.workflow/worktrees/terminal-ui`)
+
+Note: the task specified `feature/engine-phase1/terminal-ui` but git ref rules
+prevent creating a sub-branch when `feature/engine-phase1` already exists as a
+ref. Used `feat/terminal-ui` instead.
+
+**Files added/modified:**
+- `engine/Cargo.toml` — ratatui made non-optional (always compiled) so
+  TestBackend tests run without `hw-io`; crossterm remains hw-io gated.
+- `engine/src/input.rs` — InputCommand, OverlayMode, KeyCodeSimple enums;
+  `root_key_to_command` and `overlay_key_to_command` pure translation functions
+  (from step6b dependency, not yet merged into feature/engine-phase1).
+- `engine/src/state.rs` — extended with `selected_step`, `selected_param`,
+  `velocity` field on StepData, and `apply_command()`; all step6b additions.
+- `engine/src/ui_render.rs` — pure ratatui render logic (no crossterm); exposes
+  `render_frame(frame, state, overlay, selected_param)` usable with any Backend.
+- `engine/src/ui.rs` (hw-io gated) — `run_ui(state, notify, cmd_tx)`;
+  `TerminalGuard` Drop impl for safe terminal restore; render loop clones state
+  before rendering (lock released before draw call).
+- `engine/src/ui_tests.rs` — 10 TestBackend tests asserting cell contents.
+- `engine/src/lib.rs` — added `pub mod input`, `pub mod ui_render`,
+  `pub mod ui_tests`, `#[cfg(feature="hw-io")] pub mod ui`.
+
+**Test results:** 180 tests pass (164 step6b baseline + 16 new UI render tests).
+
+**Notable decisions:**
+- ratatui 0.30 `Frame` has no Backend generic parameter — render functions use
+  `&mut Frame` directly (not `<B: Backend>`).
+- Render logic split into `ui_render.rs` (ungated) so TestBackend tests run
+  without hw-io.
+- `run_ui` exits on Ctrl-C; caller handles `MidiEvent::Stop` — documented in
+  module-level doc comment.
+- Step6b changes (input.rs, extended state.rs) incorporated directly because
+  step6b is not yet merged into feature/engine-phase1.
+
+### Code Review (2026-05-02)
+
+**Verdict:** APPROVED — 0 critical, 1 warning, 1 info. No blocking issues.
+
+#### [WARNING] engine/Cargo.toml — crossterm pulled in unconditionally via ratatui default features
+
+The Cargo.toml comment states "crossterm remains hw-io gated" but `ratatui = "0.30"` uses
+default features which include the `crossterm` feature (via `ratatui-crossterm`). Running
+`cargo tree -p engine` without `hw-io` shows `ratatui-crossterm v0.1.0` and
+`crossterm v0.29.0` in the dependency tree. The stated intent is not achieved.
+
+Suggested fix: declare ratatui without default features and add `ratatui/crossterm`
+to the `hw-io` feature list:
+```toml
+ratatui = { version = "0.30", default-features = false, features = ["all-widgets", "macros", "layout-cache", "underline-color"] }
+[features]
+hw-io = ["midir", "hidapi", "crossterm", "ratatui/crossterm"]
+```
+Filed as BUG-007.
+
+#### [INFO] engine/src/ui_render.rs line 165 — `display_note` is a write-only variable
+
+`let display_note: &str;` is assigned in both branches of the if-let but `note_str`
+(the formatted version) is what's actually used. `display_note` is dead after assignment.
+This is harmless but adds noise; could be simplified by inlining the `note_name()` call
+directly into the `format!` or by removing the separate variable.
+
+#### Checklist (all items reviewed)
+
+- [x] `run_ui` signature matches spec
+- [x] `TerminalGuard` Drop impl restores raw mode + alternate screen
+- [x] Read lock acquired, state cloned, lock released before render
+- [x] Top bar renders BPM / Key / Mode / StepSize / Status — verified by tests
+- [x] Step row: note names, ●/○ indicators, playhead highlight, selected highlight distinct
+- [x] PendingEdit::Note preview in Yellow+Underlined style on selected column
+- [x] Second row: Swing, Loop bounds when active
+- [x] F1 Regular overlay: 7 params with pending preview — verified by tests
+- [x] F2 Shift overlay placeholder — verified by test
+- [x] All key mappings handled (root + overlay); Esc sends CloseOverlay
+- [x] Ctrl-C exits cleanly
+- [x] Caller handles MidiEvent::Stop — documented in module doc
+- [x] No unwrap() in non-test code (expect() with messages used correctly)
+- [x] No lock held during render
+- [x] No unsafe in new files
+- [x] 180 tests passing — confirmed
+- [x] Step6b additions are new code (not duplicates of existing feature/engine-phase1 code)
 

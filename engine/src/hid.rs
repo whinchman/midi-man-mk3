@@ -272,7 +272,8 @@ pub fn compute_led_bytes(steps_enabled: &[bool; 16]) -> [u8; 2] {
 
 /// Run the HID host read/translate/write loop.
 ///
-/// Opens the Pico HID device by VID/PID.  If the device is not found, logs a
+/// Opens the Pico HID device using the provided `vid` and `pid`.  Pass
+/// `HID_VID`/`HID_PID` for the defaults.  If the device is not found, logs a
 /// warning and returns immediately without panicking.  Otherwise, polls for
 /// `InReport` data in a 5 ms timeout loop, translates each report into
 /// `InputCommand` values sent on `cmd_tx`, writes back an `OutReport` with
@@ -284,6 +285,8 @@ pub fn run_hid(
     cmd_tx: std::sync::mpsc::SyncSender<InputCommand>,
     state: Arc<RwLock<SequencerState>>,
     ui_notify: std::sync::mpsc::SyncSender<()>,
+    vid: u16,
+    pid: u16,
 ) {
     use hidapi::HidApi;
 
@@ -295,10 +298,10 @@ pub fn run_hid(
         }
     };
 
-    let device = match api.open(HID_VID, HID_PID) {
+    let device = match api.open(vid, pid) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("[hid] device {HID_VID:#06x}:{HID_PID:#06x} not found: {e}; HID thread exiting");
+            eprintln!("[hid] device {vid:#06x}:{pid:#06x} not found: {e}; HID thread exiting");
             return;
         }
     };
@@ -393,8 +396,8 @@ pub fn run_hid(
             }
         }
 
-        // Wake the UI thread.
-        let _ = ui_notify.send(());
+        // Wake the UI thread (non-blocking: if notify channel is full, skip).
+        let _ = ui_notify.try_send(());
     }
 }
 

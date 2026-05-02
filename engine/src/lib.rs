@@ -11,7 +11,7 @@ pub mod sequencer;
 /// Real-time clock thread driving the sequencer forward.
 pub mod clock;
 /// MIDI output thread — sends NoteOn/NoteOff via midir.
-#[cfg(feature = "hw-io")]
+/// Always compiled; hw-io–only items are individually gated within the module.
 pub mod midi_out;
 /// Ratatui render logic — pure rendering, no crossterm dependency.
 pub mod ui_render;

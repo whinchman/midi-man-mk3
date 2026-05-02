@@ -1,7 +1,7 @@
 # Task: HID Host Reader/Writer (Engine)
 
 - **Type**: coder
-- **Status**: pending
+- **Status**: done
 - **Repo**: midi-man-mk3
 - **Parallel Group**: 5
 - **Feature Branch**: feature/engine-phase1
@@ -116,4 +116,38 @@ HID connection is optional: the engine is fully functional via keyboard alone (S
 `hidapi` crate 2.x (wraps libhidapi) is already declared as an engine dependency (added in Step 1).
 
 ## Notes
+
+### Implementation Summary (branch: hid-host-reader-writer)
+
+- **Worktree**: `.workflow/worktrees/hid-host` on branch `hid-host-reader-writer` (based on `engine-phase1/input-command-abstraction` which includes `input.rs`)
+- **Files changed**: `engine/src/hid.rs` only
+- **New functions**:
+  - `translate_in_report(report, active_overlay) -> Vec<InputCommand>` — pure, no hw-io dependency
+  - `compute_led_bytes(steps_enabled) -> [u8; 2]` — pure, no hw-io dependency
+  - `run_hid(cmd_tx, state, ui_notify)` — gated under `#[cfg(feature = "hw-io")]`
+- **Test results**: 182 passed, 0 failed (164 baseline + 18 new)
+- **Notable decisions**:
+  - Encoder deltas always emit `NoteDelta` (not `ParamValueDelta`); overlay-aware routing documented as a future improvement per task spec
+  - `tempo_delta`, `pause` (bit 10), and `stop/start` (bit 11) are applied as direct state writes under write lock in `run_hid`; `stop/start` emits no `InputCommand`
+  - Param button bit 11 (stop/start) resets `playhead = 0` and clears `paused` on stop
+  - Loop button (bit 8) emits `ParamSelect(4) + ParamValueDelta(1)` as a cycle increment; full 3-state machine deferred to state.rs future work
+  - `SequencerState` and `Arc/RwLock` imports are gated under `#[cfg(feature = "hw-io")]` to avoid unused-import warnings in test builds
+
+### Code Review (2026-05-02)
+
+- **Verdict**: REQUEST-CHANGES
+- **Findings**: 0 critical, 1 warning, 3 info
+- **Test run**: 182 passed, 0 failed (matches expected)
+
+#### [WARNING] BUG-006 — `run_hid` buf reuse; partial reads leave stale bytes (hid.rs:307–323)
+`buf` is allocated once before the loop and never zeroed between iterations. `read_timeout` writes only `n` bytes; if `n > 0` but `n < 64`, bytes beyond `n` retain values from the previous report. `InReport::from_bytes` then silently mixes fields from two different reports. Fix: zero `buf` at loop top or guard `n < 64` with a `continue`.
+
+#### [INFO] Overlay-aware encoder routing not implemented (hid.rs:185–195)
+`translate_in_report` always emits `NoteDelta`, never `ParamValueDelta`, regardless of `active_overlay`. Documented as future work in both the task spec and code comments. Acceptable for this step.
+
+#### [INFO] `expect()` on poisoned RwLock in `run_hid` (hid.rs:336, 361, 374)
+Three `expect()` calls will panic if the lock is poisoned. Per code_standards ("use expect() with a message"), this is compliant. Lock poisoning only occurs if another thread panicked while holding the write lock, so this is an acceptable last-resort failure mode.
+
+#### [INFO] No test for simultaneous encoder deltas on multiple steps
+No test verifies that encoder deltas on steps 0, 7, and 15 simultaneously all produce their `StepSelect`+`NoteDelta` pairs in order. The existing tests exercise one encoder at a time. Low risk (it's a simple loop), but a multi-encoder test would increase coverage.
 
