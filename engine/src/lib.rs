@@ -13,6 +13,10 @@ pub mod clock;
 /// MIDI output thread — sends NoteOn/NoteOff via midir.
 #[cfg(feature = "hw-io")]
 pub mod midi_out;
-/// Keyboard UI event loop — translates crossterm KeyEvent to InputCommand.
+/// Ratatui render logic — pure rendering, no crossterm dependency.
+pub mod ui_render;
+/// Terminal UI — ratatui render loop with keyboard event handling.
 #[cfg(feature = "hw-io")]
 pub mod ui;
+/// Unit tests for the terminal UI render logic (TestBackend, no real terminal).
+pub mod ui_tests;

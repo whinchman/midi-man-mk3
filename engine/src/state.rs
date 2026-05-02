@@ -295,6 +295,7 @@ impl SequencerState {
 }
 
 #[cfg(test)]
+#[allow(clippy::bool_assert_comparison)]
 mod tests {
     use super::*;
 
@@ -487,6 +488,8 @@ mod tests {
         assert!(matches!(s.mode, Mode::Major));
         assert!(matches!(s.pending_edit, PendingEdit::None));
         assert!(s.active_overlay.is_none());
+        assert_eq!(s.selected_step, 0);
+        assert_eq!(s.selected_param, 0);
         for step in &s.steps {
             assert!(!step.enabled);
         }
@@ -633,6 +636,8 @@ mod tests {
         assert!(!s.paused, "default paused should be false");
         assert!(matches!(s.pending_edit, PendingEdit::None), "default pending_edit should be None");
         assert!(s.active_overlay.is_none(), "default active_overlay should be None");
+        assert_eq!(s.selected_step, 0, "default selected_step should be 0");
+        assert_eq!(s.selected_param, 0, "default selected_param should be 0");
         for (i, step) in s.steps.iter().enumerate() {
             assert!(!step.enabled, "default step {} should be disabled", i);
         }
@@ -1010,4 +1015,63 @@ mod tests {
             "NoteOn velocity must match step.velocity=1"
         );
     }
+
+    // --- apply_command: step selection ---
+
+    #[test]
+    fn apply_command_step_select_clamps_at_15() {
+        let mut s = SequencerState::default();
+        s.apply_command(InputCommand::StepSelect(99));
+        assert_eq!(s.selected_step, 15, "StepSelect out of range should clamp to 15");
+    }
+
+    #[test]
+    fn apply_command_step_select_delta_wraps() {
+        let mut s = SequencerState::default();
+        s.selected_step = 0;
+        s.apply_command(InputCommand::StepSelectDelta(-1));
+        assert_eq!(s.selected_step, 15, "StepSelectDelta(-1) from 0 should wrap to 15");
+    }
+
+    #[test]
+    fn apply_command_toggle_step_toggles_selected() {
+        let mut s = SequencerState::default();
+        s.selected_step = 3;
+        assert!(!s.steps[3].enabled);
+        s.apply_command(InputCommand::ToggleStep);
+        assert!(s.steps[3].enabled, "ToggleStep should enable the selected step");
+    }
+
+    #[test]
+    fn apply_command_note_delta_creates_pending_edit() {
+        let mut s = SequencerState::default();
+        s.selected_step = 0;
+        let orig = s.steps[0].midi_note; // 60
+        s.apply_command(InputCommand::NoteDelta(2));
+        assert!(matches!(s.pending_edit, PendingEdit::Note { step: 0, midi_note } if midi_note == orig + 2));
+    }
+
+    #[test]
+    fn apply_command_confirm_commits_pending_note() {
+        let mut s = SequencerState::default();
+        s.selected_step = 0;
+        s.apply_command(InputCommand::NoteDelta(5));
+        let pending = match s.pending_edit {
+            PendingEdit::Note { midi_note, .. } => midi_note,
+            _ => panic!("expected PendingEdit::Note"),
+        };
+        s.apply_command(InputCommand::Confirm);
+        assert_eq!(s.steps[0].midi_note, pending, "Confirm should commit pending note");
+        assert!(matches!(s.pending_edit, PendingEdit::None));
+    }
+
+    #[test]
+    fn apply_command_open_close_overlay() {
+        let mut s = SequencerState::default();
+        s.apply_command(InputCommand::OpenOverlay(OverlayMode::Regular));
+        assert_eq!(s.active_overlay, Some(OverlayMode::Regular));
+        s.apply_command(InputCommand::CloseOverlay);
+        assert!(s.active_overlay.is_none());
+    }
+
 }

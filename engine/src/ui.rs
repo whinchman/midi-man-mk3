@@ -1,48 +1,70 @@
-//! Keyboard UI event loop.
+//! Terminal UI event loop — ratatui render loop + crossterm keyboard handling.
 //!
-//! Uses crossterm for raw terminal key events and ratatui for rendering.
-//! This module is gated behind the `hw-io` feature because crossterm and
-//! ratatui are optional dependencies.
+//! This module requires the `hw-io` feature because it uses the crossterm
+//! backend which needs a real terminal.  Render logic lives in `ui_render`
+//! (always compiled) so it can be unit-tested with `TestBackend`.
 //!
-//! # Design: overlay state split
+//! # Threading model
 //!
-//! `Option<OverlayMode>` and `selected_param: u8` live **in this UI thread
-//! only** — they are presentation state, not shared state.  The `PendingEdit`
-//! lives in `SequencerState` (shared) so the HID thread can read it.
+//! `run_ui` blocks the calling thread.  It is designed to be the main thread's
+//! blocking point (Step 9 joins on it).  When the function returns, the process
+//! should exit.
 //!
-//! When the user presses F1/F2 the UI thread:
-//! 1. Sends `InputCommand::OpenOverlay(mode)` on the shared channel (so
-//!    `SequencerState::apply_command` records `active_overlay`).
-//! 2. Flips its own `overlay: Option<OverlayMode>` field to switch the key
-//!    mapping for subsequent events.
+//! # Exit behaviour
 //!
-//! This avoids a secondary back-channel from state → UI; the UI thread is the
-//! sole authority on the current overlay for key-mapping purposes.
+//! On Ctrl-C (or when the notify channel closes), `run_ui` exits cleanly.
+//! It does *not* send a `MidiEvent::Stop` — the caller (Step 9 / main.rs) is
+//! responsible for stopping the sequencer and joining the clock/MIDI threads
+//! after `run_ui` returns.  This keeps the UI thread free of back-channels into
+//! the clock domain.
+//!
+//! # Render timing
+//!
+//! The render loop wakes on either:
+//! - A message on the `notify` channel (sent by the clock or HID thread after
+//!   each state mutation), or
+//! - A forced 50 ms timeout (~20 FPS) for playhead animation.
+//!
+//! The read lock is acquired, state is cloned, and the lock is released *before*
+//! rendering starts.  The render never holds the lock.
 
-use std::sync::mpsc::SyncSender;
+use std::io;
+use std::sync::{Arc, RwLock};
+use std::sync::mpsc::{Receiver, SyncSender};
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::ExecutableCommand;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::style::{Modifier, Style};
-use ratatui::text::Span;
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use ratatui::Terminal;
 
 use crate::input::{InputCommand, KeyCodeSimple, OverlayMode};
 use crate::input::{overlay_key_to_command, root_key_to_command};
+use crate::state::SequencerState;
+use crate::ui_render::render_frame;
 
-/// Regular overlay parameter names (index 0–6).
-const REGULAR_PARAMS: [&str; 7] = [
-    "Key",
-    "Mode",
-    "Swing",
-    "Step Size",
-    "Loop",
-    "Pause",
-    "Stop/Start",
-];
+/// RAII guard that restores the terminal on drop.
+///
+/// Using Drop ensures the terminal is cleaned up even if a panic unwinds the
+/// stack, preventing a broken terminal state for the user.
+struct TerminalGuard;
+
+impl TerminalGuard {
+    fn enter() -> io::Result<Self> {
+        enable_raw_mode()?;
+        io::stdout().execute(EnterAlternateScreen)?;
+        Ok(Self)
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        // Best-effort cleanup — ignore errors because we may already be panicking.
+        let _ = disable_raw_mode();
+        let _ = io::stdout().execute(LeaveAlternateScreen);
+    }
+}
 
 /// Local UI state — lives entirely in the UI thread.
 struct UiState {
@@ -110,110 +132,113 @@ fn update_local_overlay(ui: &mut UiState, cmd: &InputCommand) {
     }
 }
 
-/// Render the current state into the terminal.
+/// Run the terminal UI event loop.
 ///
-/// This is a stub render that shows the overlay panel when active.
-fn render<B: ratatui::backend::Backend>(
-    terminal: &mut Terminal<B>,
-    ui: &UiState,
-) -> std::io::Result<()> {
-    terminal.draw(|frame| {
-        let area = frame.area();
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(3), Constraint::Length(5)])
-            .split(area);
-
-        // Top area — placeholder sequencer view.
-        let main_block = Block::default().title("MIDI-Man MK3").borders(Borders::ALL);
-        frame.render_widget(main_block, chunks[0]);
-
-        // Bottom area — overlay panel.
-        match ui.overlay {
-            None => {
-                let help = Paragraph::new("F1: Regular overlay  F2: Shift overlay  Space: Toggle  Enter: Confirm")
-                    .block(Block::default().title("Controls").borders(Borders::ALL));
-                frame.render_widget(help, chunks[1]);
-            }
-            Some(OverlayMode::Regular) => {
-                let items: Vec<ListItem> = REGULAR_PARAMS
-                    .iter()
-                    .enumerate()
-                    .map(|(i, name)| {
-                        if i as u8 == ui.selected_param {
-                            ListItem::new(Span::styled(
-                                format!("> {name}"),
-                                Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED),
-                            ))
-                        } else {
-                            ListItem::new(Span::raw(format!("  {name}")))
-                        }
-                    })
-                    .collect();
-                let list = List::new(items)
-                    .block(Block::default().title("Regular Overlay (Esc to close)").borders(Borders::ALL));
-                frame.render_widget(list, chunks[1]);
-            }
-            Some(OverlayMode::Shift) => {
-                let placeholder = Paragraph::new("(shift mode — coming soon)")
-                    .block(Block::default().title("Shift Overlay (Esc to close)").borders(Borders::ALL));
-                frame.render_widget(placeholder, chunks[1]);
-            }
+/// Blocks until the user presses Ctrl-C or the `notify` channel is closed.
+///
+/// # Parameters
+///
+/// - `state`   — shared sequencer state; read lock is acquired briefly per frame.
+/// - `notify`  — wakeup channel; the clock and HID threads send `()` after each
+///               state mutation.  A 50 ms timeout fires if no wakeup arrives.
+/// - `cmd_tx`  — command channel to the state processor.
+///
+/// # Termination
+///
+/// On exit the terminal is restored via the `TerminalGuard` Drop impl.
+/// The caller is responsible for stopping the sequencer (sending
+/// `MidiEvent::Stop`) and joining all other threads after this returns.
+pub fn run_ui(
+    state: Arc<RwLock<SequencerState>>,
+    notify: Receiver<()>,
+    cmd_tx: SyncSender<InputCommand>,
+) {
+    let _guard = match TerminalGuard::enter() {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("run_ui: failed to enter raw mode: {e}");
+            return;
         }
-    })?;
-    Ok(())
-}
-
-/// Run the keyboard event loop.
-///
-/// Blocks until the user presses `q` or `Ctrl+C`.
-///
-/// `tx` is the shared command channel; both this function and the HID thread
-/// (Step 7) send `InputCommand` values on it.
-///
-/// Uses `crossterm::event::poll` with a 50 ms timeout so the render loop
-/// fires at ~20 FPS between key events.
-pub fn run(tx: SyncSender<InputCommand>) -> std::io::Result<()> {
-    use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
-    use crossterm::ExecutableCommand;
-    use std::io;
-
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    stdout.execute(EnterAlternateScreen)?;
+    };
 
     let backend = CrosstermBackend::new(io::stdout());
-    let mut terminal = Terminal::new(backend)?;
+    let mut terminal = match Terminal::new(backend) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("run_ui: failed to create terminal: {e}");
+            return;
+        }
+    };
 
     let mut ui = UiState::new();
-    let mut running = true;
 
-    while running {
-        render(&mut terminal, &ui)?;
+    loop {
+        // ── Render ───────────────────────────────────────────────────────────
+        // Acquire read lock, clone state, release lock, then render.
+        let snapshot = {
+            state.read().expect("run_ui: state RwLock poisoned").clone()
+        };
+        let overlay = ui.overlay;
+        let selected_param = ui.selected_param;
+        if let Err(e) = terminal.draw(|frame| {
+            render_frame(frame, &snapshot, overlay, selected_param);
+        }) {
+            eprintln!("run_ui: render error: {e}");
+            break;
+        }
 
-        if event::poll(Duration::from_millis(50))? {
-            if let Event::Key(key_event) = event::read()? {
-                // Quit on 'q' or Ctrl+C.
-                if key_event.code == KeyCode::Char('q')
-                    || (key_event.code == KeyCode::Char('c')
-                        && key_event.modifiers.contains(KeyModifiers::CONTROL))
+        // ── Input ────────────────────────────────────────────────────────────
+        // Poll for a key event with 50 ms timeout.
+        let has_event = match event::poll(Duration::from_millis(50)) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("run_ui: poll error: {e}");
+                break;
+            }
+        };
+
+        if has_event {
+            let ev = match event::read() {
+                Ok(e) => e,
+                Err(e) => {
+                    eprintln!("run_ui: read error: {e}");
+                    break;
+                }
+            };
+
+            if let Event::Key(key_event) = ev {
+                // Ctrl-C exits the UI thread cleanly.
+                if key_event.code == KeyCode::Char('c')
+                    && key_event.modifiers.contains(KeyModifiers::CONTROL)
                 {
-                    running = false;
-                    continue;
+                    break;
                 }
 
                 if let Some(cmd) = translate_key(key_event, &ui) {
                     update_local_overlay(&mut ui, &cmd);
-                    // Best-effort send; if the receiver is gone we exit cleanly.
-                    if tx.send(cmd).is_err() {
-                        running = false;
+                    // Best-effort send; if the receiver is gone we exit.
+                    if cmd_tx.send(cmd).is_err() {
+                        break;
                     }
                 }
             }
         }
-    }
 
-    disable_raw_mode()?;
-    stdout.execute(LeaveAlternateScreen)?;
-    Ok(())
+        // ── Notify drain ─────────────────────────────────────────────────────
+        // Drain any pending wakeups so we don't fall behind if the clock fires
+        // faster than we render.  `try_recv` returns Err when the channel is
+        // empty; `Disconnected` means all senders have dropped — exit.
+        loop {
+            match notify.try_recv() {
+                Ok(_) => continue,
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    // All notify senders gone — exit the outer loop on next iteration.
+                    // We set a flag here and break the inner loop.
+                    return; // exit run_ui immediately.
+                }
+            }
+        }
+    }
+    // TerminalGuard Drop restores the terminal.
 }

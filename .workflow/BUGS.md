@@ -122,3 +122,76 @@ rustflags = ["-L", "/tmp/alsa-lib"]
 Add `.cargo/config.local.toml` to `.gitignore` and document this pattern in the build notes.
 
 ---
+
+## BUG-004 — [WARNING] `tick()` ignores `StepData.velocity`; hardcodes 100 for every NoteOn
+
+- **File:** `engine/src/state.rs`, line 185
+- **Branch:** `engine-phase1/input-command-abstraction`
+- **Discovered:** 2026-05-02 by code-reviewer agent (step6b-input-command-abstraction review)
+- **Severity:** warning
+
+### Description
+
+This step added `velocity: u8` to `StepData` and wired up the full `VelocityDelta` → `Confirm` → `StepData.velocity` commit pipeline. However, `SequencerState::tick()` (line 185) still uses a hardcoded `velocity: 100` in the `MidiEvent::NoteOn` it produces instead of reading `step.velocity`. As a result, velocity edits committed by `Confirm` are silently discarded — every note plays at velocity 100 regardless of what the user set.
+
+The existing test `tick_note_on_has_correct_fields` also asserts `velocity: 100` so the bug is invisible to the test suite.
+
+### Reproduction
+
+```rust
+let mut s = SequencerState::default();
+s.playing = true;
+s.steps[0].enabled = true;
+s.steps[0].velocity = 64;  // set explicitly
+s.playhead = 15;            // so next tick lands on step 0
+let evt = s.tick();
+// Expected: velocity: 64
+// Actual:   velocity: 100  -- bug
+assert!(matches!(evt, Some(MidiEvent::NoteOn { velocity: 64, .. })));
+```
+
+### Suggested Fix
+
+Change line 185 in `engine/src/state.rs`:
+
+```rust
+// Before:
+velocity: 100,
+// After:
+velocity: step.velocity,
+```
+
+Also update `tick_note_on_has_correct_fields` to set a non-default `step.velocity` value (e.g. 64) and assert it is reflected in the `NoteOn` event.
+
+---
+
+## BUG-005 — [WARNING] `unsafe { std::mem::transmute(report) }` in test violates Safe-Rust standard
+
+- **File:** `engine/src/hid.rs`, line 317
+- **Branch:** `engine-phase1/input-command-abstraction`
+- **Discovered:** 2026-05-02 by code-reviewer agent (step6b-input-command-abstraction review)
+- **Severity:** warning
+
+### Description
+
+`in_report_field_offsets_match_wire_spec` uses `std::mem::transmute::<InReport, [u8; 64]>` to read the raw byte layout of a `repr(C)` struct. The project code standard states "Safe Rust only — no unsafe without a comment explaining why." The comment claims safety based on `repr(C)` and "no padding", but `repr(C)` only guarantees field order — it does not guarantee zero inter-field padding if field alignments differ. While the current field types (`u8`, `[u8; N]`, `[i8; N]`) all have alignment 1 (so no padding is inserted in practice), the transmute is technically unsound if the struct is later modified to include an aligned field. The test can be rewritten without `unsafe` using `std::mem::offset_of!` (stable since Rust 1.77).
+
+### Suggested Fix
+
+Replace the `unsafe` transmute block with stable `offset_of!` assertions:
+
+```rust
+use std::mem::offset_of;
+assert_eq!(offset_of!(InReport, report_id), 0);
+assert_eq!(offset_of!(InReport, seq), 1);
+assert_eq!(offset_of!(InReport, flags), 2);
+assert_eq!(offset_of!(InReport, step_buttons), 3);
+assert_eq!(offset_of!(InReport, step_enable_state), 5);
+assert_eq!(offset_of!(InReport, param_buttons), 7);
+assert_eq!(offset_of!(InReport, encoder_deltas), 9);
+assert_eq!(offset_of!(InReport, tempo_delta), 25);
+assert_eq!(offset_of!(InReport, param_knob_delta), 26);
+assert_eq!(offset_of!(InReport, reserved), 27);
+```
+
+---

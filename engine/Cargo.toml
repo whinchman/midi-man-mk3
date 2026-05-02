@@ -10,12 +10,14 @@ path = "src/main.rs"
 [dependencies]
 midir = { version = "0.11", optional = true }
 hidapi = { version = "2.6", features = ["linux-static-hidraw"], optional = true }
-ratatui = { version = "0.30", optional = true }
+# ratatui is always compiled so TestBackend tests run without the hw-io feature.
+# Only the crossterm backend (ratatui/crossterm) is gated behind hw-io.
+ratatui = { version = "0.30", default-features = false, features = ["macros"] }
 crossterm = { version = "0.29", optional = true }
 libc = "0.2"
 
 [features]
-# Hardware I/O features — require system libraries (ALSA, hidraw).
+# Hardware I/O features — require system libraries (ALSA, hidraw, real terminal).
 # Enabled for the final binary; not required for unit tests.
-hw-io = ["midir", "hidapi", "ratatui", "crossterm"]
+hw-io = ["midir", "hidapi", "crossterm", "ratatui/crossterm"]
 default = []
