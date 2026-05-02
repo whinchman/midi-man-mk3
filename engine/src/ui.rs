@@ -95,10 +95,8 @@ fn update_local_overlay(ui: &mut UiState, cmd: &InputCommand) {
         InputCommand::OpenOverlay(mode) => {
             ui.overlay = Some(*mode);
         }
-        InputCommand::CloseOverlay | InputCommand::Confirm => {
-            if matches!(cmd, InputCommand::CloseOverlay) {
-                ui.overlay = None;
-            }
+        InputCommand::CloseOverlay => {
+            ui.overlay = None;
         }
         InputCommand::ParamSelectDelta(d) => {
             let current = ui.selected_param as i32;

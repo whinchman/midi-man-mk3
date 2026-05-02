@@ -182,7 +182,7 @@ impl SequencerState {
             Some(MidiEvent::NoteOn {
                 channel: 0,
                 note: step.midi_note,
-                velocity: 100,
+                velocity: step.velocity,
                 duration_nanos: 0,
             })
         } else {
@@ -266,7 +266,7 @@ impl SequencerState {
                 }
             }
             InputCommand::ParamSelect(n) => {
-                self.selected_param = n;
+                self.selected_param = n.min(6);
             }
             InputCommand::ParamSelectDelta(d) => {
                 // 7 params (indices 0–6), wrap modulo 7.
@@ -646,9 +646,10 @@ mod tests {
         s.playing = true;
         s.steps[1].enabled = true;
         s.steps[1].midi_note = 72;
+        s.steps[1].velocity = 80;
 
         s.tick(); // move to step 1
-        // step 1 is enabled with note 72
+        // step 1 is enabled with note 72 and velocity 80
         // (playhead was at 0, so first tick moves to 1)
         let evt = {
             // Reset and re-tick cleanly
@@ -657,7 +658,7 @@ mod tests {
         };
         assert_eq!(
             evt,
-            Some(MidiEvent::NoteOn { channel: 0, note: 72, velocity: 100, duration_nanos: 0 })
+            Some(MidiEvent::NoteOn { channel: 0, note: 72, velocity: 80, duration_nanos: 0 })
         );
     }
 

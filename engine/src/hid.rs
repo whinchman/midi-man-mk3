@@ -281,8 +281,7 @@ mod tests {
 
     #[test]
     fn in_report_field_offsets_match_wire_spec() {
-        // Use a zeroed buffer and observe which byte changes when we set each
-        // field to a sentinel value, verifying the offset matches the spec.
+        // Verify field offsets using std::mem::offset_of! (stable since Rust 1.77).
         //
         // Spec:
         //   Byte  0   : report_id
@@ -296,47 +295,16 @@ mod tests {
         //   Byte 26   : param_knob_delta
         //   Bytes 27-63: reserved[37]
 
-        // Build a report with one distinct sentinel per field group, then
-        // call to_bytes via unsafe memcpy to inspect raw layout.
-        let report = InReport {
-            report_id: 0x01,
-            seq: 0x02,
-            flags: 0x03,
-            step_buttons: [0x04, 0x05],
-            step_enable_state: [0x06, 0x07],
-            param_buttons: [0x08, 0x09],
-            encoder_deltas: [0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
-                             0x10, 0x11, 0x12, 0x13, 0x14, 0x15,
-                             0x16, 0x17, 0x18, 0x19],
-            tempo_delta: 0x1A,
-            param_knob_delta: 0x1B,
-            reserved: [0u8; 37],
-        };
-
-        // Read the struct as raw bytes via pointer cast (safe: repr(C), no padding, u8 alignment >= 1).
-        let raw: [u8; 64] = unsafe {
-            std::mem::transmute(report)
-        };
-
-        assert_eq!(raw[0], 0x01, "report_id must be at byte 0");
-        assert_eq!(raw[1], 0x02, "seq must be at byte 1");
-        assert_eq!(raw[2], 0x03, "flags must be at byte 2");
-        assert_eq!(raw[3], 0x04, "step_buttons[0] must be at byte 3");
-        assert_eq!(raw[4], 0x05, "step_buttons[1] must be at byte 4");
-        assert_eq!(raw[5], 0x06, "step_enable_state[0] must be at byte 5");
-        assert_eq!(raw[6], 0x07, "step_enable_state[1] must be at byte 6");
-        assert_eq!(raw[7], 0x08, "param_buttons[0] must be at byte 7");
-        assert_eq!(raw[8], 0x09, "param_buttons[1] must be at byte 8");
-        for i in 0..16usize {
-            assert_eq!(raw[9 + i], 0x0A + i as u8,
-                "encoder_deltas[{i}] must be at byte {}", 9 + i);
-        }
-        assert_eq!(raw[25], 0x1A, "tempo_delta must be at byte 25");
-        assert_eq!(raw[26], 0x1B, "param_knob_delta must be at byte 26");
-        // reserved bytes 27-63 should all be 0
-        for i in 27..64usize {
-            assert_eq!(raw[i], 0x00, "reserved byte {i} must be zero");
-        }
+        assert_eq!(std::mem::offset_of!(InReport, report_id), 0, "report_id must be at byte 0");
+        assert_eq!(std::mem::offset_of!(InReport, seq), 1, "seq must be at byte 1");
+        assert_eq!(std::mem::offset_of!(InReport, flags), 2, "flags must be at byte 2");
+        assert_eq!(std::mem::offset_of!(InReport, step_buttons), 3, "step_buttons must start at byte 3");
+        assert_eq!(std::mem::offset_of!(InReport, step_enable_state), 5, "step_enable_state must start at byte 5");
+        assert_eq!(std::mem::offset_of!(InReport, param_buttons), 7, "param_buttons must start at byte 7");
+        assert_eq!(std::mem::offset_of!(InReport, encoder_deltas), 9, "encoder_deltas must start at byte 9");
+        assert_eq!(std::mem::offset_of!(InReport, tempo_delta), 25, "tempo_delta must be at byte 25");
+        assert_eq!(std::mem::offset_of!(InReport, param_knob_delta), 26, "param_knob_delta must be at byte 26");
+        assert_eq!(std::mem::offset_of!(InReport, reserved), 27, "reserved must start at byte 27");
     }
 
     #[test]
