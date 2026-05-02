@@ -47,6 +47,39 @@ impl MidiSender for MidirSender {
     }
 }
 
+/// Choose which port index to open given a list of port names and an optional
+/// filter string.
+///
+/// Returns `None` when `port_names` is empty (caller should disable MIDI).
+/// When `filter` is `Some(f)`, returns the index of the first port whose name
+/// contains `f` (case-insensitive substring match), or `Some(0)` when no port
+/// matches (falling back to the first port with a logged warning).
+/// When `filter` is `None`, returns `Some(0)`.
+pub fn select_port_idx(port_names: &[&str], filter: Option<&str>) -> Option<usize> {
+    if port_names.is_empty() {
+        return None;
+    }
+    match filter {
+        None => Some(0),
+        Some(f) => {
+            let f_lower = f.to_lowercase();
+            let found = port_names.iter().enumerate().find(|(_, name)| {
+                name.to_lowercase().contains(&f_lower)
+            });
+            match found {
+                Some((idx, _)) => Some(idx),
+                None => {
+                    eprintln!(
+                        "[midi_out] no port matching '{}' found — falling back to first port",
+                        f
+                    );
+                    Some(0)
+                }
+            }
+        }
+    }
+}
+
 /// Open an ALSA MIDI output port.
 ///
 /// When `port_name` is `Some(filter)`, searches for a port whose name contains
@@ -71,28 +104,15 @@ fn open_port(port_name: Option<&str>) -> Option<Box<dyn MidiSender>> {
         return None;
     }
 
-    // Determine which port to open.
-    let chosen_idx = if let Some(filter) = port_name {
-        let filter_lower = filter.to_lowercase();
-        let found = ports.iter().enumerate().find(|(_, p)| {
-            output.port_name(p)
-                .unwrap_or_default()
-                .to_lowercase()
-                .contains(&filter_lower)
-        });
-        match found {
-            Some((idx, _)) => idx,
-            None => {
-                eprintln!(
-                    "[midi_out] no port matching '{}' found — falling back to first port",
-                    filter
-                );
-                0
-            }
-        }
-    } else {
-        0
-    };
+    // Collect port names so select_port_idx can operate on plain string slices.
+    let port_name_strings: Vec<String> = ports.iter()
+        .map(|p| output.port_name(p).unwrap_or_default())
+        .collect();
+    let port_name_refs: Vec<&str> = port_name_strings.iter().map(String::as_str).collect();
+
+    // Determine which port to open using the pure selection helper.
+    let chosen_idx = select_port_idx(&port_name_refs, port_name)
+        .expect("ports is non-empty; select_port_idx always returns Some for non-empty slice");
 
     let port = &ports[chosen_idx];
     let chosen_name = output.port_name(port).unwrap_or_else(|_| "<unknown>".to_owned());
@@ -467,5 +487,68 @@ mod tests {
         drop(tx);
         // Must not panic regardless of whether ALSA ports are present.
         run_midi_out(rx, None);
+    }
+
+    // --- select_port_idx ---
+
+    /// Empty port list returns None.
+    #[test]
+    fn select_port_idx_empty_list_returns_none() {
+        assert_eq!(select_port_idx(&[], None), None);
+        assert_eq!(select_port_idx(&[], Some("anything")), None);
+    }
+
+    /// No filter: always returns index 0.
+    #[test]
+    fn select_port_idx_no_filter_returns_first() {
+        let ports = ["PortA", "PortB", "PortC"];
+        assert_eq!(select_port_idx(&ports, None), Some(0));
+    }
+
+    /// Case-insensitive substring match finds the correct port.
+    #[test]
+    fn select_port_idx_case_insensitive_match() {
+        let ports = ["FluidSynth virtual port", "USB MIDI", "Timidity"];
+        // Lowercase filter matches uppercase port name.
+        assert_eq!(select_port_idx(&ports, Some("fluidsynth")), Some(0));
+        // Uppercase filter matches mixed-case port name.
+        assert_eq!(select_port_idx(&ports, Some("MIDI")), Some(1));
+        // Partial substring match.
+        assert_eq!(select_port_idx(&ports, Some("imid")), Some(2));
+    }
+
+    /// Exact match (full port name) is found.
+    #[test]
+    fn select_port_idx_exact_name_match() {
+        let ports = ["Alpha", "Beta", "Gamma"];
+        assert_eq!(select_port_idx(&ports, Some("Beta")), Some(1));
+    }
+
+    /// When no port matches the filter, falls back to index 0.
+    #[test]
+    fn select_port_idx_no_match_falls_back_to_zero() {
+        let ports = ["PortA", "PortB"];
+        assert_eq!(select_port_idx(&ports, Some("ZZZ_nonexistent")), Some(0));
+    }
+
+    /// Single-port list with matching filter.
+    #[test]
+    fn select_port_idx_single_port_matches() {
+        let ports = ["OnlyPort"];
+        assert_eq!(select_port_idx(&ports, Some("only")), Some(0));
+    }
+
+    /// Single-port list with non-matching filter still returns 0 (fallback).
+    #[test]
+    fn select_port_idx_single_port_no_match_falls_back() {
+        let ports = ["OnlyPort"];
+        assert_eq!(select_port_idx(&ports, Some("other")), Some(0));
+    }
+
+    /// Filter matches the last port in the list.
+    #[test]
+    fn select_port_idx_matches_last_port() {
+        let ports = ["Alpha", "Beta", "Gamma", "Delta"];
+        assert_eq!(select_port_idx(&ports, Some("delta")), Some(3));
     }
 }
