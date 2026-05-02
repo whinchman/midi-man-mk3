@@ -2,6 +2,7 @@
 
 - **Type**: coder
 - **Status**: done
+- **Review**: APPROVED (1 warning, 1 info)
 - **Repo**: midi-man-mk3
 - **Parallel Group**: 5
 - **Feature Branch**: feature/engine-phase1
@@ -149,4 +150,51 @@ ref. Used `feat/terminal-ui` instead.
   module-level doc comment.
 - Step6b changes (input.rs, extended state.rs) incorporated directly because
   step6b is not yet merged into feature/engine-phase1.
+
+### Code Review (2026-05-02)
+
+**Verdict:** APPROVED — 0 critical, 1 warning, 1 info. No blocking issues.
+
+#### [WARNING] engine/Cargo.toml — crossterm pulled in unconditionally via ratatui default features
+
+The Cargo.toml comment states "crossterm remains hw-io gated" but `ratatui = "0.30"` uses
+default features which include the `crossterm` feature (via `ratatui-crossterm`). Running
+`cargo tree -p engine` without `hw-io` shows `ratatui-crossterm v0.1.0` and
+`crossterm v0.29.0` in the dependency tree. The stated intent is not achieved.
+
+Suggested fix: declare ratatui without default features and add `ratatui/crossterm`
+to the `hw-io` feature list:
+```toml
+ratatui = { version = "0.30", default-features = false, features = ["all-widgets", "macros", "layout-cache", "underline-color"] }
+[features]
+hw-io = ["midir", "hidapi", "crossterm", "ratatui/crossterm"]
+```
+Filed as BUG-007.
+
+#### [INFO] engine/src/ui_render.rs line 165 — `display_note` is a write-only variable
+
+`let display_note: &str;` is assigned in both branches of the if-let but `note_str`
+(the formatted version) is what's actually used. `display_note` is dead after assignment.
+This is harmless but adds noise; could be simplified by inlining the `note_name()` call
+directly into the `format!` or by removing the separate variable.
+
+#### Checklist (all items reviewed)
+
+- [x] `run_ui` signature matches spec
+- [x] `TerminalGuard` Drop impl restores raw mode + alternate screen
+- [x] Read lock acquired, state cloned, lock released before render
+- [x] Top bar renders BPM / Key / Mode / StepSize / Status — verified by tests
+- [x] Step row: note names, ●/○ indicators, playhead highlight, selected highlight distinct
+- [x] PendingEdit::Note preview in Yellow+Underlined style on selected column
+- [x] Second row: Swing, Loop bounds when active
+- [x] F1 Regular overlay: 7 params with pending preview — verified by tests
+- [x] F2 Shift overlay placeholder — verified by test
+- [x] All key mappings handled (root + overlay); Esc sends CloseOverlay
+- [x] Ctrl-C exits cleanly
+- [x] Caller handles MidiEvent::Stop — documented in module doc
+- [x] No unwrap() in non-test code (expect() with messages used correctly)
+- [x] No lock held during render
+- [x] No unsafe in new files
+- [x] 180 tests passing — confirmed
+- [x] Step6b additions are new code (not duplicates of existing feature/engine-phase1 code)
 
