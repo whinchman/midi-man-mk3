@@ -386,6 +386,152 @@ mod tests {
         }
     }
 
+    // --- tick: all 16 steps visited ---
+
+    #[test]
+    fn tick_all_16_steps_enabled_visits_every_step() {
+        let mut s = playing_state_all_enabled();
+        // Playhead starts at 0. Tick 16 times and collect every playhead position.
+        let mut visited = [false; 16];
+        for _ in 0..16 {
+            s.tick();
+            visited[s.playhead as usize] = true;
+        }
+        for i in 0..16 {
+            assert!(visited[i], "step {} was never visited", i);
+        }
+        // After exactly 16 ticks, playhead must be back at 0.
+        assert_eq!(s.playhead, 0, "playhead should wrap back to 0 after 16 ticks");
+    }
+
+    // --- tick: loop boundary edge cases ---
+
+    #[test]
+    fn tick_loop_full_range_loop_in0_loop_out15() {
+        let mut s = playing_state_all_enabled();
+        s.loop_in = 0;
+        s.loop_out = 15;
+        s.loop_active = true;
+        s.playhead = 0;
+
+        // With full range loop the behavior should be identical to no-loop.
+        // After 15 ticks, playhead == 15; one more tick wraps back to loop_in=0.
+        for _ in 0..15 {
+            s.tick();
+        }
+        assert_eq!(s.playhead, 15);
+        s.tick();
+        assert_eq!(s.playhead, 0, "full-range loop should wrap to 0 after step 15");
+    }
+
+    #[test]
+    fn tick_loop_single_step_loop_in7_loop_out7() {
+        let mut s = playing_state_all_enabled();
+        s.loop_in = 7;
+        s.loop_out = 7;
+        s.loop_active = true;
+        s.playhead = 7; // already at the only step in the loop
+
+        // Every tick must stay at step 7.
+        for i in 0..10 {
+            s.tick();
+            assert_eq!(s.playhead, 7, "single-step loop should stay at 7 (tick {})", i);
+        }
+    }
+
+    #[test]
+    fn tick_loop_inverted_loop_in3_loop_out2() {
+        // Inverted loop: loop_in > loop_out. Current implementation advances
+        // through steps 3..N until next > loop_out(2), which immediately wraps
+        // back to loop_in=3. This means only step 3 is ever reached from step 3
+        // (tick advances by 1, lands on 4 > 2, wraps to 3 immediately).
+        // The test documents the current behavior so regressions are caught.
+        let mut s = playing_state_all_enabled();
+        s.loop_in = 3;
+        s.loop_out = 2;
+        s.loop_active = true;
+        s.playhead = 3;
+
+        // From playhead=3: next=4 > loop_out=2, so wraps to loop_in=3.
+        s.tick();
+        assert_eq!(
+            s.playhead, 3,
+            "inverted loop: playhead should wrap back to loop_in=3 immediately"
+        );
+
+        // Behavior is stable across multiple ticks.
+        for _ in 0..5 {
+            s.tick();
+            assert_eq!(s.playhead, 3, "inverted loop should remain stuck at loop_in=3");
+        }
+    }
+
+    // --- apply_encoder_delta: additional edge cases ---
+
+    #[test]
+    fn apply_encoder_delta_zero_is_noop() {
+        let mut s = SequencerState::default();
+        let before = s.steps[0].midi_note;
+        s.apply_encoder_delta(0, 0);
+        assert_eq!(s.steps[0].midi_note, before, "delta=0 must not change the note");
+    }
+
+    #[test]
+    fn apply_encoder_delta_large_positive_wraps_octave() {
+        let mut s = SequencerState::default();
+        // C4=60 in C Major. 7 scale degrees = 1 octave.
+        // Delta=7 should land on C5=72.
+        s.apply_encoder_delta(0, 7);
+        assert_eq!(s.steps[0].midi_note, 72, "delta=7 in C Major should be C5=72");
+    }
+
+    #[test]
+    fn apply_encoder_delta_large_negative_clamps_at_zero() {
+        let mut s = SequencerState::default();
+        // Start at C4=60. Shift note down to a very low value first.
+        s.steps[0].midi_note = 2; // near bottom
+        // A very large negative delta should clamp at 0, not underflow.
+        s.apply_encoder_delta(0, -100);
+        assert_eq!(s.steps[0].midi_note, 0, "large negative delta should clamp at MIDI 0");
+    }
+
+    // --- toggle_step: double-toggle identity ---
+
+    #[test]
+    fn toggle_step_double_toggle_returns_to_original() {
+        let mut s = SequencerState::default();
+        let original = s.steps[4].enabled;
+        s.toggle_step(4);
+        s.toggle_step(4);
+        assert_eq!(
+            s.steps[4].enabled, original,
+            "double-toggle must return to original state"
+        );
+    }
+
+    // --- Default state: exhaustive field check ---
+
+    #[test]
+    fn default_state_all_fields_match_spec() {
+        let s = SequencerState::default();
+        assert_eq!(s.tempo_bpm, 120, "default tempo_bpm should be 120");
+        assert_eq!(s.swing, 0, "default swing should be 0");
+        assert!(matches!(s.key, Key::C), "default key should be C");
+        assert!(matches!(s.mode, Mode::Major), "default mode should be Major");
+        assert!(matches!(s.step_size, StepSize::Sixteenth), "default step_size should be Sixteenth");
+        assert_eq!(s.loop_in, 0, "default loop_in should be 0");
+        assert_eq!(s.loop_out, 15, "default loop_out should be 15");
+        assert!(!s.loop_active, "default loop_active should be false");
+        assert_eq!(s.playhead, 0, "default playhead should be 0");
+        assert!(!s.playing, "default playing should be false");
+        assert!(!s.paused, "default paused should be false");
+        assert!(matches!(s.pending_edit, PendingEdit::None), "default pending_edit should be None");
+        assert!(s.active_overlay.is_none(), "default active_overlay should be None");
+        for (i, step) in s.steps.iter().enumerate() {
+            assert!(!step.enabled, "default step {} should be disabled", i);
+        }
+    }
+
     // --- MidiEvent content ---
 
     #[test]
