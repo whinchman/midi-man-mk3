@@ -1,7 +1,7 @@
 # Task: HID Report Structs (Shared Definitions)
 
 - **Type**: coder
-- **Status**: pending
+- **Status**: done
 - **Repo**: midi-man-mk3
 - **Parallel Group**: 1
 - **Feature Branch**: feature/engine-phase1
@@ -103,3 +103,23 @@ Step 6b will add the `InputCommand` translation layer on top of `InReport` — t
 
 ## Notes
 
+Implemented on branch `hid-report-structs` (worktree at `.workflow/worktrees/hid-report-structs`), commit `bf44ab5`.
+
+### What was implemented
+
+- **`engine/src/hid.rs`**: `HID_VID`/`HID_PID` constants, `InReport` and `OutReport` as `repr(C)` 64-byte structs, `InReport::from_bytes(&[u8; 64]) -> InReport`, `OutReport::to_bytes(&self) -> [u8; 64]`. No heap allocation in encode/decode paths.
+- **`firmware/src/report.rs`**: byte-identical struct definitions for `InReport` and `OutReport` with comment pointing to spec: `// See midi-man-mk3-mvp.md Section 4 — must match engine/src/hid.rs byte-for-byte`.
+- **Cargo workspace stub**: `Cargo.toml`, `engine/Cargo.toml`, `firmware/Cargo.toml` created to allow `cargo test -p engine` to run independently of the parallel workspace-scaffold step.
+
+### Test results
+
+`cargo test -p engine`: **6/6 tests passed**
+
+- `in_report_round_trip_nonzero` — all fields with distinct non-zero values survive encode/decode
+- `in_report_all_zeros_produces_zero_struct` — zero buffer produces zero-value struct
+- `out_report_to_bytes_round_trip` — all fields correctly packed into 64-byte buffer
+- `out_report_to_bytes_is_64_bytes` — output is exactly 64 bytes
+- `in_report_from_bytes_is_64_bytes_in` — compile-time signature check
+- `hid_vid_pid_constants` — VID=0x2E8A, PID=0x000A
+
+`cargo check -p firmware`: clean compile.
