@@ -59,15 +59,20 @@ fn mode_name(mode: Mode) -> &'static str {
         Mode::Lydian => "Lydian",
         Mode::Mixolydian => "Mixolydian",
         Mode::Locrian => "Locrian",
+        Mode::HarmonicMinor => "Harmonic Minor",
+        Mode::MelodicMinor => "Melodic Minor",
     }
 }
 
 /// Return a human-readable string for a `StepSize`.
 fn step_size_label(sz: StepSize) -> &'static str {
     match sz {
+        StepSize::Whole => "1/1",
+        StepSize::Half => "1/2",
         StepSize::Quarter => "1/4",
         StepSize::Eighth => "1/8",
         StepSize::Sixteenth => "1/16",
+        StepSize::ThirtySecond => "1/32",
     }
 }
 

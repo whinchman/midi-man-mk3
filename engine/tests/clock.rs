@@ -1,4 +1,4 @@
-use engine::clock::{add_nanos_signed, add_nanos, swing_offset_nanos, tick_nanos, steps_per_beat};
+use engine::clock::{add_nanos_signed, add_nanos, swing_offset_nanos, tick_nanos, step_ratio};
 use engine::state::{MidiEvent, SequencerState, StepSize};
 use libc;
 
@@ -56,13 +56,34 @@ fn tick_nanos_240bpm_eighth_is_125ms() {
     assert_eq!(tick_nanos(240, StepSize::Eighth), 125_000_000);
 }
 
-// --- steps_per_beat ---
+// --- step_ratio ---
 
 #[test]
-fn steps_per_beat_values() {
-    assert_eq!(steps_per_beat(StepSize::Quarter), 1);
-    assert_eq!(steps_per_beat(StepSize::Eighth), 2);
-    assert_eq!(steps_per_beat(StepSize::Sixteenth), 4);
+fn step_ratio_values() {
+    assert_eq!(step_ratio(StepSize::Whole),        (4, 1));
+    assert_eq!(step_ratio(StepSize::Half),         (2, 1));
+    assert_eq!(step_ratio(StepSize::Quarter),      (1, 1));
+    assert_eq!(step_ratio(StepSize::Eighth),       (1, 2));
+    assert_eq!(step_ratio(StepSize::Sixteenth),    (1, 4));
+    assert_eq!(step_ratio(StepSize::ThirtySecond), (1, 8));
+}
+
+#[test]
+fn tick_nanos_whole_note_120bpm() {
+    // 4 beats per step at 120 BPM = 2_000_000_000 ns
+    assert_eq!(tick_nanos(120, StepSize::Whole), 2_000_000_000);
+}
+
+#[test]
+fn tick_nanos_half_note_120bpm() {
+    // 2 beats per step at 120 BPM = 1_000_000_000 ns
+    assert_eq!(tick_nanos(120, StepSize::Half), 1_000_000_000);
+}
+
+#[test]
+fn tick_nanos_thirty_second_120bpm() {
+    // 60_000_000_000 / (120 * 8) = 62_500_000 ns
+    assert_eq!(tick_nanos(120, StepSize::ThirtySecond), 62_500_000);
 }
 
 // --- swing_offset_nanos ---

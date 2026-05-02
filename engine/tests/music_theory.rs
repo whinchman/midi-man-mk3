@@ -83,7 +83,7 @@ fn notes_in_key_dorian() {
 fn no_heap_alloc_sanity() {
     // This test exists to document intent: all return types are [u8;N] or &'static str.
     let _: [u8; 7] = notes_in_key(Key::C, Mode::Major);
-    let _: &'static str = note_name(60);
+    let _: String = note_name(60);
     let _: u8 = next_note(60, Key::C, Mode::Major, 1);
 }
 

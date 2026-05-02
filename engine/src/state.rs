@@ -13,12 +13,18 @@ pub use crate::input::OverlayMode;
 /// Step resolution for the sequencer clock.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum StepSize {
+    /// One step = one whole note.
+    Whole,
+    /// One step = one half note.
+    Half,
     /// One step = one quarter note.
     Quarter,
     /// One step = one eighth note.
     Eighth,
     /// One step = one sixteenth note.
     Sixteenth,
+    /// One step = one thirty-second note.
+    ThirtySecond,
 }
 
 /// Pending parameter edit awaiting confirmation.

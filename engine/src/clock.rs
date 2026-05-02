@@ -15,21 +15,23 @@ use crate::state::{MidiEvent, SequencerState, StepSize};
 /// Number of nanoseconds in one minute.
 const NANOS_PER_MINUTE: u64 = 60_000_000_000;
 
-/// Returns the number of steps per beat for the given step size.
-pub fn steps_per_beat(step_size: StepSize) -> u64 {
+/// Returns (beats_per_step_num, beats_per_step_den) as a rational multiplier.
+/// tick_nanos = 60_000_000_000 * num / (bpm * den)
+pub fn step_ratio(step_size: StepSize) -> (u64, u64) {
     match step_size {
-        StepSize::Quarter => 1,
-        StepSize::Eighth => 2,
-        StepSize::Sixteenth => 4,
+        StepSize::Whole        => (4, 1),
+        StepSize::Half         => (2, 1),
+        StepSize::Quarter      => (1, 1),
+        StepSize::Eighth       => (1, 2),
+        StepSize::Sixteenth    => (1, 4),
+        StepSize::ThirtySecond => (1, 8),
     }
 }
 
 /// Computes the tick period in nanoseconds for the given tempo and step size.
-///
-/// Formula: `60_000_000_000 / (bpm * steps_per_beat)`
 pub fn tick_nanos(bpm: u16, step_size: StepSize) -> u64 {
-    let spb = steps_per_beat(step_size);
-    NANOS_PER_MINUTE / (bpm as u64 * spb)
+    let (num, den) = step_ratio(step_size);
+    NANOS_PER_MINUTE * num / (bpm as u64 * den)
 }
 
 /// Computes the swing offset in nanoseconds for an odd step.
