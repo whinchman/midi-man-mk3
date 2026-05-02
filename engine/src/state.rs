@@ -3,17 +3,12 @@
 //! Wrap in `Arc<RwLock<SequencerState>>` at the call site (Step 9).
 //! All mutating methods take `&mut self`; callers hold the write lock.
 
+use crate::input::InputCommand;
 use crate::music_theory::{Key, Mode};
 
-/// Stub for OverlayMode until Step 6b wires up the real import from input.rs.
-/// Step 6b will replace this with `use crate::input::OverlayMode;`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum OverlayMode {
-    /// Normal (non-shift) overlay.
-    Regular,
-    /// Shift overlay — secondary functions active.
-    Shift,
-}
+// Re-export OverlayMode from input so that existing code importing it from
+// state (e.g. sequencer.rs) continues to compile without modification.
+pub use crate::input::OverlayMode;
 
 /// Step resolution for the sequencer clock.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -46,11 +41,13 @@ pub struct StepData {
     pub enabled: bool,
     /// MIDI note number (0–127).
     pub midi_note: u8,
+    /// MIDI velocity (0–127).
+    pub velocity: u8,
 }
 
 impl Default for StepData {
     fn default() -> Self {
-        Self { enabled: false, midi_note: 60 }
+        Self { enabled: false, midi_note: 60, velocity: 100 }
     }
 }
 
@@ -106,6 +103,10 @@ pub struct SequencerState {
     pub pending_edit: PendingEdit,
     /// Active overlay mode; set by the command processor, read by the HID thread.
     pub active_overlay: Option<OverlayMode>,
+    /// Currently selected step (0–15); controlled by StepSelect/StepSelectDelta.
+    pub selected_step: usize,
+    /// Currently selected param index (0–6); controlled by ParamSelect/ParamSelectDelta.
+    pub selected_param: u8,
 }
 
 impl Default for SequencerState {
@@ -125,6 +126,8 @@ impl Default for SequencerState {
             paused: false,
             pending_edit: PendingEdit::None,
             active_overlay: None,
+            selected_step: 0,
+            selected_param: 0,
         }
     }
 }
@@ -179,16 +182,120 @@ impl SequencerState {
             Some(MidiEvent::NoteOn {
                 channel: 0,
                 note: step.midi_note,
-                velocity: 100,
+                velocity: step.velocity,
                 duration_nanos: 0,
             })
         } else {
             None
         }
     }
+
+    /// Apply an `InputCommand` to the sequencer state.
+    ///
+    /// This is the single entry point for all state mutation driven by user
+    /// input.  Both the keyboard thread and the HID thread send `InputCommand`
+    /// values on a shared channel; the consumer calls this method while holding
+    /// the write lock.
+    pub fn apply_command(&mut self, cmd: InputCommand) {
+        match cmd {
+            InputCommand::StepSelect(n) => {
+                self.selected_step = n.min(15);
+                // Discard any pending note or velocity edit on step change.
+                if matches!(self.pending_edit, PendingEdit::Note { .. } | PendingEdit::Velocity { .. }) {
+                    self.pending_edit = PendingEdit::None;
+                }
+            }
+            InputCommand::StepSelectDelta(d) => {
+                // Wrapping arithmetic modulo 16.
+                let current = self.selected_step as i32;
+                let next = ((current + d as i32).rem_euclid(16)) as usize;
+                self.selected_step = next;
+                if matches!(self.pending_edit, PendingEdit::Note { .. } | PendingEdit::Velocity { .. }) {
+                    self.pending_edit = PendingEdit::None;
+                }
+            }
+            InputCommand::NoteDelta(d) => {
+                let step = self.selected_step;
+                let current_note = self.steps[step].midi_note;
+                // Saturating add so we stay in 0–127.
+                let new_note = (current_note as i16 + d as i16).clamp(0, 127) as u8;
+                self.pending_edit = PendingEdit::Note { step, midi_note: new_note };
+            }
+            InputCommand::Confirm => {
+                match self.pending_edit {
+                    PendingEdit::None => { /* no-op */ }
+                    PendingEdit::Note { step, midi_note } => {
+                        if step < 16 {
+                            self.steps[step].midi_note = midi_note;
+                        }
+                        self.pending_edit = PendingEdit::None;
+                    }
+                    PendingEdit::Velocity { step, velocity } => {
+                        if step < 16 {
+                            self.steps[step].velocity = velocity;
+                        }
+                        self.pending_edit = PendingEdit::None;
+                    }
+                    PendingEdit::Param { .. } => {
+                        // Param commits are handled by the param overlay logic.
+                        // Clear the pending edit after confirmation.
+                        self.pending_edit = PendingEdit::None;
+                    }
+                }
+            }
+            InputCommand::ToggleStep => {
+                let step = self.selected_step;
+                self.toggle_step(step);
+            }
+            InputCommand::VelocityDelta(d) => {
+                let step = self.selected_step;
+                let current_vel = self.steps[step].velocity;
+                let new_vel = (current_vel as i16 + d as i16).clamp(0, 127) as u8;
+                self.pending_edit = PendingEdit::Velocity { step, velocity: new_vel };
+            }
+            InputCommand::OpenOverlay(mode) => {
+                // Record the active overlay so HID can read it.
+                // The UI thread also tracks this locally for rendering decisions.
+                self.active_overlay = Some(mode);
+            }
+            InputCommand::CloseOverlay => {
+                self.active_overlay = None;
+                // Discard any pending param edit.
+                if matches!(self.pending_edit, PendingEdit::Param { .. }) {
+                    self.pending_edit = PendingEdit::None;
+                }
+            }
+            InputCommand::ParamSelect(n) => {
+                self.selected_param = n.min(6);
+            }
+            InputCommand::ParamSelectDelta(d) => {
+                // 7 params (indices 0–6), wrap modulo 7.
+                let current = self.selected_param as i32;
+                let next = ((current + d as i32).rem_euclid(7)) as u8;
+                self.selected_param = next;
+            }
+            InputCommand::ParamValueDelta(d) => {
+                let overlay = match self.active_overlay {
+                    Some(m) => m,
+                    None => return, // No overlay open — ignore.
+                };
+                let index = self.selected_param;
+                let current_value = match self.pending_edit {
+                    PendingEdit::Param { index: pi, value, .. } if pi == index => value,
+                    _ => 0,
+                };
+                self.pending_edit = PendingEdit::Param {
+                    overlay,
+                    index,
+                    value: current_value + d as i64,
+                };
+            }
+        }
+    }
 }
 
 #[cfg(test)]
+#[allow(clippy::bool_assert_comparison)]
 mod tests {
     use super::*;
 
@@ -381,6 +488,8 @@ mod tests {
         assert!(matches!(s.mode, Mode::Major));
         assert!(matches!(s.pending_edit, PendingEdit::None));
         assert!(s.active_overlay.is_none());
+        assert_eq!(s.selected_step, 0);
+        assert_eq!(s.selected_param, 0);
         for step in &s.steps {
             assert!(!step.enabled);
         }
@@ -527,6 +636,8 @@ mod tests {
         assert!(!s.paused, "default paused should be false");
         assert!(matches!(s.pending_edit, PendingEdit::None), "default pending_edit should be None");
         assert!(s.active_overlay.is_none(), "default active_overlay should be None");
+        assert_eq!(s.selected_step, 0, "default selected_step should be 0");
+        assert_eq!(s.selected_param, 0, "default selected_param should be 0");
         for (i, step) in s.steps.iter().enumerate() {
             assert!(!step.enabled, "default step {} should be disabled", i);
         }
@@ -540,6 +651,7 @@ mod tests {
         s.playing = true;
         s.steps[1].enabled = true;
         s.steps[1].midi_note = 72;
+        s.steps[1].velocity = 100;
 
         s.tick(); // move to step 1
         // step 1 is enabled with note 72
@@ -552,6 +664,400 @@ mod tests {
         assert_eq!(
             evt,
             Some(MidiEvent::NoteOn { channel: 0, note: 72, velocity: 100, duration_nanos: 0 })
+        );
+    }
+
+    // --- apply_command: step selection ---
+
+    #[test]
+    fn apply_command_step_select_clamps_at_15() {
+        let mut s = SequencerState::default();
+        s.apply_command(InputCommand::StepSelect(99));
+        assert_eq!(s.selected_step, 15, "StepSelect out of range should clamp to 15");
+    }
+
+    #[test]
+    fn apply_command_step_select_delta_wraps() {
+        let mut s = SequencerState::default();
+        s.selected_step = 0;
+        s.apply_command(InputCommand::StepSelectDelta(-1));
+        assert_eq!(s.selected_step, 15, "StepSelectDelta(-1) from 0 should wrap to 15");
+    }
+
+    #[test]
+    fn apply_command_toggle_step_toggles_selected() {
+        let mut s = SequencerState::default();
+        s.selected_step = 3;
+        assert!(!s.steps[3].enabled);
+        s.apply_command(InputCommand::ToggleStep);
+        assert!(s.steps[3].enabled, "ToggleStep should enable the selected step");
+    }
+
+    #[test]
+    fn apply_command_note_delta_creates_pending_edit() {
+        let mut s = SequencerState::default();
+        s.selected_step = 0;
+        let orig = s.steps[0].midi_note; // 60
+        s.apply_command(InputCommand::NoteDelta(2));
+        assert!(matches!(s.pending_edit, PendingEdit::Note { step: 0, midi_note } if midi_note == orig + 2));
+    }
+
+    #[test]
+    fn apply_command_confirm_commits_pending_note() {
+        let mut s = SequencerState::default();
+        s.selected_step = 0;
+        s.apply_command(InputCommand::NoteDelta(5));
+        let pending = match s.pending_edit {
+            PendingEdit::Note { midi_note, .. } => midi_note,
+            _ => panic!("expected PendingEdit::Note"),
+        };
+        s.apply_command(InputCommand::Confirm);
+        assert_eq!(s.steps[0].midi_note, pending, "Confirm should commit pending note");
+        assert!(matches!(s.pending_edit, PendingEdit::None));
+    }
+
+    #[test]
+    fn apply_command_open_close_overlay() {
+        let mut s = SequencerState::default();
+        s.apply_command(InputCommand::OpenOverlay(OverlayMode::Regular));
+        assert_eq!(s.active_overlay, Some(OverlayMode::Regular));
+        s.apply_command(InputCommand::CloseOverlay);
+        assert!(s.active_overlay.is_none());
+    }
+
+    #[test]
+    fn apply_command_param_select_delta_wraps_at_7() {
+        let mut s = SequencerState::default();
+        s.selected_param = 6;
+        s.apply_command(InputCommand::ParamSelectDelta(1));
+        assert_eq!(s.selected_param, 0, "ParamSelectDelta(1) from 6 should wrap to 0");
+    }
+
+    // --- apply_command: comprehensive step select ---
+
+    #[test]
+    fn apply_command_step_select_sets_selected_step() {
+        let mut s = SequencerState::default();
+        s.apply_command(InputCommand::StepSelect(7));
+        assert_eq!(s.selected_step, 7);
+    }
+
+    #[test]
+    fn apply_command_step_select_clamps_to_15() {
+        let mut s = SequencerState::default();
+        s.apply_command(InputCommand::StepSelect(20));
+        assert_eq!(s.selected_step, 15);
+    }
+
+    #[test]
+    fn apply_command_step_select_clears_pending_note_edit() {
+        let mut s = SequencerState::default();
+        s.pending_edit = PendingEdit::Note { step: 0, midi_note: 64 };
+        s.apply_command(InputCommand::StepSelect(3));
+        assert!(matches!(s.pending_edit, PendingEdit::None));
+    }
+
+    #[test]
+    fn apply_command_step_select_clears_pending_velocity_edit() {
+        let mut s = SequencerState::default();
+        s.pending_edit = PendingEdit::Velocity { step: 0, velocity: 80 };
+        s.apply_command(InputCommand::StepSelect(3));
+        assert!(matches!(s.pending_edit, PendingEdit::None));
+    }
+
+    #[test]
+    fn apply_command_step_select_does_not_clear_param_edit() {
+        let mut s = SequencerState::default();
+        s.active_overlay = Some(OverlayMode::Regular);
+        s.pending_edit = PendingEdit::Param { overlay: OverlayMode::Regular, index: 2, value: 5 };
+        s.apply_command(InputCommand::StepSelect(3));
+        assert!(matches!(s.pending_edit, PendingEdit::Param { .. }));
+    }
+
+    #[test]
+    fn apply_command_step_select_delta_wraps_at_15() {
+        let mut s = SequencerState::default();
+        s.selected_step = 15;
+        s.apply_command(InputCommand::StepSelectDelta(1));
+        assert_eq!(s.selected_step, 0, "wrapping past 15 should give 0");
+    }
+
+    #[test]
+    fn apply_command_step_select_delta_wraps_at_0() {
+        let mut s = SequencerState::default();
+        s.selected_step = 0;
+        s.apply_command(InputCommand::StepSelectDelta(-1));
+        assert_eq!(s.selected_step, 15, "wrapping below 0 should give 15");
+    }
+
+    #[test]
+    fn apply_command_step_select_delta_advances_normally() {
+        let mut s = SequencerState::default();
+        s.selected_step = 5;
+        s.apply_command(InputCommand::StepSelectDelta(3));
+        assert_eq!(s.selected_step, 8);
+    }
+
+    #[test]
+    fn apply_command_note_delta_sets_pending_note_edit() {
+        let mut s = SequencerState::default();
+        s.selected_step = 2;
+        // default midi_note = 60
+        s.apply_command(InputCommand::NoteDelta(1));
+        assert!(matches!(s.pending_edit, PendingEdit::Note { step: 2, midi_note: 61 }));
+    }
+
+    #[test]
+    fn apply_command_note_delta_negative_clamps_at_0() {
+        let mut s = SequencerState::default();
+        s.steps[0].midi_note = 0;
+        s.apply_command(InputCommand::NoteDelta(-5));
+        assert!(matches!(s.pending_edit, PendingEdit::Note { step: 0, midi_note: 0 }));
+    }
+
+    #[test]
+    fn apply_command_note_delta_positive_clamps_at_127() {
+        let mut s = SequencerState::default();
+        s.steps[0].midi_note = 127;
+        s.apply_command(InputCommand::NoteDelta(10));
+        assert!(matches!(s.pending_edit, PendingEdit::Note { step: 0, midi_note: 127 }));
+    }
+
+    #[test]
+    fn apply_command_confirm_commits_note_edit() {
+        let mut s = SequencerState::default();
+        s.pending_edit = PendingEdit::Note { step: 3, midi_note: 72 };
+        s.apply_command(InputCommand::Confirm);
+        assert_eq!(s.steps[3].midi_note, 72);
+        assert!(matches!(s.pending_edit, PendingEdit::None));
+    }
+
+    #[test]
+    fn apply_command_confirm_with_no_pending_is_noop() {
+        let mut s = SequencerState::default();
+        let note_before = s.steps[0].midi_note;
+        s.apply_command(InputCommand::Confirm);
+        assert_eq!(s.steps[0].midi_note, note_before);
+        assert!(matches!(s.pending_edit, PendingEdit::None));
+    }
+
+    #[test]
+    fn apply_command_confirm_commits_velocity_edit() {
+        let mut s = SequencerState::default();
+        s.pending_edit = PendingEdit::Velocity { step: 1, velocity: 90 };
+        s.apply_command(InputCommand::Confirm);
+        assert_eq!(s.steps[1].velocity, 90);
+        assert!(matches!(s.pending_edit, PendingEdit::None));
+    }
+
+    #[test]
+    fn apply_command_confirm_clears_param_edit() {
+        let mut s = SequencerState::default();
+        s.pending_edit = PendingEdit::Param { overlay: OverlayMode::Regular, index: 0, value: 3 };
+        s.apply_command(InputCommand::Confirm);
+        assert!(matches!(s.pending_edit, PendingEdit::None));
+    }
+
+    #[test]
+    fn apply_command_toggle_step_toggles_selected_step() {
+        let mut s = SequencerState::default();
+        s.selected_step = 4;
+        assert!(!s.steps[4].enabled);
+        s.apply_command(InputCommand::ToggleStep);
+        assert!(s.steps[4].enabled);
+        s.apply_command(InputCommand::ToggleStep);
+        assert!(!s.steps[4].enabled);
+    }
+
+    #[test]
+    fn apply_command_velocity_delta_sets_pending_velocity_edit() {
+        let mut s = SequencerState::default();
+        s.selected_step = 5;
+        // default velocity = 100
+        s.apply_command(InputCommand::VelocityDelta(10));
+        assert!(matches!(s.pending_edit, PendingEdit::Velocity { step: 5, velocity: 110 }));
+    }
+
+    #[test]
+    fn apply_command_velocity_delta_clamps_at_127() {
+        let mut s = SequencerState::default();
+        s.steps[0].velocity = 127;
+        s.apply_command(InputCommand::VelocityDelta(50));
+        assert!(matches!(s.pending_edit, PendingEdit::Velocity { step: 0, velocity: 127 }));
+    }
+
+    #[test]
+    fn apply_command_velocity_delta_clamps_at_0() {
+        let mut s = SequencerState::default();
+        s.steps[0].velocity = 0;
+        s.apply_command(InputCommand::VelocityDelta(-5));
+        assert!(matches!(s.pending_edit, PendingEdit::Velocity { step: 0, velocity: 0 }));
+    }
+
+    #[test]
+    fn apply_command_open_overlay_sets_active_overlay() {
+        let mut s = SequencerState::default();
+        s.apply_command(InputCommand::OpenOverlay(OverlayMode::Regular));
+        assert_eq!(s.active_overlay, Some(OverlayMode::Regular));
+        s.apply_command(InputCommand::OpenOverlay(OverlayMode::Shift));
+        assert_eq!(s.active_overlay, Some(OverlayMode::Shift));
+    }
+
+    #[test]
+    fn apply_command_close_overlay_clears_active_overlay() {
+        let mut s = SequencerState::default();
+        s.active_overlay = Some(OverlayMode::Regular);
+        s.apply_command(InputCommand::CloseOverlay);
+        assert!(s.active_overlay.is_none());
+    }
+
+    #[test]
+    fn apply_command_close_overlay_discards_param_edit() {
+        let mut s = SequencerState::default();
+        s.active_overlay = Some(OverlayMode::Regular);
+        s.pending_edit = PendingEdit::Param { overlay: OverlayMode::Regular, index: 0, value: 7 };
+        s.apply_command(InputCommand::CloseOverlay);
+        assert!(matches!(s.pending_edit, PendingEdit::None));
+    }
+
+    #[test]
+    fn apply_command_param_select_sets_selected_param() {
+        let mut s = SequencerState::default();
+        s.apply_command(InputCommand::ParamSelect(3));
+        assert_eq!(s.selected_param, 3);
+    }
+
+    #[test]
+    fn apply_command_param_select_delta_wraps_at_0() {
+        let mut s = SequencerState::default();
+        s.selected_param = 0;
+        s.apply_command(InputCommand::ParamSelectDelta(-1));
+        assert_eq!(s.selected_param, 6, "param wraps below 0 to 6");
+    }
+
+    #[test]
+    fn apply_command_param_value_delta_sets_pending_param_edit() {
+        let mut s = SequencerState::default();
+        s.active_overlay = Some(OverlayMode::Regular);
+        s.selected_param = 2;
+        s.apply_command(InputCommand::ParamValueDelta(5));
+        assert!(matches!(
+            s.pending_edit,
+            PendingEdit::Param { overlay: OverlayMode::Regular, index: 2, value: 5 }
+        ));
+    }
+
+    #[test]
+    fn apply_command_param_value_delta_accumulates() {
+        let mut s = SequencerState::default();
+        s.active_overlay = Some(OverlayMode::Regular);
+        s.selected_param = 2;
+        s.apply_command(InputCommand::ParamValueDelta(5));
+        s.apply_command(InputCommand::ParamValueDelta(3));
+        assert!(matches!(
+            s.pending_edit,
+            PendingEdit::Param { overlay: OverlayMode::Regular, index: 2, value: 8 }
+        ));
+    }
+
+    #[test]
+    fn apply_command_param_value_delta_no_overlay_is_noop() {
+        let mut s = SequencerState::default();
+        // No overlay open
+        s.apply_command(InputCommand::ParamValueDelta(5));
+        assert!(matches!(s.pending_edit, PendingEdit::None));
+    }
+
+    #[test]
+    fn default_state_has_selected_step_0() {
+        let s = SequencerState::default();
+        assert_eq!(s.selected_step, 0);
+    }
+
+    #[test]
+    fn default_state_has_selected_param_0() {
+        let s = SequencerState::default();
+        assert_eq!(s.selected_param, 0);
+    }
+
+    // --- apply_command: boundary conditions ---
+
+    #[test]
+    fn apply_command_param_select_clamps_at_6() {
+        let mut s = SequencerState::default();
+        s.apply_command(InputCommand::ParamSelect(10));
+        assert_eq!(s.selected_param, 6, "ParamSelect(10) should clamp to 6");
+    }
+
+    #[test]
+    fn apply_command_close_overlay_with_no_pending_is_noop() {
+        let mut s = SequencerState::default();
+        assert!(matches!(s.pending_edit, PendingEdit::None));
+        s.apply_command(InputCommand::CloseOverlay);
+        assert!(matches!(s.pending_edit, PendingEdit::None));
+        assert!(s.active_overlay.is_none());
+    }
+
+    #[test]
+    fn apply_command_step_select_delta_with_no_pending_leaves_pending_none() {
+        let mut s = SequencerState::default();
+        s.selected_step = 5;
+        s.apply_command(InputCommand::StepSelectDelta(1));
+        assert_eq!(s.selected_step, 6);
+        assert!(matches!(s.pending_edit, PendingEdit::None));
+    }
+
+    #[test]
+    fn apply_command_confirm_with_pending_velocity_commits_to_correct_step() {
+        let mut s = SequencerState::default();
+        s.selected_step = 0;
+        s.pending_edit = PendingEdit::Velocity { step: 3, velocity: 64 };
+        s.apply_command(InputCommand::Confirm);
+        assert_eq!(s.steps[3].velocity, 64, "velocity committed to step 3");
+        assert_eq!(s.steps[0].velocity, 100, "step 0 velocity must be default");
+        assert!(matches!(s.pending_edit, PendingEdit::None));
+    }
+
+    #[test]
+    fn apply_command_confirm_param_clears_pending_edit() {
+        let mut s = SequencerState::default();
+        s.active_overlay = Some(OverlayMode::Regular);
+        s.pending_edit = PendingEdit::Param { overlay: OverlayMode::Regular, index: 4, value: -3 };
+        s.apply_command(InputCommand::Confirm);
+        assert!(matches!(s.pending_edit, PendingEdit::None));
+    }
+
+    // --- tick: velocity round-trips ---
+
+    #[test]
+    fn tick_note_on_uses_step_velocity_64() {
+        let mut s = SequencerState::default();
+        s.playing = true;
+        s.steps[1].enabled = true;
+        s.steps[1].midi_note = 60;
+        s.steps[1].velocity = 64;
+        s.playhead = 0;
+        let evt = s.tick();
+        assert_eq!(
+            evt,
+            Some(MidiEvent::NoteOn { channel: 0, note: 60, velocity: 64, duration_nanos: 0 }),
+            "NoteOn velocity must match step.velocity=64"
+        );
+    }
+
+    #[test]
+    fn tick_note_on_uses_step_velocity_1() {
+        let mut s = SequencerState::default();
+        s.playing = true;
+        s.steps[1].enabled = true;
+        s.steps[1].midi_note = 48;
+        s.steps[1].velocity = 1;
+        s.playhead = 0;
+        let evt = s.tick();
+        assert_eq!(
+            evt,
+            Some(MidiEvent::NoteOn { channel: 0, note: 48, velocity: 1, duration_nanos: 0 }),
+            "NoteOn velocity must match step.velocity=1"
         );
     }
 }
