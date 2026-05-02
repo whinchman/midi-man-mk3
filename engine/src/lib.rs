@@ -18,5 +18,5 @@ pub mod ui_render;
 /// Terminal UI — ratatui render loop with keyboard event handling.
 #[cfg(feature = "hw-io")]
 pub mod ui;
-/// Unit tests for the terminal UI render logic (TestBackend, no real terminal).
-pub mod ui_tests;
+/// CLI argument parsing — exposed for integration tests.
+pub mod cli;
