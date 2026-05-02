@@ -1,7 +1,7 @@
 # Task: Engine main.rs Wiring
 
 - **Type**: coder
-- **Status**: pending
+- **Status**: done
 - **Repo**: midi-man-mk3
 - **Parallel Group**: 6
 - **Feature Branch**: feature/engine-phase1
@@ -95,3 +95,23 @@ Build dependency note: `libasound2-dev` must be installed for `midir` to link. D
 
 ## Notes
 
+**Branch**: `engine-main-wiring` (based on `feature/engine-phase1`)
+
+**Test results**: 219 passed (214 pre-existing + 5 new smoke tests in main.rs), 0 failed.
+
+**Build result**: `cargo build -p engine --release` succeeded on x86_64-unknown-linux-gnu.
+
+**Implementation summary**:
+- `engine/src/main.rs` wires 5 threads in order: midi-out (hw-io), clock, hid (hw-io), cmd-processor, ui (hw-io).
+- CLI args `--midi-port`, `--hid-vid`, `--hid-pid` parsed via `std::env::args()` with a `parse_hex_u16` helper.
+- `SequencerState::default()` wrapped in `Arc<RwLock<>>` and shared via clones.
+- Three `mpsc::sync_channel` channels: `MidiEvent` (clock→midi_out), `InputCommand` (hid/ui→cmd-proc), `()` (cmd-proc→ui notify).
+- Command processor thread: `recv()` loop → write lock → `apply_command` → `try_send(())` on notify.
+- On hw-io builds: `main` blocks on `ui_thread.join()`; cleanup sends `MidiEvent::Stop` then drops senders.
+- On non-hw-io builds: midi_rx and ui_notify_rx are dropped; `main` returns immediately (useful for test builds).
+- Build comment at top of `main.rs` documents ALSA dependency.
+
+**Notable decisions**:
+- Used `#[cfg(not(feature = "hw-io"))]` to drop `midi_rx` immediately so the clock thread's `send()` fails fast if the MIDI receiver is gone in no-hw-io builds.
+- `ui_notify_tx` is dropped after spawning the cmd-processor so `run_ui` gets `Disconnected` when the cmd-processor exits.
+- Smoke tests in `#[cfg(test)] mod tests` in `main.rs` exercise the cmd-processor pattern directly without real hardware.
