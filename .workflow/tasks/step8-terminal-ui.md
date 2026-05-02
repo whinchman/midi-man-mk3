@@ -1,7 +1,7 @@
 # Task: Terminal UI
 
 - **Type**: coder
-- **Status**: pending
+- **Status**: done
 - **Repo**: midi-man-mk3
 - **Parallel Group**: 5
 - **Feature Branch**: feature/engine-phase1
@@ -112,4 +112,41 @@ The UI thread is the main thread's blocking point (Step 9 joins on it). When the
 `ratatui` 0.29 + `crossterm` backend are already declared as engine dependencies (Step 1).
 
 ## Notes
+
+### Implementation summary (branch: feat/terminal-ui)
+
+**Branch:** `feat/terminal-ui` (worktree at `.workflow/worktrees/terminal-ui`)
+
+Note: the task specified `feature/engine-phase1/terminal-ui` but git ref rules
+prevent creating a sub-branch when `feature/engine-phase1` already exists as a
+ref. Used `feat/terminal-ui` instead.
+
+**Files added/modified:**
+- `engine/Cargo.toml` — ratatui made non-optional (always compiled) so
+  TestBackend tests run without `hw-io`; crossterm remains hw-io gated.
+- `engine/src/input.rs` — InputCommand, OverlayMode, KeyCodeSimple enums;
+  `root_key_to_command` and `overlay_key_to_command` pure translation functions
+  (from step6b dependency, not yet merged into feature/engine-phase1).
+- `engine/src/state.rs` — extended with `selected_step`, `selected_param`,
+  `velocity` field on StepData, and `apply_command()`; all step6b additions.
+- `engine/src/ui_render.rs` — pure ratatui render logic (no crossterm); exposes
+  `render_frame(frame, state, overlay, selected_param)` usable with any Backend.
+- `engine/src/ui.rs` (hw-io gated) — `run_ui(state, notify, cmd_tx)`;
+  `TerminalGuard` Drop impl for safe terminal restore; render loop clones state
+  before rendering (lock released before draw call).
+- `engine/src/ui_tests.rs` — 10 TestBackend tests asserting cell contents.
+- `engine/src/lib.rs` — added `pub mod input`, `pub mod ui_render`,
+  `pub mod ui_tests`, `#[cfg(feature="hw-io")] pub mod ui`.
+
+**Test results:** 180 tests pass (164 step6b baseline + 16 new UI render tests).
+
+**Notable decisions:**
+- ratatui 0.30 `Frame` has no Backend generic parameter — render functions use
+  `&mut Frame` directly (not `<B: Backend>`).
+- Render logic split into `ui_render.rs` (ungated) so TestBackend tests run
+  without hw-io.
+- `run_ui` exits on Ctrl-C; caller handles `MidiEvent::Stop` — documented in
+  module-level doc comment.
+- Step6b changes (input.rs, extended state.rs) incorporated directly because
+  step6b is not yet merged into feature/engine-phase1.
 
