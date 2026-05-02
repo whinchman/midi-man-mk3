@@ -270,3 +270,80 @@ hw-io = ["midir", "hidapi", "crossterm", "ratatui/crossterm"]
 Verify with `cargo tree -p engine` (no hw-io) that crossterm no longer appears, and `cargo test -p engine` still passes (TestBackend does not need crossterm).
 
 ---
+
+## BUG-008 — [WARNING] CLI args `--midi-port`, `--hid-vid`, `--hid-pid` are parsed but never forwarded to thread functions
+
+- **File:** `engine/src/main.rs`, lines 75–83, 102–127
+- **Branch:** `engine-main-wiring`
+- **Discovered:** 2026-05-02 by code-reviewer agent (step9-engine-main-wiring review)
+- **Severity:** warning
+
+### Description
+
+`parse_args()` returns a `CliArgs` struct with `midi_port`, `hid_vid`, and `hid_pid`. In `main()`, the values are logged (lines 75–83) but never passed to the thread entry points. `run_midi_out` (hw-io) calls the private `open_first_port()` which always selects `ports[0]` regardless of the `--midi-port` filter. `run_hid` opens the device using the hardcoded `HID_VID`/`HID_PID` constants regardless of `--hid-vid`/`--hid-pid` overrides.
+
+The acceptance criteria explicitly states: "`--midi-port <name>`, `--hid-vid <hex>`, `--hid-pid <hex>`, all optional with defaults (first available MIDI port, `HID_VID`/`HID_PID` constants from `hid.rs`)." These args must be respected — they are not respected today.
+
+### Reproduction
+
+```
+cargo run -p engine --features hw-io -- --midi-port "some-port" --hid-vid 0x1234 --hid-pid 0x5678
+```
+
+The log shows the overrides are parsed, but the MIDI output thread still opens the first available port and the HID thread attempts to open device 0x2E8A:0x000A.
+
+### Suggested Fix
+
+Add a `port_filter: Option<String>` parameter to `run_midi_out` (or provide a separate `open_port_by_name` helper) and pass `args.midi_port`. Add `vid: u16, pid: u16` parameters to `run_hid`, defaulting to `HID_VID`/`HID_PID` when `None`:
+
+```rust
+// midi_out.rs
+pub fn run_midi_out(rx: Receiver<MidiEvent>, port_filter: Option<&str>) { ... }
+
+// hid.rs
+pub fn run_hid(cmd_tx: ..., state: ..., ui_notify: ..., vid: u16, pid: u16) { ... }
+
+// main.rs — spawn with args:
+engine::midi_out::run_midi_out(rx, args.midi_port.as_deref())
+engine::hid::run_hid(hid_cmd_tx, hid_state, hid_notify,
+    args.hid_vid.unwrap_or(engine::hid::HID_VID),
+    args.hid_pid.unwrap_or(engine::hid::HID_PID))
+```
+
+---
+
+## BUG-009 — [WARNING] Clock thread never exits in non-hw-io builds; not joined on shutdown
+
+- **File:** `engine/src/main.rs`, lines 111–116, 180–186
+- **Branch:** `engine-main-wiring`
+- **Discovered:** 2026-05-02 by code-reviewer agent (step9-engine-main-wiring review)
+- **Severity:** warning
+
+### Description
+
+In non-hw-io builds, `midi_rx` is immediately dropped (line 108). The clock thread is spawned unconditionally (lines 111–116). The clock loop only breaks when `midi_tx.send(event).is_err()`, which requires `playing == true` and a step to be enabled. Since `SequencerState::default()` initialises `playing = false`, the send path is never reached, so the clock thread runs forever in its sleep loop.
+
+Main then drops `midi_tx` (line 185) and returns. The process exits, killing the clock thread via OS teardown. While not a hang (the process terminates), the MidiEvent::Stop sent on line 182 is dispatched onto `midi_tx` after `midi_rx` is already dropped — the send returns `Err` silently (the `let _ =` suppresses it), meaning the Stop event is never processed even if midi_out were running.
+
+In hw-io builds the clock thread is also never joined: `_clock_thread` is dropped at end of `main` without an explicit `join()`. If `midi_out` processes the Stop event and exits before the clock thread unblocks from its sleep, the clock may send another NoteOn to a closed channel after main has returned.
+
+### Reproduction
+
+1. Build without hw-io: the clock thread leaks as an unjoined background thread.
+2. Add `s.playing = true` to `SequencerState::default()` — now the clock exits immediately when midi_rx is dropped.
+
+### Suggested Fix
+
+Add a shutdown channel (a `SyncSender<()>` / `Receiver<()>`) to the clock so main can signal it to stop independently of the midi_tx state. Alternatively, for the non-hw-io path, do not spawn the clock thread at all. At minimum, join `_clock_thread`, `_cmd_thread`, `_midi_thread` explicitly after dropping the senders so that the Stop event is guaranteed to be flushed before the process exits:
+
+```rust
+let _ = midi_tx.send(MidiEvent::Stop);
+drop(midi_tx);
+drop(cmd_tx);
+// Now join in reverse dependency order so threads drain their queues.
+let _ = _cmd_thread.join();
+let _ = _clock_thread.join();
+let _ = _midi_thread.join();
+```
+
+---
