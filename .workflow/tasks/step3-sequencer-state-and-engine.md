@@ -134,6 +134,30 @@ Note-off events are owned by `midi_out.rs` (Step 5). `tick()` returns a `NoteOn`
 
 ---
 
+### QA Augmentation (2026-05-02)
+
+**Agent**: qa subagent
+
+**9 new tests added** (`engine/src/state.rs`) covering gaps identified in the post-implementation review:
+
+| New test | Scenario covered |
+|---|---|
+| `tick_all_16_steps_enabled_visits_every_step` | Playhead visits all steps 0–15 exactly once and wraps to 0 |
+| `tick_loop_full_range_loop_in0_loop_out15` | Full-range loop behaves like non-loop mode |
+| `tick_loop_single_step_loop_in7_loop_out7` | Single-step loop stays pinned at step 7 |
+| `tick_loop_inverted_loop_in3_loop_out2` | Inverted loop (loop_in > loop_out) documents current wrap behavior |
+| `apply_encoder_delta_zero_is_noop` | delta=0 leaves note unchanged |
+| `apply_encoder_delta_large_positive_wraps_octave` | delta=+7 in C Major wraps one octave to C5=72 |
+| `apply_encoder_delta_large_negative_clamps_at_zero` | Large negative delta clamps at MIDI 0, no underflow |
+| `toggle_step_double_toggle_returns_to_original` | Two toggles restore original enabled state |
+| `default_state_all_fields_match_spec` | Every field of SequencerState::default() checked against spec |
+
+**Final test results:** 24 passed, 0 failed.
+
+**Note on inverted loop**: `loop_in=3, loop_out=2` causes the playhead to immediately wrap on every tick (next=4 > loop_out=2), pinning it at loop_in=3. This is undocumented behavior that should be guarded or documented in Step 9 when the command processor is wired up.
+
+---
+
 ### Code Review (2026-05-02)
 
 **Reviewer**: code-reviewer agent
