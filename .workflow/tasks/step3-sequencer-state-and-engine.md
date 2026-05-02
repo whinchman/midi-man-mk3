@@ -1,7 +1,7 @@
 # Task: Sequencer State and Engine
 
 - **Type**: coder
-- **Status**: pending
+- **Status**: done
 - **Repo**: midi-man-mk3
 - **Parallel Group**: 2
 - **Feature Branch**: feature/engine-phase1
@@ -111,3 +111,23 @@ Note-off events are owned by `midi_out.rs` (Step 5). `tick()` returns a `NoteOn`
 
 ## Notes
 
+### Implementation Summary (2026-05-02)
+
+**Branch**: `sequencer-state-and-engine` (based off `feature/engine-phase1`)
+
+**Worktree**: `.workflow/worktrees/sequencer-state-and-engine`
+
+**What was implemented:**
+
+- `engine/src/state.rs` — `SequencerState`, `StepData`, `StepSize`, `PendingEdit`, `OverlayMode` (local stub, `Regular`/`Shift` variants), and `MidiEvent` (with `duration_nanos: u64` on `NoteOn`). Implements `Clone`, `Default`, `tick()`, `toggle_step()`, and `apply_encoder_delta()`. No heap allocation on any hot path (`[StepData; 16]` stack array).
+- `engine/src/sequencer.rs` — thin re-export shim; placeholder for Step 9 wiring.
+- `engine/src/lib.rs` — module declarations for `music_theory`, `state`, `sequencer`.
+- `engine/src/music_theory.rs` — ported from `feat/music-theory-tables` (dependency not yet merged into `feature/engine-phase1`).
+- `Cargo.toml` / `engine/Cargo.toml` — minimal workspace scaffold (no external deps needed for this crate alone) so `cargo test -p engine` works standalone.
+
+**Key decisions applied:**
+- `OverlayMode` defined as a local stub enum (`Regular`, `Shift`) in `state.rs`; Step 6b will replace with `use crate::input::OverlayMode`.
+- `MidiEvent::NoteOn` includes `duration_nanos: u64`; clock thread sets this; `midi_out.rs` (Step 5) schedules `NoteOff`.
+- `tick()` returns `NoteOn` with `duration_nanos: 0` as placeholder; the clock thread overwrites before forwarding.
+
+**Test results (`cargo test -p engine`):** 15 passed, 0 failed, clippy clean.
