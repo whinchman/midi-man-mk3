@@ -199,3 +199,21 @@ The test calls `s.tick()` once (advancing to step 1), then manually resets `s.pl
 All acceptance criteria are met. Logic is correct, heap-free, well-tested (15 tests, all edge cases covered), and the `OverlayMode` stub pattern is properly implemented. The loop-entry behavior when playhead is outside the loop region is the only potentially surprising design point, but it is not specified and does not constitute a bug at this stage.
 
 **Verdict: APPROVE**
+
+---
+
+## PR Feedback
+
+PR: https://github.com/whinchman/midi-man-mk3/pull/4
+
+### Comments Requiring Action
+
+_(none)_
+
+### CI Failures
+
+_(none — no CI checks configured on this repository)_
+
+### Questions / Acknowledged
+
+_(none)_
