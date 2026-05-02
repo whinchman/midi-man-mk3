@@ -307,6 +307,10 @@ pub fn run_hid(
     let mut buf = [0u8; 64];
 
     loop {
+        // Zero the buffer before each read so stale bytes from a prior
+        // short read cannot bleed into the current report's fields.
+        buf = [0u8; 64];
+
         let n = match device.read_timeout(&mut buf, 5) {
             Ok(n) => n,
             Err(e) => {
@@ -892,6 +896,28 @@ mod tests {
         assert!(matches!(cmds[2], InputCommand::StepSelect(3)));
         assert!(matches!(cmds[3], InputCommand::ToggleStep));
         assert!(matches!(cmds[4], InputCommand::ParamSelect(1)));
+    }
+
+    #[test]
+    fn translate_multiple_simultaneous_encoder_deltas_all_produce_commands() {
+        // Encoders 0, 7, and 15 all have non-zero deltas simultaneously.
+        // Each must produce a StepSelect + NoteDelta pair in index order.
+        let mut buf = [0u8; 64];
+        buf[9 + 0]  = 5i8 as u8;   // encoder_deltas[0]  = +5
+        buf[9 + 7]  = (-3i8) as u8; // encoder_deltas[7]  = -3
+        buf[9 + 15] = 1i8 as u8;   // encoder_deltas[15] = +1
+        let report = InReport::from_bytes(&buf);
+        let cmds = translate_in_report(&report, None);
+
+        // Expect exactly 6 commands: (StepSelect(0), NoteDelta(5)),
+        // (StepSelect(7), NoteDelta(-3)), (StepSelect(15), NoteDelta(1)).
+        assert_eq!(cmds.len(), 6, "expected 6 commands for 3 encoder deltas, got {cmds:?}");
+        assert!(matches!(cmds[0], InputCommand::StepSelect(0)),  "cmds[0] should be StepSelect(0)");
+        assert!(matches!(cmds[1], InputCommand::NoteDelta(5)),   "cmds[1] should be NoteDelta(5)");
+        assert!(matches!(cmds[2], InputCommand::StepSelect(7)),  "cmds[2] should be StepSelect(7)");
+        assert!(matches!(cmds[3], InputCommand::NoteDelta(-3)),  "cmds[3] should be NoteDelta(-3)");
+        assert!(matches!(cmds[4], InputCommand::StepSelect(15)), "cmds[4] should be StepSelect(15)");
+        assert!(matches!(cmds[5], InputCommand::NoteDelta(1)),   "cmds[5] should be NoteDelta(1)");
     }
 
     // -----------------------------------------------------------------------
