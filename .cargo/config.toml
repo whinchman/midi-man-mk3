@@ -2,5 +2,16 @@
 # Default build targets the host. The firmware crate must be built explicitly
 # with `-p firmware` after setting its own .cargo/config.toml target.
 
+[env]
+# midir requires alsa-lib-devel. On this host the .pc file lives under
+# /tmp/alsa-pkg (the system alsa.pc is missing from pkg-config search path).
+# /tmp/alsa-lib contains a symlink libasound.so -> libasound.so.2 so the
+# linker can find it without the devel package.
+# Install alsa-lib-devel to remove this workaround.
+PKG_CONFIG_PATH = "/tmp/alsa-pkg"
+
 [target.x86_64-unknown-linux-gnu]
-# No special linker needed for the engine on the host.
+# Workaround: link against the versioned libasound.so.2 via symlink in /tmp/alsa-lib.
+# This replaces the unversioned libasound.so normally provided by alsa-lib-devel.
+# Remove once alsa-lib-devel is installed.
+rustflags = ["-L", "/tmp/alsa-lib"]
