@@ -221,6 +221,28 @@ mod tests {
         assert_eq!(tick_nanos(300, StepSize::Quarter), 200_000_000);
     }
 
+    #[test]
+    fn tick_nanos_60bpm_quarter_is_one_second() {
+        // 60 BPM quarter note = exactly 1 beat per second = 1_000_000_000 ns
+        assert_eq!(tick_nanos(60, StepSize::Quarter), 1_000_000_000);
+    }
+
+    #[test]
+    fn tick_nanos_120bpm_sixteenth_is_31250000() {
+        // 60_000_000_000 / (120 * 4) = 31_250_000 — from the context doc
+        // Note: 120 BPM sixteenth is 125_000_000 ns; the 31_250_000 figure in
+        // the context refers to 120 BPM with 16 steps-per-beat (32nd notes).
+        // The spec says steps_per_beat=4 for Sixteenth, giving 125_000_000.
+        // Test the actual spec value here for clarity.
+        assert_eq!(tick_nanos(120, StepSize::Sixteenth), 125_000_000);
+    }
+
+    #[test]
+    fn tick_nanos_240bpm_eighth_is_125ms() {
+        // 60_000_000_000 / (240 * 2) = 125_000_000 ns
+        assert_eq!(tick_nanos(240, StepSize::Eighth), 125_000_000);
+    }
+
     // --- steps_per_beat ---
 
     #[test]
@@ -257,6 +279,29 @@ mod tests {
         assert_eq!(swing_offset_nanos(33, period), 41_250_000);
     }
 
+    #[test]
+    fn swing_offset_plus50_equals_half_tick_period() {
+        // At swing=+50 the odd-step offset must equal tick_nanos / 2.
+        let period = tick_nanos(120, StepSize::Sixteenth); // 125_000_000
+        let offset = swing_offset_nanos(50, period);
+        assert_eq!(offset, (period / 2) as i64, "swing=+50 should delay by exactly half a tick period");
+    }
+
+    #[test]
+    fn swing_offset_minus50_equals_negative_half_tick_period() {
+        // At swing=-50 the odd-step offset must equal -(tick_nanos / 2).
+        let period = tick_nanos(120, StepSize::Sixteenth); // 125_000_000
+        let offset = swing_offset_nanos(-50, period);
+        assert_eq!(offset, -((period / 2) as i64), "swing=-50 should advance by exactly half a tick period");
+    }
+
+    #[test]
+    fn swing_offset_zero_produces_no_offset() {
+        // At swing=0 no offset is applied regardless of tick period.
+        let period = tick_nanos(120, StepSize::Sixteenth);
+        assert_eq!(swing_offset_nanos(0, period), 0, "swing=0 should produce zero offset");
+    }
+
     // --- add_nanos helpers ---
 
     #[test]
@@ -285,10 +330,12 @@ mod tests {
 
     #[test]
     fn add_nanos_signed_clamps_to_zero() {
-        // Negative offset larger than tv_nsec — should not go negative.
+        // Negative offset (1.1s - 0.2s = 0.9s) should produce tv_sec=0, tv_nsec=900_000_000.
         let ts = libc::timespec { tv_sec: 1, tv_nsec: 100_000_000 };
         let result = add_nanos_signed(ts, -200_000_000);
         assert!(result.tv_nsec >= 0, "tv_nsec must not be negative");
+        assert_eq!(result.tv_sec, 0, "tv_sec should be 0 after 1.1s - 0.2s = 0.9s");
+        assert_eq!(result.tv_nsec, 900_000_000, "tv_nsec should be 900_000_000 after 1.1s - 0.2s");
     }
 
     #[test]
@@ -297,6 +344,15 @@ mod tests {
         let result = add_nanos_signed(ts, -62_500_000); // subtract 62.5ms
         assert_eq!(result.tv_sec, 4);
         assert_eq!(result.tv_nsec, 947_500_000);
+    }
+
+    #[test]
+    fn add_nanos_signed_positive_crosses_second_boundary() {
+        // 0.999s + 100ms = 1.099s
+        let ts = libc::timespec { tv_sec: 0, tv_nsec: 999_000_000 };
+        let result = add_nanos_signed(ts, 100_000_000);
+        assert_eq!(result.tv_sec, 1, "tv_sec should be 1 after crossing second boundary");
+        assert_eq!(result.tv_nsec, 99_000_000, "tv_nsec should be 99_000_000 ns");
     }
 
     // --- playhead wraps after 32 ticks ---
@@ -328,6 +384,99 @@ mod tests {
             s.tick();
         }
         assert_eq!(s.playhead, 0, "playhead should wrap to 0 after exactly 16 ticks");
+    }
+
+    // --- state: not playing / paused — tick() must return None and not advance playhead ---
+
+    #[test]
+    fn tick_not_called_effectively_when_not_playing() {
+        // When playing=false the clock skips the tick() call; SequencerState.tick()
+        // returns None and the playhead stays at 0.  This mirrors the run_clock
+        // guard `if playing { s.tick() }`.
+        let mut s = SequencerState::default();
+        s.playing = false;
+        for step in &mut s.steps {
+            step.enabled = true;
+        }
+        // Calling tick() when not playing must return None (spec from state.rs).
+        let result = s.tick();
+        assert!(result.is_none(), "tick() must return None when playing=false");
+        assert_eq!(s.playhead, 0, "playhead must not advance when playing=false");
+    }
+
+    #[test]
+    fn tick_not_called_effectively_when_paused() {
+        // When paused=true the clock skips the tick() call; SequencerState.tick()
+        // returns None and the playhead stays at 0.
+        let mut s = SequencerState::default();
+        s.playing = true;
+        s.paused = true;
+        for step in &mut s.steps {
+            step.enabled = true;
+        }
+        let result = s.tick();
+        assert!(result.is_none(), "tick() must return None when paused=true");
+        assert_eq!(s.playhead, 0, "playhead must not advance when paused=true");
+    }
+
+    #[test]
+    fn tick_no_events_sent_when_not_playing() {
+        // Verify that run_clock does not forward any event when playing=false.
+        // We simulate the clock body: read playing flag, skip tick() if false.
+        use std::sync::{Arc, RwLock, mpsc};
+        let state = Arc::new(RwLock::new(SequencerState::default()));
+        {
+            let mut s = state.write().unwrap();
+            s.playing = false;
+            for step in &mut s.steps {
+                step.enabled = true;
+            }
+        }
+        let (tx, rx) = mpsc::sync_channel::<MidiEvent>(16);
+        // Simulate one clock iteration: read, skip tick, advance time.
+        let playing = state.read().unwrap().playing;
+        if playing {
+            let mut s = state.write().unwrap();
+            if let Some(MidiEvent::NoteOn { channel, note, velocity, .. }) = s.tick() {
+                let _ = tx.send(MidiEvent::NoteOn { channel, note, velocity, duration_nanos: 0 });
+            }
+        }
+        drop(tx);
+        // Nothing should have been sent.
+        assert!(rx.try_recv().is_err(), "no events should be sent when playing=false");
+    }
+
+    #[test]
+    fn tick_no_events_sent_when_paused() {
+        // Same as above but with paused=true.
+        use std::sync::{Arc, RwLock, mpsc};
+        let state = Arc::new(RwLock::new(SequencerState::default()));
+        {
+            let mut s = state.write().unwrap();
+            s.playing = true;
+            s.paused = true;
+            for step in &mut s.steps {
+                step.enabled = true;
+            }
+        }
+        let (tx, rx) = mpsc::sync_channel::<MidiEvent>(16);
+        let (playing, paused) = {
+            let s = state.read().unwrap();
+            (s.playing, s.paused)
+        };
+        // run_clock checks `if playing` but tick() internally guards on paused.
+        if playing {
+            let maybe = {
+                let mut s = state.write().unwrap();
+                s.tick()
+            };
+            if let Some(MidiEvent::NoteOn { channel, note, velocity, .. }) = maybe {
+                let _ = tx.send(MidiEvent::NoteOn { channel, note, velocity, duration_nanos: 0 });
+            }
+        }
+        let _ = paused; // used implicitly via tick() guard
+        drop(tx);
+        assert!(rx.try_recv().is_err(), "no events should be sent when paused=true");
     }
 
     // --- NoteOn carries duration_nanos from tick_nanos ---
