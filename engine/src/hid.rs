@@ -976,4 +976,96 @@ mod tests {
         // Steps 8, 10, 12, 14 → bits 0, 2, 4, 6 of hi.
         assert_eq!(hi, 0b0101_0101);
     }
+
+    #[test]
+    fn compute_led_bytes_only_step7_sets_lo_bit7() {
+        // Step 7 is the MSB of the low byte; byte 0 must be 0x80, byte 1 = 0x00.
+        let mut enabled = [false; 16];
+        enabled[7] = true;
+        let [lo, hi] = compute_led_bytes(&enabled);
+        assert_eq!(lo, 0x80, "step 7 should set bit 7 (MSB) of lo byte → 0x80");
+        assert_eq!(hi, 0x00, "hi byte must be 0x00 when only step 7 is enabled");
+    }
+
+    // -----------------------------------------------------------------------
+    // translate_in_report — additional edge cases required by QA task.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn translate_all_zero_report_emits_no_commands() {
+        // An InReport where every field is zero must produce an empty command list.
+        // This covers: zero encoder deltas, no step buttons pressed, no param buttons,
+        // zero tempo_delta, zero param_knob_delta.
+        let report = InReport::from_bytes(&[0u8; 64]);
+        let cmds = translate_in_report(&report, None);
+        assert!(cmds.is_empty(), "all-zero InReport must emit no InputCommands, got {cmds:?}");
+    }
+
+    #[test]
+    fn translate_all_16_step_buttons_set_emits_32_commands() {
+        // All 16 step_buttons bits set → 16 × (StepSelect(i) + ToggleStep) pairs,
+        // in ascending index order 0..=15.
+        let mut buf = [0u8; 64];
+        buf[3] = 0xFF; // step_buttons low byte: steps 0–7
+        buf[4] = 0xFF; // step_buttons high byte: steps 8–15
+        let report = InReport::from_bytes(&buf);
+        let cmds = translate_in_report(&report, None);
+
+        assert_eq!(cmds.len(), 32, "expected 32 commands (16 × StepSelect+ToggleStep), got {cmds:?}");
+        for i in 0..16usize {
+            assert!(
+                matches!(cmds[i * 2], InputCommand::StepSelect(s) if s == i),
+                "cmds[{}] should be StepSelect({i}), got {:?}", i * 2, cmds[i * 2]
+            );
+            assert!(
+                matches!(cmds[i * 2 + 1], InputCommand::ToggleStep),
+                "cmds[{}] should be ToggleStep, got {:?}", i * 2 + 1, cmds[i * 2 + 1]
+            );
+        }
+    }
+
+    #[test]
+    fn translate_param_buttons_bits_0_1_2_3_all_set_emits_correct_commands() {
+        // param_buttons bits 0–3 all set simultaneously.
+        // Bit 0 → OpenOverlay(Regular) + ParamSelect(0)
+        // Bit 1 → ParamSelect(1)
+        // Bit 2 → ParamSelect(2)
+        // Bit 3 → ParamSelect(3)
+        let mut buf = [0u8; 64];
+        buf[7] = 0b0000_1111; // bits 0, 1, 2, 3 set
+        let report = InReport::from_bytes(&buf);
+        let cmds = translate_in_report(&report, None);
+
+        // Expected order: OpenOverlay(Regular), ParamSelect(0), ParamSelect(1),
+        // ParamSelect(2), ParamSelect(3) — 5 total.
+        assert_eq!(cmds.len(), 5, "expected 5 commands for bits 0–3, got {cmds:?}");
+        assert!(matches!(cmds[0], InputCommand::OpenOverlay(OverlayMode::Regular)),
+            "cmds[0] should be OpenOverlay(Regular)");
+        assert!(matches!(cmds[1], InputCommand::ParamSelect(0)),
+            "cmds[1] should be ParamSelect(0)");
+        assert!(matches!(cmds[2], InputCommand::ParamSelect(1)),
+            "cmds[2] should be ParamSelect(1)");
+        assert!(matches!(cmds[3], InputCommand::ParamSelect(2)),
+            "cmds[3] should be ParamSelect(2)");
+        assert!(matches!(cmds[4], InputCommand::ParamSelect(3)),
+            "cmds[4] should be ParamSelect(3)");
+    }
+
+    #[test]
+    fn translate_encoder_delta_with_active_overlay_emits_note_delta_not_param_value_delta() {
+        // Documents current behaviour: overlay-aware routing is deferred.
+        // Even with active_overlay = Some(Regular), translate_in_report always
+        // emits StepSelect + NoteDelta, never ParamValueDelta, for encoder inputs.
+        // This test records the current (stub) behaviour so a future change is visible.
+        let mut buf = [0u8; 64];
+        buf[9 + 3] = 2i8 as u8; // encoder_deltas[3] = +2
+        let report = InReport::from_bytes(&buf);
+        let cmds = translate_in_report(&report, Some(OverlayMode::Regular));
+
+        assert_eq!(cmds.len(), 2, "expected exactly 2 commands, got {cmds:?}");
+        assert!(matches!(cmds[0], InputCommand::StepSelect(3)),
+            "cmds[0] should be StepSelect(3) regardless of overlay; got {:?}", cmds[0]);
+        assert!(matches!(cmds[1], InputCommand::NoteDelta(2)),
+            "cmds[1] should be NoteDelta(2) — overlay-aware routing is deferred; got {:?}", cmds[1]);
+    }
 }
