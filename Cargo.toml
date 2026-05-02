@@ -1,0 +1,16 @@
+[workspace]
+members = ["engine", "firmware"]
+# Only build engine by default; firmware requires explicit `-p firmware
+# --target thumbv6m-none-eabi` because it targets the RP2040.
+default-members = ["engine"]
+resolver = "2"
+
+[profile.dev]
+debug = 2
+opt-level = 1
+
+[profile.release]
+debug = 2
+opt-level = "s"
+lto = true
+codegen-units = 1
