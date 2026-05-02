@@ -8,3 +8,6 @@ pub mod state;
 pub mod sequencer;
 /// Real-time clock thread driving the sequencer forward.
 pub mod clock;
+/// MIDI output thread — sends NoteOn/NoteOff via midir.
+#[cfg(feature = "hw-io")]
+pub mod midi_out;
