@@ -1,7 +1,7 @@
 # Task: Shift Overlay UI
 
 - **Type**: coder
-- **Status**: pending
+- **Status**: done
 - **Repo**: midi-man-mk3
 - **Parallel Group**: 3
 - **Feature Branch**: feature/randomness-layer
@@ -149,4 +149,24 @@ pub fn render_frame(f: &mut Frame, state: &SequencerState, overlay: Option<Overl
 - Code standard: no `unsafe`, `clippy` clean.
 
 ## Notes
+
+### Implementation Summary (Stream G)
+
+**Branch**: `randomness-g-shift-overlay-ui` (worktree at `.workflow/worktrees/randomness-g-shift-overlay-ui`)
+
+**Changes to `engine/src/ui_render.rs`:**
+- Added `SHIFT_PARAMS: [&str; 8]` constant with all 8 shift param names
+- Added `shift_param_value_string(state, index)` — returns committed value display string for all 8 indices using `SequencerState` fields from Stream C
+- Added `shift_pending_param_value_string(index, v)` — returns pending value display string from raw `i64`
+- Added `tempo_roll_point_name` and `tempo_rand_type_name` private helpers
+- Replaced `(shift mode — coming soon)` placeholder in `render_overlay` with a full span-building loop matching the Regular overlay pattern
+- Added `[S]kip  [G]en` action label row (dimmed style) below the param row
+- Bumped Shift overlay height from 3 to 4 to accommodate the extra action label row
+- Added `TempoRollPoint` and `TempoRandType` imports
+
+**Changes to `engine/tests/ui.rs`:**
+- Updated `overlay_shift_shows_coming_soon` and `overlay_shift_shows_shift_mode_text` to assert on new content
+- Added 15 new tests: `shift_param_value_string_*` (8), `shift_pending_param_value_string_*` (5), `shift_overlay_pending_edit_shown_in_render`, `shift_overlay_render_frame_does_not_panic`
+
+**Test results**: 134 tests total (89 unit + 45 integration), all pass. Clippy clean. Release build succeeded.
 
