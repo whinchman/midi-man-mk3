@@ -40,10 +40,10 @@ impl TempoRollPoint {
     /// Return the zero-based index of this TempoRollPoint variant.
     pub fn to_index(self) -> usize {
         match self {
-            TempoRollPoint::Off  => 0,
+            TempoRollPoint::Off => 0,
             TempoRollPoint::Step => 1,
             TempoRollPoint::Beat => 2,
-            TempoRollPoint::Seq  => 3,
+            TempoRollPoint::Seq => 3,
         }
     }
 }
@@ -81,10 +81,10 @@ impl TempoRandType {
     /// Return the zero-based index of this TempoRandType variant.
     pub fn to_index(self) -> usize {
         match self {
-            TempoRandType::Random   => 0,
-            TempoRandType::Up       => 1,
-            TempoRandType::Down     => 2,
-            TempoRandType::Breathe  => 3,
+            TempoRandType::Random => 0,
+            TempoRandType::Up => 1,
+            TempoRandType::Down => 2,
+            TempoRandType::Breathe => 3,
             TempoRandType::PingPong => 4,
         }
     }
@@ -146,7 +146,11 @@ pub enum PendingEdit {
     /// Editing the velocity for a step.
     Velocity { step: usize, velocity: u8 },
     /// Editing a named parameter under a given overlay.
-    Param { overlay: OverlayMode, index: u8, value: i64 },
+    Param {
+        overlay: OverlayMode,
+        index: u8,
+        value: i64,
+    },
 }
 
 /// A single sequencer step.
@@ -162,7 +166,11 @@ pub struct StepData {
 
 impl Default for StepData {
     fn default() -> Self {
-        Self { enabled: false, midi_note: 60, velocity: 100 }
+        Self {
+            enabled: false,
+            midi_note: 60,
+            velocity: 100,
+        }
     }
 }
 
@@ -173,7 +181,12 @@ impl Default for StepData {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MidiEvent {
     /// Note-on with embedded duration for NoteOff scheduling.
-    NoteOn { channel: u8, note: u8, velocity: u8, duration_nanos: u64 },
+    NoteOn {
+        channel: u8,
+        note: u8,
+        velocity: u8,
+        duration_nanos: u64,
+    },
     /// Note-off.
     NoteOff { channel: u8, note: u8 },
     /// MIDI Start (transport).
@@ -258,6 +271,10 @@ pub struct SequencerState {
     ///
     /// Clamped to 0–127 at emit time.
     pub velocity_modifier: i8,
+    /// User-facing random seed (lower 32 bits of rng_seed, settable via CLI).
+    pub rand_seed: u32,
+    /// Name of the connected MIDI output port (for title bar display).
+    pub midi_device_name: String,
 }
 
 impl Default for SequencerState {
@@ -291,6 +308,8 @@ impl Default for SequencerState {
             note_modifier: 0,
             skip_modifier: false,
             velocity_modifier: 0,
+            rand_seed: 0x853C_49E6,
+            midi_device_name: String::new(),
         }
     }
 }
@@ -423,7 +442,10 @@ impl SequencerState {
             InputCommand::StepSelect(n) => {
                 self.selected_step = n.min(15);
                 // Discard any pending note or velocity edit on step change.
-                if matches!(self.pending_edit, PendingEdit::Note { .. } | PendingEdit::Velocity { .. }) {
+                if matches!(
+                    self.pending_edit,
+                    PendingEdit::Note { .. } | PendingEdit::Velocity { .. }
+                ) {
                     self.pending_edit = PendingEdit::None;
                 }
             }
@@ -432,7 +454,10 @@ impl SequencerState {
                 let current = self.selected_step as i32;
                 let next = ((current + d as i32).rem_euclid(16)) as usize;
                 self.selected_step = next;
-                if matches!(self.pending_edit, PendingEdit::Note { .. } | PendingEdit::Velocity { .. }) {
+                if matches!(
+                    self.pending_edit,
+                    PendingEdit::Note { .. } | PendingEdit::Velocity { .. }
+                ) {
                     self.pending_edit = PendingEdit::None;
                 }
             }
@@ -440,11 +465,17 @@ impl SequencerState {
                 let step = self.selected_step;
                 // BUG-010 fix: use pending note as base so repeated presses accumulate.
                 let base_note = match self.pending_edit {
-                    PendingEdit::Note { step: ps, midi_note } if ps == step => midi_note,
+                    PendingEdit::Note {
+                        step: ps,
+                        midi_note,
+                    } if ps == step => midi_note,
                     _ => self.steps[step].midi_note,
                 };
                 let new_note = crate::music_theory::next_note(base_note, self.key, self.mode, d);
-                self.pending_edit = PendingEdit::Note { step, midi_note: new_note };
+                self.pending_edit = PendingEdit::Note {
+                    step,
+                    midi_note: new_note,
+                };
             }
             InputCommand::Confirm => {
                 match self.pending_edit {
@@ -461,11 +492,15 @@ impl SequencerState {
                         }
                         self.pending_edit = PendingEdit::None;
                     }
-                    PendingEdit::Param { overlay, index, value } => {
+                    PendingEdit::Param {
+                        overlay,
+                        index,
+                        value,
+                    } => {
                         // Route to the correct overlay-specific apply method.
                         match overlay {
                             OverlayMode::Regular => self.apply_param_value(index, value),
-                            OverlayMode::Shift   => self.shift_apply_param_value(index, value),
+                            OverlayMode::Shift => self.shift_apply_param_value(index, value),
                         }
                         self.pending_edit = PendingEdit::None;
                     }
@@ -479,7 +514,10 @@ impl SequencerState {
                 let step = self.selected_step;
                 let current_vel = self.steps[step].velocity;
                 let new_vel = (current_vel as i16 + d as i16).clamp(0, 127) as u8;
-                self.pending_edit = PendingEdit::Velocity { step, velocity: new_vel };
+                self.pending_edit = PendingEdit::Velocity {
+                    step,
+                    velocity: new_vel,
+                };
             }
             InputCommand::OpenOverlay(mode) => {
                 // Record the active overlay so HID can read it.
@@ -511,17 +549,27 @@ impl SequencerState {
                 // Seed from the current committed state value so the pending value
                 // is always in the same unit space as the state field.
                 let current_value = match self.pending_edit {
-                    PendingEdit::Param { index: pi, value, .. } if pi == index => value,
+                    PendingEdit::Param {
+                        index: pi, value, ..
+                    } if pi == index => value,
                     _ => match overlay {
                         OverlayMode::Regular => self.committed_param_value(index),
-                        OverlayMode::Shift   => self.shift_committed_param_value(index),
+                        OverlayMode::Shift => self.shift_committed_param_value(index),
                     },
                 };
                 let new_value = match overlay {
-                    OverlayMode::Regular => self.clamped_param_value(index, current_value + d as i64),
-                    OverlayMode::Shift   => self.shift_clamped_param_value(index, current_value + d as i64),
+                    OverlayMode::Regular => {
+                        self.clamped_param_value(index, current_value + d as i64)
+                    }
+                    OverlayMode::Shift => {
+                        self.shift_clamped_param_value(index, current_value + d as i64)
+                    }
                 };
-                self.pending_edit = PendingEdit::Param { overlay, index, value: new_value };
+                self.pending_edit = PendingEdit::Param {
+                    overlay,
+                    index,
+                    value: new_value,
+                };
             }
             InputCommand::PlayStop => {
                 if self.playing {
@@ -542,6 +590,25 @@ impl SequencerState {
             }
             InputCommand::GenerateRandomSequence => {
                 self.generate_random_sequence();
+            }
+            InputCommand::BpmDelta(d) => {
+                self.tempo_bpm = (self.tempo_bpm as i32 + d as i32).clamp(20, 300) as u16;
+            }
+            InputCommand::SeedSet(seed) => {
+                self.rand_seed = seed;
+                // Xorshift64 with seed 0 is a zero-fixed-point; substitute a
+                // known nonzero fallback constant so the RNG is never stuck.
+                self.rng_seed = if seed == 0 {
+                    0x853C_49E6_853C_49E6u64
+                } else {
+                    seed as u64 | ((seed as u64) << 32)
+                };
+            }
+            InputCommand::ChannelSet(ch) => {
+                self.midi_channel = ch.saturating_sub(1).min(15); // 1-indexed → 0-indexed, clamped to 0–15
+            }
+            InputCommand::MidiDeviceName(name) => {
+                self.midi_device_name = name;
             }
         }
     }
@@ -692,8 +759,7 @@ impl SequencerState {
         for step in self.steps.iter_mut() {
             let raw = next_rand(&mut self.rng_seed);
             let note_in_range = (raw % 37) as u8 + 48; // 48..=84
-            step.midi_note =
-                crate::music_theory::snap_to_key(note_in_range, self.key, self.mode);
+            step.midi_note = crate::music_theory::snap_to_key(note_in_range, self.key, self.mode);
         }
     }
 
@@ -703,9 +769,220 @@ impl SequencerState {
     /// No heap allocation: operates on the fixed-size `steps` array in place.
     fn snap_all_steps_to_key(&mut self) {
         for step in self.steps.iter_mut() {
-            step.midi_note =
-                crate::music_theory::snap_to_key(step.midi_note, self.key, self.mode);
+            step.midi_note = crate::music_theory::snap_to_key(step.midi_note, self.key, self.mode);
         }
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::input::InputCommand;
+
+    #[test]
+    fn bpm_delta_clamps_to_range() {
+        let mut state = SequencerState::default();
+        state.tempo_bpm = 120;
+
+        // Delta that would go below minimum
+        state.apply_command(InputCommand::BpmDelta(-127));
+        assert_eq!(state.tempo_bpm, 20, "BPM should clamp to 20 at minimum");
+
+        // Delta that would go above maximum
+        state.apply_command(InputCommand::BpmDelta(127));
+        assert_eq!(state.tempo_bpm, 147, "BPM should accumulate from 20");
+
+        // Reset and verify upper clamp
+        state.tempo_bpm = 290;
+        state.apply_command(InputCommand::BpmDelta(20));
+        assert_eq!(state.tempo_bpm, 300, "BPM should clamp to 300 at maximum");
+    }
+
+    #[test]
+    fn seed_set_updates_both_fields() {
+        let mut state = SequencerState::default();
+        let seed: u32 = 0xABCD;
+        state.apply_command(InputCommand::SeedSet(seed));
+
+        assert_eq!(
+            state.rand_seed, 0xABCD,
+            "rand_seed must match the seed value"
+        );
+        let expected_rng = seed as u64 | ((seed as u64) << 32);
+        assert_eq!(
+            state.rng_seed, expected_rng,
+            "rng_seed must be seed | (seed << 32)"
+        );
+    }
+
+    #[test]
+    fn channel_set_converts_1_indexed() {
+        let mut state = SequencerState::default();
+
+        // 1-indexed input 1 → 0-indexed 0
+        state.apply_command(InputCommand::ChannelSet(1));
+        assert_eq!(
+            state.midi_channel, 0,
+            "ChannelSet(1) should store midi_channel = 0"
+        );
+
+        // 1-indexed input 16 → 0-indexed 15
+        state.apply_command(InputCommand::ChannelSet(16));
+        assert_eq!(
+            state.midi_channel, 15,
+            "ChannelSet(16) should store midi_channel = 15"
+        );
+
+        // Saturating sub: ChannelSet(0) stays at 0 (not underflows)
+        state.apply_command(InputCommand::ChannelSet(0));
+        assert_eq!(state.midi_channel, 0, "ChannelSet(0) should saturate to 0");
+    }
+
+    #[test]
+    fn midi_device_name_set() {
+        let mut state = SequencerState::default();
+        assert_eq!(
+            state.midi_device_name, "",
+            "midi_device_name should be empty by default"
+        );
+
+        state.apply_command(InputCommand::MidiDeviceName("IAC Driver".to_string()));
+        assert_eq!(state.midi_device_name, "IAC Driver");
+
+        state.apply_command(InputCommand::MidiDeviceName(String::new()));
+        assert_eq!(state.midi_device_name, "");
+    }
+
+    #[test]
+    fn rand_seed_default_value() {
+        let state = SequencerState::default();
+        assert_eq!(state.rand_seed, 0x853C_49E6);
+    }
+
+    #[test]
+    fn seed_set_zero_uses_fallback_nonzero_rng_seed() {
+        let mut state = SequencerState::default();
+        state.apply_command(InputCommand::SeedSet(0));
+
+        assert_eq!(state.rand_seed, 0, "rand_seed must store the raw seed value");
+        assert_ne!(
+            state.rng_seed, 0,
+            "rng_seed must be nonzero when seed=0 to avoid xorshift64 zero-fixed-point"
+        );
+        assert_eq!(
+            state.rng_seed, 0x853C_49E6_853C_49E6u64,
+            "rng_seed must use the fallback constant when seed=0"
+        );
+    }
+
+    #[test]
+    fn channel_set_clamps_above_16() {
+        let mut state = SequencerState::default();
+
+        // Values above 16 must clamp to channel 15 (0-indexed)
+        state.apply_command(InputCommand::ChannelSet(17));
+        assert_eq!(
+            state.midi_channel, 15,
+            "ChannelSet(17) should clamp to midi_channel = 15"
+        );
+
+        state.apply_command(InputCommand::ChannelSet(255));
+        assert_eq!(
+            state.midi_channel, 15,
+            "ChannelSet(255) should clamp to midi_channel = 15"
+        );
+    }
+
+    #[test]
+    fn bpm_delta_boundary_at_minimum() {
+        let mut state = SequencerState::default();
+        // Start exactly at the minimum boundary.
+        state.tempo_bpm = 20;
+
+        // Negative delta at minimum stays at 20.
+        state.apply_command(InputCommand::BpmDelta(-1));
+        assert_eq!(state.tempo_bpm, 20, "BPM already at 20 must not go below");
+
+        state.apply_command(InputCommand::BpmDelta(-127));
+        assert_eq!(state.tempo_bpm, 20, "Large negative delta at 20 must clamp to 20");
+    }
+
+    #[test]
+    fn bpm_delta_boundary_at_maximum() {
+        let mut state = SequencerState::default();
+        // Start exactly at the maximum boundary.
+        state.tempo_bpm = 300;
+
+        // Positive delta at maximum stays at 300.
+        state.apply_command(InputCommand::BpmDelta(1));
+        assert_eq!(state.tempo_bpm, 300, "BPM already at 300 must not exceed 300");
+
+        state.apply_command(InputCommand::BpmDelta(127));
+        assert_eq!(state.tempo_bpm, 300, "Large positive delta at 300 must clamp to 300");
+    }
+
+    #[test]
+    fn bpm_delta_arithmetic() {
+        let mut state = SequencerState::default();
+        state.tempo_bpm = 100;
+
+        // Positive delta within range.
+        state.apply_command(InputCommand::BpmDelta(25));
+        assert_eq!(state.tempo_bpm, 125, "100 + 25 = 125");
+
+        // Negative delta within range.
+        state.apply_command(InputCommand::BpmDelta(-25));
+        assert_eq!(state.tempo_bpm, 100, "125 - 25 = 100");
+
+        // Zero delta leaves BPM unchanged.
+        state.apply_command(InputCommand::BpmDelta(0));
+        assert_eq!(state.tempo_bpm, 100, "delta 0 must leave BPM unchanged");
+    }
+
+    #[test]
+    fn seed_set_nonzero_rng_seed_formula() {
+        let mut state = SequencerState::default();
+
+        // Verify formula: rng_seed = lo | (lo << 32) for a variety of nonzero seeds.
+        for &seed in &[1u32, 0xFFFF_FFFFu32, 0x1234_5678u32] {
+            state.apply_command(InputCommand::SeedSet(seed));
+            assert_eq!(state.rand_seed, seed, "rand_seed must equal the supplied seed");
+            let lo = seed as u64;
+            let expected = lo | (lo << 32);
+            assert_eq!(
+                state.rng_seed, expected,
+                "rng_seed for seed={seed:#010x} must be lo | (lo << 32)"
+            );
+        }
+    }
+
+    #[test]
+    fn midi_device_name_overwrite_existing() {
+        let mut state = SequencerState::default();
+
+        state.apply_command(InputCommand::MidiDeviceName("First Device".to_string()));
+        assert_eq!(state.midi_device_name, "First Device");
+
+        // Overwrite with a different non-empty name.
+        state.apply_command(InputCommand::MidiDeviceName("Second Device".to_string()));
+        assert_eq!(
+            state.midi_device_name, "Second Device",
+            "MidiDeviceName must overwrite the previously stored name"
+        );
+    }
+
+    #[test]
+    fn midi_device_name_empty_string() {
+        let mut state = SequencerState::default();
+
+        state.apply_command(InputCommand::MidiDeviceName("IAC Driver".to_string()));
+        assert_eq!(state.midi_device_name, "IAC Driver");
+
+        // Overwrite with empty string.
+        state.apply_command(InputCommand::MidiDeviceName(String::new()));
+        assert_eq!(
+            state.midi_device_name, "",
+            "MidiDeviceName with empty string must clear the stored name"
+        );
+    }
+}

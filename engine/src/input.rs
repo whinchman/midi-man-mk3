@@ -55,6 +55,14 @@ pub enum InputCommand {
     VelocityModifierSet(i8),
     /// Randomise all 16 step notes within the current key/mode.
     GenerateRandomSequence,
+    /// Adjust BPM by signed delta (clamped to 20–300). Always active.
+    BpmDelta(i8),
+    /// Set the random seed from CLI. Updates both rand_seed and rng_seed.
+    SeedSet(u32),
+    /// Set MIDI channel (1-indexed input; stored 0-indexed). Sent by CLI handler.
+    ChannelSet(u8),
+    /// Sync the MIDI device name into state for title bar display.
+    MidiDeviceName(String),
 }
 
 /// Pure function: translate a root-mode key event into an `InputCommand`.
@@ -62,10 +70,7 @@ pub enum InputCommand {
 /// Separated from crossterm so it can be unit-tested without the hw-io feature.
 /// `shift` is true when the Shift modifier is held.
 /// Returns `None` for unmapped keys.
-pub fn root_key_to_command(
-    key_code: KeyCodeSimple,
-    shift: bool,
-) -> Option<InputCommand> {
+pub fn root_key_to_command(key_code: KeyCodeSimple, shift: bool) -> Option<InputCommand> {
     match key_code {
         KeyCodeSimple::Left => Some(InputCommand::StepSelectDelta(-1)),
         KeyCodeSimple::Right => Some(InputCommand::StepSelectDelta(1)),
@@ -207,4 +212,3 @@ mod tests {
         ));
     }
 }
-
