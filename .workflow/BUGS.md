@@ -424,6 +424,71 @@ Implement the `PendingEdit::Param` commit arm to dispatch to the correct field b
 
 ---
 
+## BUG-015 — [WARNING] `open_device()` in hid.rs ignores CLI VID/PID overrides — dead public API
+
+- **File:** `engine/src/hid.rs`, lines 136–154
+- **Branch:** `task/fix-hid-and-main`
+- **Discovered:** 2026-05-02 by code-reviewer agent (fix-hid-and-main review)
+- **Severity:** warning
+
+### Description
+
+BUG-008's fix added `vid: u16, pid: u16` parameters to `run_hid` and updated `main.rs`
+to open the device inside `run_hid`. However the `pub fn open_device()` helper was not
+updated — it still opens the device using the hardcoded `HID_VID` and `HID_PID`
+constants and is no longer called from anywhere in the codebase. Because it is `pub` the
+compiler does not warn. Any future caller reaching for this convenience function will
+silently ignore CLI overrides.
+
+### Suggested Fix
+
+Option A (preferred): Remove `open_device` entirely — it is unused and its behaviour is
+fully subsumed by `run_hid`'s inline open logic.
+
+Option B: Add `vid: u16, pid: u16` parameters to match `run_hid`'s signature and
+document that callers should pass `HID_VID`/`HID_PID` as defaults.
+
+---
+
+## BUG-016 — [WARNING] `choose_midi_port` silently falls back to port 0 when filter has no match
+
+- **File:** `engine/src/midi_out.rs`, lines 130–134
+- **Branch:** `task/fix-hid-and-main`
+- **Discovered:** 2026-05-02 by code-reviewer agent (fix-hid-and-main review)
+- **Severity:** warning
+
+### Description
+
+When `--midi-port <filter>` is passed and no ALSA port name contains the filter string,
+`choose_midi_port` silently returns `Some(names[0].clone())` — the first available port —
+with no log message. The companion helper `select_port_idx` (called from `open_port`)
+already logs a warning in this case, but `choose_midi_port` does not. Users will see
+their `--midi-port` override silently ignored with no feedback.
+
+### Reproduction
+
+```
+cargo run -p engine --features hw-io -- --midi-port "nonexistent-synth"
+```
+
+With multiple ALSA ports available, the engine connects to port 0 without any message
+indicating the filter did not match.
+
+### Suggested Fix
+
+```rust
+if let Some(f) = filter {
+    let f_lower = f.to_lowercase();
+    let matched = names.iter().find(|n| n.to_lowercase().contains(&f_lower));
+    if matched.is_none() {
+        eprintln!("[midi_out] no port matching '{}' found — falling back to first port", f);
+    }
+    return Some(matched.unwrap_or(&names[0]).clone());
+}
+```
+
+---
+
 ## BUG-013 — [WARNING] `.cargo/config.toml` comment references non-existent `CARGO_CONFIG_TOML` env var
 
 - **File:** `.cargo/config.toml` (lines 7–8 on branch `fix/known-bugs`, commit 75b7cdd)
