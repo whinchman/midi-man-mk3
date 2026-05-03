@@ -4,9 +4,10 @@
 //! wake times to prevent drift accumulation. Swing is applied by offsetting
 //! odd-step wake times by `swing_factor * tick_period / 100` nanoseconds.
 //!
-//! The clock does NOT send `NoteOff` events — that responsibility belongs to
-//! `midi_out.rs`. It embeds `duration_nanos = tick_nanos` into each `NoteOn`
-//! so that `midi_out.rs` can schedule the matching `NoteOff`.
+//! The clock sends a `NoteOff` immediately before a `NoteOn` only when the
+//! same (channel, note) pair repeats on consecutive steps (retrigger). All
+//! other `NoteOff` scheduling is delegated to `midi_out.rs`, which uses
+//! `duration_nanos` embedded in each `NoteOn`.
 
 use std::sync::{Arc, RwLock, mpsc::SyncSender};
 
@@ -123,7 +124,7 @@ pub fn add_nanos(ts: libc::timespec, nanos: u64) -> libc::timespec {
 /// never falls before the epoch (total nanoseconds are clamped to zero).
 /// Correctly carries borrows across the second boundary.
 pub fn add_nanos_signed(ts: libc::timespec, nanos: i64) -> libc::timespec {
-    let total_ns: i64 = ts.tv_sec as i64 * 1_000_000_000 + ts.tv_nsec as i64 + nanos;
+    let total_ns: i64 = ts.tv_sec * 1_000_000_000 + ts.tv_nsec + nanos;
     let total_ns = total_ns.max(0);
     libc::timespec {
         tv_sec: (total_ns / 1_000_000_000) as libc::time_t,
@@ -146,6 +147,9 @@ pub fn run_clock(state: Arc<RwLock<SequencerState>>, midi_tx: SyncSender<MidiEve
     let mut next_abs = monotonic_now();
     // step_count tracks even/odd for swing (does not reset with playhead).
     let mut step_count: u64 = 0;
+    // Tracks the last (channel, note) that received a NoteOn so consecutive
+    // identical notes can be retriggered by sending a NoteOff first.
+    let mut last_note: Option<(u8, u8)> = None;
 
     loop {
         // --- read current parameters (read lock, released immediately) ---
@@ -175,6 +179,14 @@ pub fn run_clock(state: Arc<RwLock<SequencerState>>, midi_tx: SyncSender<MidiEve
             };
 
             if let Some(MidiEvent::NoteOn { channel, note, velocity, .. }) = maybe_event {
+                // Retrigger: if the same note is still held, send NoteOff first
+                // so the MIDI device recognises the following NoteOn as a new note.
+                if last_note == Some((channel, note))
+                    && midi_tx.send(MidiEvent::NoteOff { channel, note }).is_err()
+                {
+                    // Receiver dropped — exit cleanly.
+                    break;
+                }
                 let event = MidiEvent::NoteOn {
                     channel,
                     note,
@@ -185,12 +197,164 @@ pub fn run_clock(state: Arc<RwLock<SequencerState>>, midi_tx: SyncSender<MidiEve
                     // Receiver dropped — exit cleanly.
                     break;
                 }
+                last_note = Some((channel, note));
             }
         }
 
         // Advance next absolute time by one tick period.
         next_abs = add_nanos(next_abs, period);
         step_count = step_count.wrapping_add(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::{MidiEvent, SequencerState, StepData};
+    use std::sync::mpsc;
+
+    /// Simulates the retrigger logic from `run_clock` on a single tick.
+    ///
+    /// Returns the events that would be emitted for the given `maybe_event`,
+    /// given the current `last_note` state.  Updates `last_note` in place,
+    /// mirroring the production code.
+    fn simulate_tick(
+        maybe_event: Option<MidiEvent>,
+        last_note: &mut Option<(u8, u8)>,
+        period: u64,
+    ) -> Vec<MidiEvent> {
+        let mut events = Vec::new();
+        if let Some(MidiEvent::NoteOn { channel, note, velocity, .. }) = maybe_event {
+            if *last_note == Some((channel, note)) {
+                events.push(MidiEvent::NoteOff { channel, note });
+            }
+            events.push(MidiEvent::NoteOn { channel, note, velocity, duration_nanos: period });
+            *last_note = Some((channel, note));
+        }
+        events
+    }
+
+    // ── BUG-018: repeated-note retrigger ────────────────────────────────────
+
+    /// Two consecutive steps with the same note must each produce a NoteOn,
+    /// with a NoteOff inserted between them.
+    #[test]
+    fn test_retrigger_same_note_inserts_note_off() {
+        let mut state = SequencerState::default();
+        // Steps 0 and 1 both enabled with note 60, channel 0.
+        state.steps[0] = StepData { enabled: true, midi_note: 60, velocity: 100 };
+        state.steps[1] = StepData { enabled: true, midi_note: 60, velocity: 100 };
+        state.playing = true;
+        // playhead starts at 0; first tick advances to step 0.
+        // (tick() increments before reading: 0+1 wraps at 16 → step 1, no — let's
+        //  check: default playhead=0, tick advances next=1 when loop_active=false
+        //  and next<16, so sets playhead=1. We want steps 0,1 both enabled.)
+        // Re-initialise so playhead is at 15 (wraps to 0 on first tick).
+        state.playhead = 15;
+
+        let period: u64 = 500_000;
+        let mut last_note: Option<(u8, u8)> = None;
+
+        let e1 = simulate_tick(state.tick(), &mut last_note, period);
+        assert_eq!(e1, vec![MidiEvent::NoteOn { channel: 0, note: 60, velocity: 100, duration_nanos: period }],
+            "first tick: NoteOn only");
+        assert_eq!(last_note, Some((0, 60)));
+
+        let e2 = simulate_tick(state.tick(), &mut last_note, period);
+        assert_eq!(e2, vec![
+            MidiEvent::NoteOff { channel: 0, note: 60 },
+            MidiEvent::NoteOn  { channel: 0, note: 60, velocity: 100, duration_nanos: period },
+        ], "second tick: NoteOff then NoteOn for retrigger");
+    }
+
+    /// A different note on the second step must NOT produce a NoteOff first.
+    #[test]
+    fn test_no_retrigger_for_different_note() {
+        let mut state = SequencerState::default();
+        state.steps[0] = StepData { enabled: true, midi_note: 60, velocity: 100 };
+        state.steps[1] = StepData { enabled: true, midi_note: 62, velocity: 100 };
+        state.playing = true;
+        state.playhead = 15;
+
+        let period: u64 = 500_000;
+        let mut last_note: Option<(u8, u8)> = None;
+
+        let e1 = simulate_tick(state.tick(), &mut last_note, period);
+        assert_eq!(e1, vec![MidiEvent::NoteOn { channel: 0, note: 60, velocity: 100, duration_nanos: period }]);
+
+        let e2 = simulate_tick(state.tick(), &mut last_note, period);
+        assert_eq!(e2, vec![MidiEvent::NoteOn { channel: 0, note: 62, velocity: 100, duration_nanos: period }],
+            "different note: no NoteOff inserted");
+    }
+
+    /// A disabled step must NOT update last_note, so no phantom NoteOff fires.
+    #[test]
+    fn test_disabled_step_does_not_update_last_note() {
+        let mut state = SequencerState::default();
+        state.steps[0] = StepData { enabled: true,  midi_note: 60, velocity: 100 };
+        state.steps[1] = StepData { enabled: false, midi_note: 60, velocity: 100 };
+        state.steps[2] = StepData { enabled: true,  midi_note: 60, velocity: 100 };
+        state.playing = true;
+        state.playhead = 15;
+
+        let period: u64 = 500_000;
+        let mut last_note: Option<(u8, u8)> = None;
+
+        let _e1 = simulate_tick(state.tick(), &mut last_note, period); // step 0 → NoteOn
+        let e2 = simulate_tick(state.tick(), &mut last_note, period); // step 1 → disabled, None
+        assert!(e2.is_empty(), "disabled step emits no events");
+        assert_eq!(last_note, Some((0, 60)), "last_note unchanged after disabled step");
+
+        // Step 2 has the same note: because last_note is still set, a NoteOff fires.
+        // This is correct behaviour — the note from step 0 is still logically held.
+        let e3 = simulate_tick(state.tick(), &mut last_note, period); // step 2 → retrigger
+        assert_eq!(e3, vec![
+            MidiEvent::NoteOff { channel: 0, note: 60 },
+            MidiEvent::NoteOn  { channel: 0, note: 60, velocity: 100, duration_nanos: period },
+        ], "retrigger fires after disabled gap");
+    }
+
+    // ── run_clock integration: channel-based smoke test ─────────────────────
+
+    /// Two consecutive same-note steps both produce NoteOn events on the MIDI
+    /// channel, with a NoteOff sandwiched between them.
+    ///
+    /// This test drives `run_clock` in a real thread (sleep_until is a no-op on
+    /// non-Linux so the loop spins fast). We collect exactly 3 events and then
+    /// drop the receiver so the clock thread exits cleanly.
+    #[test]
+    fn test_run_clock_retrigger_via_channel() {
+        use std::sync::{Arc, RwLock};
+
+        let mut state = SequencerState::default();
+        // Two enabled steps with the same note; rest disabled.
+        state.steps[0] = StepData { enabled: true, midi_note: 60, velocity: 100 };
+        state.steps[1] = StepData { enabled: true, midi_note: 60, velocity: 100 };
+        state.playing = true;
+        state.playhead = 15; // wraps to 0 on first tick
+        // Very fast tempo and small step so the thread doesn't wait long.
+        state.tempo_bpm = 240;
+        state.step_size = StepSize::ThirtySecond;
+
+        let shared = Arc::new(RwLock::new(state));
+        // Capacity 3: thread will block after 3 events; dropping rx causes the
+        // next send to error, exiting the loop.
+        let (tx, rx) = mpsc::sync_channel::<MidiEvent>(3);
+
+        let shared_clone = Arc::clone(&shared);
+        let handle = std::thread::spawn(move || run_clock(shared_clone, tx));
+
+        // Collect the first 3 events.
+        let ev1 = rx.recv().expect("event 1");
+        let ev2 = rx.recv().expect("event 2");
+        let ev3 = rx.recv().expect("event 3");
+        // Drop receiver — causes the clock thread to exit on its next send.
+        drop(rx);
+        handle.join().ok();
+
+        assert!(matches!(ev1, MidiEvent::NoteOn { note: 60, .. }), "ev1 NoteOn");
+        assert!(matches!(ev2, MidiEvent::NoteOff { note: 60, .. }), "ev2 NoteOff retrigger");
+        assert!(matches!(ev3, MidiEvent::NoteOn { note: 60, .. }), "ev3 NoteOn again");
     }
 }
 
