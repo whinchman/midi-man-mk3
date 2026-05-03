@@ -123,7 +123,7 @@ fn update_local_overlay(ui: &mut UiState, cmd: &InputCommand) {
         }
         InputCommand::ParamSelectDelta(d) => {
             let current = ui.selected_param as i32;
-            let next = ((current + *d as i32).rem_euclid(7)) as u8;
+            let next = ((current + *d as i32).rem_euclid(8)) as u8;
             ui.selected_param = next;
         }
         InputCommand::ParamSelect(n) => {
