@@ -5,6 +5,15 @@ to the default branch.
 
 ---
 
+## key-mode-note-shifting — merged 2026-05-03 (PR #24)
+
+On Key or Mode change via the Regular Overlay, all 16 step midi_note values snap to the nearest in-key note. Equidistant candidates resolve to the lower note.
+- `music_theory.rs`: new `snap_to_key(midi_note, key, mode) -> u8` — pure, heap-free, full MIDI range sweep
+- `state.rs`: `apply_param_value` arms 0/1 now call `snap_all_steps_to_key()` on change; no-op guard prevents mutation when confirming unchanged key/mode
+- 18 new tests (7 unit + 11 integration); 310 total pass
+
+---
+
 ## fix/known-bugs — Bug batch BUG-001 through BUG-017 — merged 2026-05-03 (PR #22)
 
 Fixed all 17 known warnings in a single feature branch. Key changes:
