@@ -1,6 +1,6 @@
 # Task: fix-ratatui-crossterm-gate
 
-- **Status**: pending
+- **Status**: done
 - **Type**: coder
 - **Feature Branch**: fix/known-bugs
 - **Branch**: fix/known-bugs/fix-ratatui-crossterm-gate
@@ -33,3 +33,16 @@ Ensure `crossterm` is only pulled in when the `hw-io` feature is enabled by decl
 
 ## Notes
 
+The fix was already present in `fix/known-bugs` as commit `55eba05`
+(`fix(terminal-ui): gate ratatui crossterm backend behind hw-io feature (BUG-007)`).
+
+**Branch:** `fix-ratatui-crossterm-gate` (worktree off `fix/known-bugs`)
+
+**What was verified:**
+- `engine/Cargo.toml` already has `ratatui` with `default-features = false, features = ["macros"]`
+- `crossterm` is declared as `optional = true`
+- `hw-io` feature gates both `crossterm` and `ratatui/crossterm`
+- `cargo tree -p engine` (without `--features hw-io`) shows no crossterm in the dependency tree
+- `cargo test -p engine` passes: 249 tests across 8 test suites (clock, hid, input, main_wiring, midi_out, music_theory, state, ui)
+
+No code changes were needed — BUG-007 was already fixed prior to this task being dispatched.

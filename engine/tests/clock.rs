@@ -313,6 +313,129 @@ fn tick_no_events_sent_when_paused() {
     assert!(rx.try_recv().is_err(), "no events should be sent when paused=true");
 }
 
+// --- add_nanos_signed: epoch clamp and edge cases ---
+
+#[test]
+fn add_nanos_signed_actual_epoch_clamp_sub_second() {
+    // tv_sec=0, tv_nsec=50_000_000 (50 ms), subtract 100 ms → goes below epoch → clamped to 0.
+    let ts = libc::timespec { tv_sec: 0, tv_nsec: 50_000_000 };
+    let result = add_nanos_signed(ts, -100_000_000);
+    assert_eq!(result.tv_sec, 0, "tv_sec must be 0 when clamped to epoch");
+    assert_eq!(result.tv_nsec, 0, "tv_nsec must be 0 when clamped to epoch");
+}
+
+#[test]
+fn add_nanos_signed_clamp_at_exact_epoch() {
+    // Offset that brings the result to exactly zero (no positive remainder).
+    let ts = libc::timespec { tv_sec: 1, tv_nsec: 0 };
+    let result = add_nanos_signed(ts, -1_000_000_000);
+    assert_eq!(result.tv_sec, 0, "tv_sec must be 0 when result is exactly the epoch");
+    assert_eq!(result.tv_nsec, 0, "tv_nsec must be 0 when result is exactly the epoch");
+}
+
+#[test]
+fn add_nanos_signed_zero_offset_leaves_timespec_unchanged() {
+    let ts = libc::timespec { tv_sec: 3, tv_nsec: 456_789_000 };
+    let result = add_nanos_signed(ts, 0);
+    assert_eq!(result.tv_sec, 3, "tv_sec must be unchanged for zero offset");
+    assert_eq!(result.tv_nsec, 456_789_000, "tv_nsec must be unchanged for zero offset");
+}
+
+#[test]
+fn add_nanos_signed_large_positive_spans_multiple_seconds() {
+    // 1.0s + 2_500_000_000 ns = 3.5s → tv_sec=3, tv_nsec=500_000_000
+    let ts = libc::timespec { tv_sec: 1, tv_nsec: 0 };
+    let result = add_nanos_signed(ts, 2_500_000_000);
+    assert_eq!(result.tv_sec, 3, "tv_sec should be 3 after spanning 2 full seconds");
+    assert_eq!(result.tv_nsec, 500_000_000, "tv_nsec should be 500_000_000 ns");
+}
+
+#[test]
+fn add_nanos_signed_large_negative_spans_multiple_seconds() {
+    // 10.0s - 3_200_000_000 ns = 6.8s → tv_sec=6, tv_nsec=800_000_000
+    let ts = libc::timespec { tv_sec: 10, tv_nsec: 0 };
+    let result = add_nanos_signed(ts, -3_200_000_000);
+    assert_eq!(result.tv_sec, 6, "tv_sec should be 6 after subtracting 3.2 seconds");
+    assert_eq!(result.tv_nsec, 800_000_000, "tv_nsec should be 800_000_000 ns");
+}
+
+#[test]
+fn add_nanos_signed_at_large_time_with_boundary_crossing_negative() {
+    // Simulates a running monotonic clock at ~100s with 120 BPM swing subtraction.
+    // 100.010s - 62.5ms = 99.9475s → tv_sec=99, tv_nsec=947_500_000
+    let ts = libc::timespec { tv_sec: 100, tv_nsec: 10_000_000 };
+    let result = add_nanos_signed(ts, -62_500_000);
+    assert_eq!(result.tv_sec, 99);
+    assert_eq!(result.tv_nsec, 947_500_000);
+}
+
+// --- add_nanos: edge cases ---
+
+#[test]
+fn add_nanos_zero_nanos_leaves_timespec_unchanged() {
+    let ts = libc::timespec { tv_sec: 7, tv_nsec: 123_456_789 };
+    let result = add_nanos(ts, 0);
+    assert_eq!(result.tv_sec, 7, "tv_sec must be unchanged when adding zero nanoseconds");
+    assert_eq!(result.tv_nsec, 123_456_789, "tv_nsec must be unchanged when adding zero nanoseconds");
+}
+
+#[test]
+fn add_nanos_exactly_one_second() {
+    // Adding exactly 1_000_000_000 ns to tv_nsec=0 must increment tv_sec by 1.
+    let ts = libc::timespec { tv_sec: 5, tv_nsec: 0 };
+    let result = add_nanos(ts, 1_000_000_000);
+    assert_eq!(result.tv_sec, 6, "tv_sec must increment by 1 when adding exactly one second");
+    assert_eq!(result.tv_nsec, 0, "tv_nsec must be 0 when adding exactly one second to a zero nsec");
+}
+
+#[test]
+fn add_nanos_spans_multiple_seconds() {
+    // 0.5s + 2_500_000_000 ns = 3.0s → tv_sec=3, tv_nsec=0
+    let ts = libc::timespec { tv_sec: 0, tv_nsec: 500_000_000 };
+    let result = add_nanos(ts, 2_500_000_000);
+    assert_eq!(result.tv_sec, 3, "tv_sec should be 3 after spanning 2.5 seconds");
+    assert_eq!(result.tv_nsec, 0, "tv_nsec should be 0");
+}
+
+// --- swing integration: add_nanos_signed with realistic swing offsets ---
+
+#[test]
+fn swing_120bpm_negative50_does_not_underflow_sub_second_start() {
+    // If the base time is less than the max negative swing offset, clamping must
+    // prevent tv_nsec < 0 and tv_sec < 0.
+    let period = tick_nanos(120, StepSize::Sixteenth); // 125_000_000 ns
+    let offset = swing_offset_nanos(-50, period);      // -62_500_000 ns
+    // Start at 30 ms — less than the 62.5 ms offset — so the result goes below 0.
+    let ts = libc::timespec { tv_sec: 0, tv_nsec: 30_000_000 };
+    let result = add_nanos_signed(ts, offset);
+    assert!(result.tv_sec >= 0, "tv_sec must not be negative after epoch clamp");
+    assert!(result.tv_nsec >= 0, "tv_nsec must not be negative after epoch clamp");
+    assert_eq!(result.tv_sec, 0, "should be clamped to epoch");
+    assert_eq!(result.tv_nsec, 0, "should be clamped to epoch");
+}
+
+#[test]
+fn swing_120bpm_positive50_odd_step_delay_is_correct() {
+    // Odd step at 5.000s with +50 swing: wake time should be 5.000s + 62.5ms = 5.0625s
+    let period = tick_nanos(120, StepSize::Sixteenth); // 125_000_000 ns
+    let offset = swing_offset_nanos(50, period);       // +62_500_000 ns
+    let ts = libc::timespec { tv_sec: 5, tv_nsec: 0 };
+    let result = add_nanos_signed(ts, offset);
+    assert_eq!(result.tv_sec, 5, "tv_sec should remain 5 for a sub-second positive offset");
+    assert_eq!(result.tv_nsec, 62_500_000, "tv_nsec should be 62_500_000 ns");
+}
+
+#[test]
+fn swing_120bpm_negative50_odd_step_advance_is_correct() {
+    // Odd step at 5.100s with -50 swing: wake time should be 5.100s - 62.5ms = 5.0375s
+    let period = tick_nanos(120, StepSize::Sixteenth); // 125_000_000 ns
+    let offset = swing_offset_nanos(-50, period);      // -62_500_000 ns
+    let ts = libc::timespec { tv_sec: 5, tv_nsec: 100_000_000 };
+    let result = add_nanos_signed(ts, offset);
+    assert_eq!(result.tv_sec, 5, "tv_sec should remain 5");
+    assert_eq!(result.tv_nsec, 37_500_000, "tv_nsec should be 37_500_000 ns");
+}
+
 // --- NoteOn carries duration_nanos from tick_nanos ---
 
 #[test]

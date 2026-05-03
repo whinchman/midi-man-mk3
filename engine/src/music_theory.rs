@@ -16,6 +16,34 @@ pub enum Key {
     B,
 }
 
+impl Key {
+    /// Number of Key variants.
+    pub const COUNT: usize = 12;
+
+    /// Convert a zero-based index (mod 12) to the corresponding Key variant.
+    pub fn from_index(i: usize) -> Self {
+        match i % Self::COUNT {
+            0 => Key::C,
+            1 => Key::Cs,
+            2 => Key::D,
+            3 => Key::Ds,
+            4 => Key::E,
+            5 => Key::F,
+            6 => Key::Fs,
+            7 => Key::G,
+            8 => Key::Gs,
+            9 => Key::A,
+            10 => Key::As,
+            _ => Key::B,
+        }
+    }
+
+    /// Return the zero-based index of this Key variant.
+    pub fn to_index(self) -> usize {
+        key_index(self)
+    }
+}
+
 /// Mode represents the available scales.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
@@ -28,6 +56,31 @@ pub enum Mode {
     Locrian,
     HarmonicMinor,
     MelodicMinor,
+}
+
+impl Mode {
+    /// Number of Mode variants.
+    pub const COUNT: usize = 9;
+
+    /// Convert a zero-based index (mod 9) to the corresponding Mode variant.
+    pub fn from_index(i: usize) -> Self {
+        match i % Self::COUNT {
+            0 => Mode::Major,
+            1 => Mode::NaturalMinor,
+            2 => Mode::Dorian,
+            3 => Mode::Phrygian,
+            4 => Mode::Lydian,
+            5 => Mode::Mixolydian,
+            6 => Mode::Locrian,
+            7 => Mode::HarmonicMinor,
+            _ => Mode::MelodicMinor,
+        }
+    }
+
+    /// Return the zero-based index of this Mode variant.
+    pub fn to_index(self) -> usize {
+        mode_index(self)
+    }
 }
 
 /// Semitone intervals between successive scale degrees for each mode.

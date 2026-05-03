@@ -20,13 +20,14 @@ use crate::music_theory::note_name;
 use crate::state::{PendingEdit, SequencerState, StepSize};
 use crate::music_theory::{Key, Mode};
 
-/// Regular overlay parameter names (index 0–6).
-pub const REGULAR_PARAMS: [&str; 7] = [
+/// Regular overlay parameter names (index 0–7).
+pub const REGULAR_PARAMS: [&str; 8] = [
     "Key",
     "Mode",
     "Swing",
     "Step Size",
-    "Loop",
+    "Loop In",
+    "Loop Out",
     "Pause",
     "Stop/Start",
 ];
@@ -254,7 +255,7 @@ fn render_overlay(
                 _ => None,
             };
 
-            let mut spans: Vec<Span> = Vec::with_capacity(7 * 3);
+            let mut spans: Vec<Span> = Vec::with_capacity(8 * 3);
             for (i, name) in REGULAR_PARAMS.iter().enumerate() {
                 let idx = i as u8;
                 let is_highlighted = idx == selected_param;
@@ -263,7 +264,10 @@ fn render_overlay(
                 let value_str = param_value_string(state, idx);
                 let display = if let Some((pi, pv)) = pending_param_value {
                     if pi == idx {
-                        format!(" {}[{}→{}] ", name, value_str, pv)
+                        // BUG-011 fix: format pending value with the same human-readable
+                        // formatter used for the committed value, not as a raw number.
+                        let pending_str = pending_param_value_string(idx, pv);
+                        format!(" {}[{}→{}] ", name, value_str, pending_str)
                     } else {
                         format!(" {}:{} ", name, value_str)
                     }
@@ -277,7 +281,7 @@ fn render_overlay(
                     Style::default()
                 };
                 spans.push(Span::styled(display, style));
-                if i < 6 {
+                if i < REGULAR_PARAMS.len() - 1 {
                     spans.push(Span::raw("|"));
                 }
             }
@@ -291,25 +295,41 @@ fn render_overlay(
 }
 
 /// Return a short string representation of parameter `index` current value.
+///
+/// Index map: 0=Key, 1=Mode, 2=Swing, 3=StepSize, 4=loop_in, 5=loop_out,
+/// 6=paused, 7=playing.
 fn param_value_string(state: &SequencerState, index: u8) -> String {
     match index {
         0 => key_name(state.key).to_string(),
         1 => mode_name(state.mode).to_string(),
         2 => format!("{:+}", state.swing),
         3 => step_size_label(state.step_size).to_string(),
-        4 => {
-            if state.loop_active {
-                format!("{}–{}", state.loop_in, state.loop_out)
-            } else {
-                "off".to_string()
-            }
-        }
-        5 => {
+        4 => state.loop_in.to_string(),
+        5 => state.loop_out.to_string(),
+        6 => {
             if state.paused { "on" } else { "off" }.to_string()
         }
-        6 => {
+        7 => {
             if state.playing { "playing" } else { "stopped" }.to_string()
         }
+        _ => "?".to_string(),
+    }
+}
+
+/// Return a human-readable string for a pending parameter value `v` at `index`.
+///
+/// `v` is the fully-resolved value stored in `PendingEdit::Param`, in the same
+/// unit space as the committed field.  Enum params are converted back to their
+/// named variant; numeric params are formatted as numbers.
+fn pending_param_value_string(index: u8, v: i64) -> String {
+    match index {
+        0 => key_name(Key::from_index(v as usize)).to_string(),
+        1 => mode_name(Mode::from_index(v as usize)).to_string(),
+        2 => format!("{:+}", v as i8),
+        3 => step_size_label(StepSize::from_index(v as usize)).to_string(),
+        4 | 5 => format!("{}", v),
+        6 => if v != 0 { "on".to_string() } else { "off".to_string() },
+        7 => if v != 0 { "playing".to_string() } else { "stopped".to_string() },
         _ => "?".to_string(),
     }
 }

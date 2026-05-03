@@ -3,6 +3,9 @@ target/
 **/*.rs.bk
 Cargo.lock.bak
 
+# Local Cargo config overrides (host-specific workarounds — never commit)
+.cargo/config.local.toml
+
 # Agent worktrees (created and destroyed at runtime)
 .workflow/worktrees/*
 !.workflow/worktrees/.gitkeep
