@@ -371,12 +371,41 @@ impl SequencerState {
 
         let step = &self.steps[self.playhead as usize];
         if step.enabled {
-            // TODO(stream-E): apply note_rand gate here — prob_hit(&mut self.rng_seed, self.note_rand)
-            // determines whether the note modifier is applied.
+            // 1. Skip modifier: mute the step entirely.
+            if self.skip_modifier {
+                return None;
+            }
+
+            // 2. Compute base note.
+            let mut note = step.midi_note;
+
+            // 3. Note modifier + Note Randomness gate.
+            //    Apply note_modifier first; then gate on note_rand probability.
+            //    If the prob roll misses, revert to the original note.
+            //    note_rand == 0  → prob_hit returns false → modifier never applied.
+            //    note_rand == 100 → prob_hit returns true → modifier always applied.
+            if self.note_modifier != 0 {
+                let modified = (note as i16 + self.note_modifier as i16).clamp(0, 127) as u8;
+                if prob_hit(&mut self.rng_seed, self.note_rand) {
+                    note = modified;
+                }
+            }
+
+            // 4. Scale Quantization: snap to key after note_modifier is applied.
+            //    Apply note_modifier first, then snap_to_key. If the modifier pushes
+            //    the note out of key, quantization corrects it.
+            if self.scale_quant {
+                note = crate::music_theory::snap_to_key(note, self.key, self.mode);
+            }
+
+            // 5. Velocity modifier: clamped to 0–127 at emit time.
+            let velocity =
+                (step.velocity as i16 + self.velocity_modifier as i16).clamp(0, 127) as u8;
+
             Some(MidiEvent::NoteOn {
                 channel: self.midi_channel,
-                note: step.midi_note,
-                velocity: step.velocity,
+                note,
+                velocity,
                 duration_nanos: 0,
             })
         } else {
@@ -1001,6 +1030,280 @@ mod tests {
             ratio >= 0.40 && ratio <= 0.60,
             "step_rand=50 hit rate {ratio:.4} outside [0.40, 0.60]"
         );
+    }
+
+    // ── Stream E: Modifiers in tick() ───────────────────────────────────────
+
+    /// Helper: build a playing state with a single enabled step at position 0.
+    fn playing_state_with_step(midi_note: u8, velocity: u8) -> SequencerState {
+        let mut state = SequencerState::default();
+        state.playing = true;
+        state.paused = false;
+        // All steps disabled; enable only step 0.
+        for s in state.steps.iter_mut() {
+            s.enabled = false;
+        }
+        state.steps[0].enabled = true;
+        state.steps[0].midi_note = midi_note;
+        state.steps[0].velocity = velocity;
+        // Set playhead so next tick lands on step 0.
+        state.playhead = 15;
+        state
+    }
+
+    /// Advance state until it emits Some, up to `limit` ticks.
+    fn tick_until_some(state: &mut SequencerState, limit: usize) -> Option<MidiEvent> {
+        for _ in 0..limit {
+            let ev = state.tick();
+            if ev.is_some() {
+                return ev;
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn test_skip_modifier_false_steps_fire() {
+        // skip_modifier = false → enabled steps fire normally.
+        let mut state = playing_state_with_step(60, 80);
+        state.skip_modifier = false;
+        let ev = tick_until_some(&mut state, 32);
+        assert!(ev.is_some(), "skip_modifier=false must not suppress enabled steps");
+    }
+
+    #[test]
+    fn test_skip_modifier_true_returns_none() {
+        // skip_modifier = true → tick() returns None for all enabled steps.
+        let mut state = playing_state_with_step(60, 80);
+        state.skip_modifier = true;
+        for _ in 0..100 {
+            assert!(
+                state.tick().is_none(),
+                "skip_modifier=true must suppress all steps"
+            );
+        }
+    }
+
+    #[test]
+    fn test_note_modifier_zero_is_noop() {
+        // note_modifier = 0 → emitted note equals stored note.
+        let mut state = playing_state_with_step(60, 80);
+        state.note_modifier = 0;
+        state.note_rand = 100; // always apply (irrelevant when modifier is 0)
+        let ev = tick_until_some(&mut state, 32).expect("should fire");
+        if let MidiEvent::NoteOn { note, .. } = ev {
+            assert_eq!(note, 60, "note_modifier=0 must not change the note");
+        } else {
+            panic!("expected NoteOn");
+        }
+    }
+
+    #[test]
+    fn test_note_modifier_positive_adds_semitones() {
+        // note_modifier = 7 → emitted note is stored note + 7.
+        let mut state = playing_state_with_step(60, 80);
+        state.note_modifier = 7;
+        state.note_rand = 100; // always apply
+        let ev = tick_until_some(&mut state, 32).expect("should fire");
+        if let MidiEvent::NoteOn { note, .. } = ev {
+            assert_eq!(note, 67, "note_modifier=7 must add 7 semitones");
+        } else {
+            panic!("expected NoteOn");
+        }
+    }
+
+    #[test]
+    fn test_note_modifier_positive_clamped_to_127() {
+        // note + 7 > 127 → clamped to 127.
+        let mut state = playing_state_with_step(125, 80);
+        state.note_modifier = 7;
+        state.note_rand = 100;
+        let ev = tick_until_some(&mut state, 32).expect("should fire");
+        if let MidiEvent::NoteOn { note, .. } = ev {
+            assert_eq!(note, 127, "note clamped to 127 when modifier pushes it above max");
+        } else {
+            panic!("expected NoteOn");
+        }
+    }
+
+    #[test]
+    fn test_note_modifier_negative_subtracts_semitones() {
+        // note_modifier = -12 → emitted note is stored note - 12.
+        let mut state = playing_state_with_step(60, 80);
+        state.note_modifier = -12;
+        state.note_rand = 100; // always apply
+        let ev = tick_until_some(&mut state, 32).expect("should fire");
+        if let MidiEvent::NoteOn { note, .. } = ev {
+            assert_eq!(note, 48, "note_modifier=-12 must subtract 12 semitones");
+        } else {
+            panic!("expected NoteOn");
+        }
+    }
+
+    #[test]
+    fn test_note_modifier_negative_clamped_to_zero() {
+        // note - 12 < 0 → clamped to 0.
+        let mut state = playing_state_with_step(5, 80);
+        state.note_modifier = -12;
+        state.note_rand = 100;
+        let ev = tick_until_some(&mut state, 32).expect("should fire");
+        if let MidiEvent::NoteOn { note, .. } = ev {
+            assert_eq!(note, 0, "note clamped to 0 when modifier pushes it below 0");
+        } else {
+            panic!("expected NoteOn");
+        }
+    }
+
+    #[test]
+    fn test_note_modifier_with_note_rand_100_always_applied() {
+        // note_modifier != 0, note_rand = 100 → modifier always applied.
+        let mut state = playing_state_with_step(60, 80);
+        state.note_modifier = 7;
+        state.note_rand = 100;
+        // Run 200 ticks (each cycle hits step 0 once per 16 advances, but with
+        // only 1 enabled step across 16 positions we drive just step 0 at playhead=15).
+        // Reset playhead each time to always land on step 0.
+        for _ in 0..50 {
+            state.playhead = 15;
+            let ev = state.tick().expect("step 0 must fire when step_rand=0");
+            if let MidiEvent::NoteOn { note, .. } = ev {
+                assert_eq!(note, 67, "note_rand=100 must always apply note_modifier");
+            } else {
+                panic!("expected NoteOn");
+            }
+        }
+    }
+
+    #[test]
+    fn test_note_modifier_with_note_rand_0_never_applied() {
+        // note_modifier != 0, note_rand = 0 → modifier never applied (stored note emitted).
+        let mut state = playing_state_with_step(60, 80);
+        state.note_modifier = 7;
+        state.note_rand = 0;
+        for _ in 0..50 {
+            state.playhead = 15;
+            let ev = state.tick().expect("step 0 must fire when step_rand=0");
+            if let MidiEvent::NoteOn { note, .. } = ev {
+                assert_eq!(note, 60, "note_rand=0 must never apply note_modifier");
+            } else {
+                panic!("expected NoteOn");
+            }
+        }
+    }
+
+    #[test]
+    fn test_scale_quant_false_no_snapping() {
+        // scale_quant = false → note emitted as stored (no snapping).
+        let mut state = playing_state_with_step(61, 80); // C#4, not in C major
+        state.scale_quant = false;
+        let ev = tick_until_some(&mut state, 32).expect("should fire");
+        if let MidiEvent::NoteOn { note, .. } = ev {
+            assert_eq!(note, 61, "scale_quant=false must not snap the note");
+        } else {
+            panic!("expected NoteOn");
+        }
+    }
+
+    #[test]
+    fn test_scale_quant_true_snaps_to_key() {
+        // scale_quant = true → emitted note passes snap_to_key identity check.
+        // State default: Key::C, Mode::Major.
+        let mut state = playing_state_with_step(61, 80); // C#4, not in C major
+        state.scale_quant = true;
+        let ev = tick_until_some(&mut state, 32).expect("should fire");
+        if let MidiEvent::NoteOn { note, .. } = ev {
+            let expected = crate::music_theory::snap_to_key(61, crate::music_theory::Key::C, crate::music_theory::Mode::Major);
+            assert_eq!(note, expected, "scale_quant=true must snap note to key");
+            // Confirm the snap changed the note (61 is not in C major).
+            assert_ne!(note, 61, "snapped note must differ from out-of-key input");
+        } else {
+            panic!("expected NoteOn");
+        }
+    }
+
+    #[test]
+    fn test_scale_quant_applied_after_note_modifier() {
+        // scale_quant applied AFTER note_modifier: modifier may push note out of key,
+        // then quantization corrects it.
+        // Step note: C4 (60) — in C major.
+        // note_modifier = 1 → D♭4 (61) — NOT in C major.
+        // scale_quant snaps 61 to nearest C-major note.
+        let mut state = playing_state_with_step(60, 80);
+        state.note_modifier = 1;
+        state.note_rand = 100; // always apply modifier
+        state.scale_quant = true;
+        let ev = tick_until_some(&mut state, 32).expect("should fire");
+        if let MidiEvent::NoteOn { note, .. } = ev {
+            let expected = crate::music_theory::snap_to_key(61, crate::music_theory::Key::C, crate::music_theory::Mode::Major);
+            assert_eq!(note, expected, "scale_quant must be applied after note_modifier");
+        } else {
+            panic!("expected NoteOn");
+        }
+    }
+
+    #[test]
+    fn test_velocity_modifier_zero_unchanged() {
+        // velocity_modifier = 0 → velocity unchanged.
+        let mut state = playing_state_with_step(60, 80);
+        state.velocity_modifier = 0;
+        let ev = tick_until_some(&mut state, 32).expect("should fire");
+        if let MidiEvent::NoteOn { velocity, .. } = ev {
+            assert_eq!(velocity, 80, "velocity_modifier=0 must not change velocity");
+        } else {
+            panic!("expected NoteOn");
+        }
+    }
+
+    #[test]
+    fn test_velocity_modifier_positive_adds() {
+        // velocity_modifier = 20 → velocity += 20, clamped to 127.
+        let mut state = playing_state_with_step(60, 80);
+        state.velocity_modifier = 20;
+        let ev = tick_until_some(&mut state, 32).expect("should fire");
+        if let MidiEvent::NoteOn { velocity, .. } = ev {
+            assert_eq!(velocity, 100, "velocity_modifier=20 must add 20 to velocity");
+        } else {
+            panic!("expected NoteOn");
+        }
+    }
+
+    #[test]
+    fn test_velocity_modifier_positive_clamped_to_127() {
+        // velocity + 20 > 127 → clamped to 127.
+        let mut state = playing_state_with_step(60, 120);
+        state.velocity_modifier = 20;
+        let ev = tick_until_some(&mut state, 32).expect("should fire");
+        if let MidiEvent::NoteOn { velocity, .. } = ev {
+            assert_eq!(velocity, 127, "velocity clamped to 127 when modifier pushes it above max");
+        } else {
+            panic!("expected NoteOn");
+        }
+    }
+
+    #[test]
+    fn test_velocity_modifier_negative_subtracts() {
+        // velocity_modifier = -20 → velocity -= 20, clamped to 0.
+        let mut state = playing_state_with_step(60, 80);
+        state.velocity_modifier = -20;
+        let ev = tick_until_some(&mut state, 32).expect("should fire");
+        if let MidiEvent::NoteOn { velocity, .. } = ev {
+            assert_eq!(velocity, 60, "velocity_modifier=-20 must subtract 20 from velocity");
+        } else {
+            panic!("expected NoteOn");
+        }
+    }
+
+    #[test]
+    fn test_velocity_modifier_negative_clamped_to_zero() {
+        // velocity - 20 < 0 → clamped to 0.
+        let mut state = playing_state_with_step(60, 10);
+        state.velocity_modifier = -20;
+        let ev = tick_until_some(&mut state, 32).expect("should fire");
+        if let MidiEvent::NoteOn { velocity, .. } = ev {
+            assert_eq!(velocity, 0, "velocity clamped to 0 when modifier pushes it below 0");
+        } else {
+            panic!("expected NoteOn");
+        }
     }
 
     // ── TempoRollPoint enum ──────────────────────────────────────────────────
