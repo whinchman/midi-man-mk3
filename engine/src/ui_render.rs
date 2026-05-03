@@ -264,7 +264,10 @@ fn render_overlay(
                 let value_str = param_value_string(state, idx);
                 let display = if let Some((pi, pv)) = pending_param_value {
                     if pi == idx {
-                        format!(" {}[{}→{}] ", name, value_str, pv)
+                        // BUG-011 fix: format pending value with the same human-readable
+                        // formatter used for the committed value, not as a raw number.
+                        let pending_str = pending_param_value_string(idx, pv);
+                        format!(" {}[{}→{}] ", name, value_str, pending_str)
                     } else {
                         format!(" {}:{} ", name, value_str)
                     }
@@ -309,6 +312,24 @@ fn param_value_string(state: &SequencerState, index: u8) -> String {
         7 => {
             if state.playing { "playing" } else { "stopped" }.to_string()
         }
+        _ => "?".to_string(),
+    }
+}
+
+/// Return a human-readable string for a pending parameter value `v` at `index`.
+///
+/// `v` is the fully-resolved value stored in `PendingEdit::Param`, in the same
+/// unit space as the committed field.  Enum params are converted back to their
+/// named variant; numeric params are formatted as numbers.
+fn pending_param_value_string(index: u8, v: i64) -> String {
+    match index {
+        0 => key_name(Key::from_index(v as usize)).to_string(),
+        1 => mode_name(Mode::from_index(v as usize)).to_string(),
+        2 => format!("{:+}", v as i8),
+        3 => step_size_label(StepSize::from_index(v as usize)).to_string(),
+        4 => format!("{}", v),
+        5 => if v != 0 { "on".to_string() } else { "off".to_string() },
+        6 => if v != 0 { "playing".to_string() } else { "stopped".to_string() },
         _ => "?".to_string(),
     }
 }

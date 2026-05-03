@@ -778,3 +778,129 @@ fn apply_command_open_close_overlay() {
     s.apply_command(InputCommand::CloseOverlay);
     assert!(s.active_overlay.is_none());
 }
+
+// ── BUG-010: NoteDelta accumulates across repeated presses ────────────────────
+
+#[test]
+fn note_delta_up_five_times_advances_five_scale_degrees() {
+    // BUG-010: Each NoteDelta(1) should use the pending note as the base so
+    // pressing Up five times advances five scale degrees, not one.
+    let mut s = SequencerState::default();
+    s.selected_step = 0;
+    // default: C4=60, C Major. After 5 ups should be A4=69 (C→D→E→F→G→A).
+    for _ in 0..5 {
+        s.apply_command(InputCommand::NoteDelta(1));
+    }
+    match s.pending_edit {
+        PendingEdit::Note { step: 0, midi_note } => {
+            assert_eq!(midi_note, 69, "5× NoteDelta(1) from C4 in C Major should reach A4=69");
+        }
+        other => panic!("expected PendingEdit::Note at step 0, got {:?}", other),
+    }
+}
+
+#[test]
+fn note_delta_accumulates_then_confirm_commits_final_value() {
+    // BUG-010: Confirm after accumulated presses should commit the final note.
+    let mut s = SequencerState::default();
+    s.selected_step = 0;
+    // C4=60. 7 ups in C Major wraps to C5=72.
+    for _ in 0..7 {
+        s.apply_command(InputCommand::NoteDelta(1));
+    }
+    s.apply_command(InputCommand::Confirm);
+    assert_eq!(s.steps[0].midi_note, 72, "Confirm after 7 NoteDelta(1) from C4 should write C5=72");
+    assert!(matches!(s.pending_edit, PendingEdit::None));
+}
+
+// ── BUG-011: ParamValueDelta seeds from committed state value ─────────────────
+
+#[test]
+fn param_value_delta_key_seeds_from_committed_key_index() {
+    // BUG-011: When state.key=D (index 2) and we press Up, pending value should
+    // be 3 (D#), not 1 (would be 0+1 if seeded from 0).
+    let mut s = SequencerState::default();
+    s.key = Key::D; // index 2
+    s.active_overlay = Some(OverlayMode::Regular);
+    s.selected_param = 0; // Key param
+    s.apply_command(InputCommand::ParamValueDelta(1));
+    match s.pending_edit {
+        PendingEdit::Param { index: 0, value, .. } => {
+            assert_eq!(value, 3, "D(2)+1 should give index 3 (D#), not 1");
+        }
+        other => panic!("expected PendingEdit::Param index 0, got {:?}", other),
+    }
+}
+
+#[test]
+fn param_value_delta_swing_seeds_from_committed_swing_value() {
+    // BUG-011: When state.swing=20 and delta=-5, pending should be 15, not -5.
+    let mut s = SequencerState::default();
+    s.swing = 20;
+    s.active_overlay = Some(OverlayMode::Regular);
+    s.selected_param = 2; // Swing param
+    s.apply_command(InputCommand::ParamValueDelta(-5));
+    match s.pending_edit {
+        PendingEdit::Param { index: 2, value, .. } => {
+            assert_eq!(value, 15, "swing(20)+(-5) should give 15, not -5");
+        }
+        other => panic!("expected PendingEdit::Param index 2, got {:?}", other),
+    }
+}
+
+// ── BUG-012: Confirm applies pending param change to state field ───────────────
+
+#[test]
+fn confirm_param_key_applies_to_state_key() {
+    // BUG-012: Confirming a key param edit must update state.key.
+    let mut s = SequencerState::default();
+    assert!(matches!(s.key, Key::C));
+    s.active_overlay = Some(OverlayMode::Regular);
+    s.selected_param = 0;
+    // Press Up 3 times from C(0): C→C#→D→D# (index 3).
+    for _ in 0..3 {
+        s.apply_command(InputCommand::ParamValueDelta(1));
+    }
+    s.apply_command(InputCommand::Confirm);
+    assert!(matches!(s.key, Key::Ds), "key should be D# after confirming +3 from C");
+    assert!(matches!(s.pending_edit, PendingEdit::None));
+}
+
+#[test]
+fn confirm_param_swing_applies_to_state_swing() {
+    // BUG-012: Confirming a swing param edit must update state.swing.
+    let mut s = SequencerState::default();
+    assert_eq!(s.swing, 0);
+    s.active_overlay = Some(OverlayMode::Regular);
+    s.selected_param = 2;
+    s.apply_command(InputCommand::ParamValueDelta(15));
+    s.apply_command(InputCommand::Confirm);
+    assert_eq!(s.swing, 15, "swing should be 15 after confirming +15 from 0");
+    assert!(matches!(s.pending_edit, PendingEdit::None));
+}
+
+#[test]
+fn confirm_param_mode_applies_to_state_mode() {
+    // BUG-012: Confirming a mode param edit must update state.mode.
+    let mut s = SequencerState::default();
+    assert!(matches!(s.mode, Mode::Major)); // index 0
+    s.active_overlay = Some(OverlayMode::Regular);
+    s.selected_param = 1;
+    s.apply_command(InputCommand::ParamValueDelta(2)); // Major(0) + 2 = Dorian(2)
+    s.apply_command(InputCommand::Confirm);
+    assert!(matches!(s.mode, Mode::Dorian), "mode should be Dorian after confirming +2 from Major");
+    assert!(matches!(s.pending_edit, PendingEdit::None));
+}
+
+#[test]
+fn confirm_param_step_size_applies_to_state() {
+    // BUG-012: Confirming a step_size param edit must update state.step_size.
+    let mut s = SequencerState::default();
+    assert!(matches!(s.step_size, StepSize::Sixteenth)); // index 4
+    s.active_overlay = Some(OverlayMode::Regular);
+    s.selected_param = 3;
+    s.apply_command(InputCommand::ParamValueDelta(1)); // Sixteenth(4) + 1 = ThirtySecond(5)
+    s.apply_command(InputCommand::Confirm);
+    assert!(matches!(s.step_size, StepSize::ThirtySecond), "step_size should be ThirtySecond after +1");
+    assert!(matches!(s.pending_edit, PendingEdit::None));
+}
