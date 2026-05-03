@@ -2,11 +2,14 @@
 /// values in `.cargo/config.toml`, and `.gitignore` must contain the entry for
 /// the gitignored local-override file.
 ///
+/// BUG-013 acceptance tests: .cargo/config.toml comment must reference the
+/// correct `--config` invocation, not the non-existent CARGO_CONFIG_TOML env var.
+///
 /// `CARGO_MANIFEST_DIR` is set by Cargo to the engine crate root at test time.
 /// The workspace root (where `.cargo/config.toml` and `.gitignore` live) is one
 /// directory above.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Return the workspace root directory (one level above the engine crate root).
 fn workspace_root() -> PathBuf {
@@ -36,6 +39,13 @@ fn full_cargo_config() -> String {
     let path = workspace_root().join(".cargo/config.toml");
     std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("failed to read {}: {}", path.display(), e))
+}
+
+fn read_cargo_config() -> String {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let config_path = Path::new(manifest_dir).join("..").join(".cargo").join("config.toml");
+    std::fs::read_to_string(&config_path)
+        .unwrap_or_else(|e| panic!("cannot read .cargo/config.toml at {}: {e}", config_path.display()))
 }
 
 /// Read the full text of `.gitignore`.
@@ -101,5 +111,32 @@ fn cargo_config_documents_local_override_pattern() {
     assert!(
         contents.contains(".cargo/config.local.toml"),
         ".cargo/config.toml must mention '.cargo/config.local.toml' in a comment to document the local-override pattern for developers"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// BUG-013 – .cargo/config.toml must not reference CARGO_CONFIG_TOML env var
+// ---------------------------------------------------------------------------
+
+/// The non-existent `CARGO_CONFIG_TOML` environment variable must not appear
+/// in .cargo/config.toml. Before BUG-013 was fixed the developer comment
+/// incorrectly told users to set this env var.
+#[test]
+fn cargo_config_toml_does_not_reference_cargo_config_toml_env_var() {
+    let content = read_cargo_config();
+    assert!(
+        !content.contains("CARGO_CONFIG_TOML"),
+        ".cargo/config.toml must not reference the non-existent CARGO_CONFIG_TOML env var (BUG-013)"
+    );
+}
+
+/// After BUG-013 was fixed, the comment must document the correct invocation:
+/// `--config .cargo/config.local.toml`.
+#[test]
+fn cargo_config_toml_references_config_local_toml_flag() {
+    let content = read_cargo_config();
+    assert!(
+        content.contains("--config .cargo/config.local.toml"),
+        ".cargo/config.toml must contain '--config .cargo/config.local.toml' (BUG-013)"
     );
 }

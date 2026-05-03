@@ -637,3 +637,21 @@ fn translate_encoder_delta_with_active_overlay_emits_note_delta_not_param_value_
     assert!(matches!(cmds[1], InputCommand::NoteDelta(2)),
         "cmds[1] should be NoteDelta(2) — overlay-aware routing is deferred; got {:?}", cmds[1]);
 }
+
+// -----------------------------------------------------------------------
+// BUG-015: open_device() is gone — only constants remain.
+// -----------------------------------------------------------------------
+
+/// `HID_VID` and `HID_PID` constants are still exported after `open_device()` was
+/// removed (BUG-015). Callers use these constants as default arguments to `run_hid`.
+///
+/// Note: attempting to import `engine::hid::open_device` on this branch would
+/// produce a compile error (`use of undeclared crate or module item`), which is the
+/// intended proof that dead code was removed.  A `compile_fail` doc-test would be
+/// the canonical form; we document the intent here instead.
+#[test]
+fn hid_vid_pid_constants_still_exported_after_open_device_removal() {
+    // HID_VID and HID_PID must remain accessible — they are used by run_hid callers.
+    assert_eq!(HID_VID, 0x2E8A, "HID_VID must still be 0x2E8A after open_device removal");
+    assert_eq!(HID_PID, 0x000A, "HID_PID must still be 0x000A after open_device removal");
+}

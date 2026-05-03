@@ -319,3 +319,54 @@ fn select_port_idx_matches_last_port() {
     let ports = ["Alpha", "Beta", "Gamma", "Delta"];
     assert_eq!(select_port_idx(&ports, Some("delta")), Some(3));
 }
+
+// -----------------------------------------------------------------------
+// BUG-016 acceptance: select_port_idx fallback edge cases.
+//
+// choose_midi_port (hw-io path) mirrors select_port_idx logic: when a
+// non-None filter matches no port it falls back to index 0 and emits
+// an eprintln warning. The following tests lock down every edge case of
+// the fallback branch in select_port_idx, which is the pure testable proxy.
+// -----------------------------------------------------------------------
+
+/// Empty-string filter is a substring of every port name: always matches
+/// index 0 (the first port), not the fallback path.
+#[test]
+fn select_port_idx_empty_filter_matches_first_port() {
+    let ports = ["Alpha", "Beta", "Gamma"];
+    // "" is contained in every string, so port 0 matches directly.
+    assert_eq!(select_port_idx(&ports, Some("")), Some(0));
+}
+
+/// When the filter matches ports at indices 1 and 2, the *first* match
+/// (index 1) is returned — not index 0 or 2.
+#[test]
+fn select_port_idx_filter_matches_multiple_returns_first_match() {
+    let ports = ["Alpha", "BetaMIDI", "GammaMIDI"];
+    // Both ports 1 and 2 contain "midi" — port 1 must win.
+    assert_eq!(select_port_idx(&ports, Some("midi")), Some(1));
+}
+
+/// Filter is all uppercase; port names are all lowercase. Case-insensitive
+/// match must still succeed.
+#[test]
+fn select_port_idx_uppercase_filter_matches_lowercase_port() {
+    let ports = ["fluidsynth", "timidity", "usb"];
+    assert_eq!(select_port_idx(&ports, Some("FLUID")), Some(0));
+    assert_eq!(select_port_idx(&ports, Some("TIMIDITY")), Some(1));
+}
+
+/// With five ports and a non-matching filter, fallback is still index 0
+/// regardless of list length.
+#[test]
+fn select_port_idx_fallback_with_many_ports_returns_zero() {
+    let ports = ["PortA", "PortB", "PortC", "PortD", "PortE"];
+    assert_eq!(select_port_idx(&ports, Some("ZZZ_nonexistent")), Some(0));
+}
+
+/// Filter matches exactly one port that is not index 0 in a longer list.
+#[test]
+fn select_port_idx_unique_match_not_at_zero() {
+    let ports = ["Alpha", "Beta", "SpecialSynth", "Delta", "Epsilon"];
+    assert_eq!(select_port_idx(&ports, Some("special")), Some(2));
+}
