@@ -30,7 +30,7 @@ New functionality that does not currently exist.
 ## Changes
 
 Updates or improvements to existing functionality.
-- [ ] When Key or Mode changes, we should shift the current notes to the nearest note within the new key/mode. Note for selecting a note we should go always "round" to the lower note.
+- [x] When Key or Mode changes, we should shift the current notes to the nearest note within the new key/mode. Note for selecting a note we should go always "round" to the lower note. → refined, see .workflow/plans/key-mode-note-shifting.md
 
 ## Issues
 
