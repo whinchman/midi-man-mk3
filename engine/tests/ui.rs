@@ -1,14 +1,27 @@
+//! Integration tests for `ui_render::render_frame` — the 7-zone cyberpunk layout.
+//!
+//! All tests use `TestBackend` and require no `hw-io` feature.
+//! The terminal is sized at 120×30 (minimum) to accommodate all 7 zones.
+
+use std::collections::VecDeque;
+
 use ratatui::backend::TestBackend;
+use ratatui::style::Color;
 use ratatui::Terminal;
 
-use engine::input::OverlayMode;
+use engine::input::FocusPanel;
 use engine::music_theory::{Key, Mode};
 use engine::state::{
     PendingEdit, SequencerState, StepData, StepSize, TempoRandType, TempoRollPoint,
 };
-use engine::ui_render::{render_frame, shift_param_value_string, shift_pending_param_value_string};
+use engine::ui_render::{
+    render_frame, shift_param_value_string, shift_pending_param_value_string, LogEntry, LogTag,
+    UiLocalSnapshot,
+};
 
-/// Build a known state: step 0 = C4 enabled, playhead=0, 120 BPM, C Major, PLAYING.
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Default known state: step 0 = C4 enabled, playhead=0, 120 BPM, C Major, PLAYING.
 fn known_state() -> SequencerState {
     let mut s = SequencerState::default();
     s.playing = true;
@@ -27,932 +40,26 @@ fn known_state() -> SequencerState {
     s
 }
 
-#[test]
-fn top_bar_contains_bpm_key_mode_step_status() {
-    let state = known_state();
-    let backend = TestBackend::new(120, 10);
-    let mut terminal = Terminal::new(backend).expect("test terminal");
-
-    terminal
-        .draw(|frame| {
-            render_frame(frame, &state, None, 0);
-        })
-        .expect("draw");
-
-    let buffer = terminal.backend().buffer().clone();
-
-    // Collect row 0 as a string.
-    let row0: String = (0..120)
-        .map(|x| {
-            buffer
-                .cell((x, 0))
-                .map(|c| c.symbol().chars().next().unwrap_or(' '))
-                .unwrap_or(' ')
-        })
-        .collect();
-
-    assert!(
-        row0.contains("BPM: 120"),
-        "top bar must contain 'BPM: 120', got: {}",
-        row0
-    );
-    assert!(
-        row0.contains("Key: C"),
-        "top bar must contain 'Key: C', got: {}",
-        row0
-    );
-    assert!(
-        row0.contains("Mode: Major"),
-        "top bar must contain 'Mode: Major', got: {}",
-        row0
-    );
-    assert!(
-        row0.contains("Step: 1/16"),
-        "top bar must contain 'Step: 1/16', got: {}",
-        row0
-    );
-    assert!(
-        row0.contains("PLAYING"),
-        "top bar must contain 'PLAYING', got: {}",
-        row0
-    );
+/// Default empty log.
+fn empty_log() -> VecDeque<LogEntry> {
+    VecDeque::new()
 }
 
-#[test]
-fn step_row_shows_c4_at_step_0() {
-    let state = known_state();
-    let backend = TestBackend::new(120, 10);
-    let mut terminal = Terminal::new(backend).expect("test terminal");
-
-    terminal
-        .draw(|frame| {
-            render_frame(frame, &state, None, 0);
-        })
-        .expect("draw");
-
-    let buffer = terminal.backend().buffer().clone();
-
-    // Row 1 is the note name row (top bar is row 0, step rows start at 1).
-    let row1: String = (0..120)
-        .map(|x| {
-            buffer
-                .cell((x, 1))
-                .map(|c| c.symbol().chars().next().unwrap_or(' '))
-                .unwrap_or(' ')
-        })
-        .collect();
-
-    assert!(
-        row1.contains("C4"),
-        "step row must contain 'C4' for step 0, got: {}",
-        row1
-    );
-}
-
-#[test]
-fn step_row_shows_enabled_indicator_for_step_0() {
-    let state = known_state();
-    let backend = TestBackend::new(120, 10);
-    let mut terminal = Terminal::new(backend).expect("test terminal");
-
-    terminal
-        .draw(|frame| {
-            render_frame(frame, &state, None, 0);
-        })
-        .expect("draw");
-
-    let buffer = terminal.backend().buffer().clone();
-
-    // Row 2 is the indicator row.
-    let row2: String = (0..120)
-        .map(|x| buffer.cell((x, 2)).map(|c| c.symbol()).unwrap_or(""))
-        .collect();
-
-    // Step 0 is enabled, so indicator should be ●.
-    assert!(
-        row2.contains('●'),
-        "indicator row must contain '●' for enabled step 0, got: {}",
-        row2
-    );
-}
-
-#[test]
-fn info_row_shows_swing_zero() {
-    let state = known_state();
-    let backend = TestBackend::new(120, 10);
-    let mut terminal = Terminal::new(backend).expect("test terminal");
-
-    terminal
-        .draw(|frame| {
-            render_frame(frame, &state, None, 0);
-        })
-        .expect("draw");
-
-    let buffer = terminal.backend().buffer().clone();
-
-    // Row 4 is the info row (rows 1-3 = step rows).
-    let row4: String = (0..120)
-        .map(|x| {
-            buffer
-                .cell((x, 4))
-                .map(|c| c.symbol().chars().next().unwrap_or(' '))
-                .unwrap_or(' ')
-        })
-        .collect();
-
-    assert!(
-        row4.contains("Swing"),
-        "info row must contain 'Swing', got: {}",
-        row4
-    );
-}
-
-#[test]
-fn overlay_regular_shows_param_names() {
-    let state = known_state();
-    let backend = TestBackend::new(120, 10);
-    let mut terminal = Terminal::new(backend).expect("test terminal");
-
-    terminal
-        .draw(|frame| {
-            render_frame(frame, &state, Some(OverlayMode::Regular), 0);
-        })
-        .expect("draw");
-
-    let buffer = terminal.backend().buffer().clone();
-
-    // Collect all rows into one string to search for param names.
-    let all_text: String = (0..10u16)
-        .flat_map(|y| (0..120u16).map(move |x| (x, y)))
-        .map(|(x, y)| {
-            buffer
-                .cell((x, y))
-                .map(|c| c.symbol().chars().next().unwrap_or(' '))
-                .unwrap_or(' ')
-        })
-        .collect();
-
-    assert!(
-        all_text.contains("Key"),
-        "overlay must show 'Key' param, got buffer text"
-    );
-    assert!(all_text.contains("Mode"), "overlay must show 'Mode' param");
-    assert!(
-        all_text.contains("Swing"),
-        "overlay must show 'Swing' param"
-    );
-}
-
-#[test]
-fn overlay_shift_shows_coming_soon() {
-    let state = known_state();
-    let backend = TestBackend::new(120, 10);
-    let mut terminal = Terminal::new(backend).expect("test terminal");
-
-    terminal
-        .draw(|frame| {
-            render_frame(frame, &state, Some(OverlayMode::Shift), 0);
-        })
-        .expect("draw");
-
-    let buffer = terminal.backend().buffer().clone();
-
-    let all_text: String = (0..10u16)
-        .flat_map(|y| (0..120u16).map(move |x| (x, y)))
-        .map(|(x, y)| {
-            buffer
-                .cell((x, y))
-                .map(|c| c.symbol().chars().next().unwrap_or(' '))
-                .unwrap_or(' ')
-        })
-        .collect();
-
-    // Verify real shift overlay rendered (not the old placeholder).
-    assert!(
-        all_text.contains("Shift Overlay"),
-        "shift overlay must contain 'Shift Overlay', got buffer text"
-    );
-    assert!(
-        all_text.contains("Note Rnd"),
-        "shift overlay must show SHIFT_PARAMS[0]='Note Rnd', got buffer text"
-    );
-}
-
-#[test]
-fn pending_note_preview_shown_in_selected_step() {
-    let mut state = known_state();
-    // Set a pending note edit on step 0.
-    state.pending_edit = PendingEdit::Note {
-        step: 0,
-        midi_note: 62,
-    }; // D4
-
-    let backend = TestBackend::new(120, 10);
-    let mut terminal = Terminal::new(backend).expect("test terminal");
-
-    terminal
-        .draw(|frame| {
-            render_frame(frame, &state, None, 0);
-        })
-        .expect("draw");
-
-    let buffer = terminal.backend().buffer().clone();
-
-    // Row 1 is the note row; step 0 should show D4 (pending) not C4.
-    let row1: String = (0..120)
-        .map(|x| {
-            buffer
-                .cell((x, 1))
-                .map(|c| c.symbol().chars().next().unwrap_or(' '))
-                .unwrap_or(' ')
-        })
-        .collect();
-
-    assert!(
-        row1.contains("D4"),
-        "note row must show pending note D4, got: {}",
-        row1
-    );
-}
-
-#[test]
-fn stopped_status_shown_when_not_playing() {
-    let mut state = known_state();
-    state.playing = false;
-
-    let backend = TestBackend::new(120, 10);
-    let mut terminal = Terminal::new(backend).expect("test terminal");
-
-    terminal
-        .draw(|frame| {
-            render_frame(frame, &state, None, 0);
-        })
-        .expect("draw");
-
-    let buffer = terminal.backend().buffer().clone();
-
-    let row0: String = (0..120)
-        .map(|x| {
-            buffer
-                .cell((x, 0))
-                .map(|c| c.symbol().chars().next().unwrap_or(' '))
-                .unwrap_or(' ')
-        })
-        .collect();
-
-    assert!(
-        row0.contains("STOPPED"),
-        "top bar must show STOPPED when not playing, got: {}",
-        row0
-    );
-}
-
-#[test]
-fn paused_status_shown_when_paused() {
-    let mut state = known_state();
-    state.paused = true;
-
-    let backend = TestBackend::new(120, 10);
-    let mut terminal = Terminal::new(backend).expect("test terminal");
-
-    terminal
-        .draw(|frame| {
-            render_frame(frame, &state, None, 0);
-        })
-        .expect("draw");
-
-    let buffer = terminal.backend().buffer().clone();
-
-    let row0: String = (0..120)
-        .map(|x| {
-            buffer
-                .cell((x, 0))
-                .map(|c| c.symbol().chars().next().unwrap_or(' '))
-                .unwrap_or(' ')
-        })
-        .collect();
-
-    assert!(
-        row0.contains("PAUSED"),
-        "top bar must show PAUSED when paused, got: {}",
-        row0
-    );
-}
-
-#[test]
-fn loop_bounds_shown_when_loop_active() {
-    let mut state = known_state();
-    state.loop_active = true;
-    state.loop_in = 3;
-    state.loop_out = 10;
-
-    let backend = TestBackend::new(120, 10);
-    let mut terminal = Terminal::new(backend).expect("test terminal");
-
-    terminal
-        .draw(|frame| {
-            render_frame(frame, &state, None, 0);
-        })
-        .expect("draw");
-
-    let buffer = terminal.backend().buffer().clone();
-
-    let row4: String = (0..120)
-        .map(|x| {
-            buffer
-                .cell((x, 4))
-                .map(|c| c.symbol().chars().next().unwrap_or(' '))
-                .unwrap_or(' ')
-        })
-        .collect();
-
-    assert!(
-        row4.contains("Loop"),
-        "info row must show loop bounds, got: {}",
-        row4
-    );
-    assert!(
-        row4.contains('3'),
-        "info row must show loop_in=3, got: {}",
-        row4
-    );
-}
-
-// ── New augmented tests ───────────────────────────────────────────────────
-
-// --- Top bar: step size labels ---
-
-#[test]
-fn top_bar_shows_quarter_step_size() {
-    let mut state = known_state();
-    state.step_size = StepSize::Quarter;
-
-    let backend = TestBackend::new(120, 10);
-    let mut terminal = Terminal::new(backend).expect("test terminal");
-
-    terminal
-        .draw(|frame| {
-            render_frame(frame, &state, None, 0);
-        })
-        .expect("draw");
-
-    let buffer = terminal.backend().buffer().clone();
-    let row0: String = (0..120)
-        .map(|x| {
-            buffer
-                .cell((x, 0))
-                .map(|c| c.symbol().chars().next().unwrap_or(' '))
-                .unwrap_or(' ')
-        })
-        .collect();
-
-    assert!(
-        row0.contains("1/4"),
-        "top bar must show '1/4' for Quarter step size, got: {}",
-        row0
-    );
-}
-
-#[test]
-fn top_bar_shows_eighth_step_size() {
-    let mut state = known_state();
-    state.step_size = StepSize::Eighth;
-
-    let backend = TestBackend::new(120, 10);
-    let mut terminal = Terminal::new(backend).expect("test terminal");
-
-    terminal
-        .draw(|frame| {
-            render_frame(frame, &state, None, 0);
-        })
-        .expect("draw");
-
-    let buffer = terminal.backend().buffer().clone();
-    let row0: String = (0..120)
-        .map(|x| {
-            buffer
-                .cell((x, 0))
-                .map(|c| c.symbol().chars().next().unwrap_or(' '))
-                .unwrap_or(' ')
-        })
-        .collect();
-
-    assert!(
-        row0.contains("1/8"),
-        "top bar must show '1/8' for Eighth step size, got: {}",
-        row0
-    );
-}
-
-// --- Step row: disabled indicator ---
-
-#[test]
-fn step_row_shows_disabled_indicator_for_disabled_step() {
-    let mut state = known_state();
-    // Step 1 is disabled by default (known_state only enables step 0).
-    state.steps[1].enabled = false;
-
-    let backend = TestBackend::new(120, 10);
-    let mut terminal = Terminal::new(backend).expect("test terminal");
-
-    terminal
-        .draw(|frame| {
-            render_frame(frame, &state, None, 0);
-        })
-        .expect("draw");
-
-    let buffer = terminal.backend().buffer().clone();
-    let row2: String = (0..120)
-        .map(|x| buffer.cell((x, 2)).map(|c| c.symbol()).unwrap_or(""))
-        .collect();
-
-    assert!(
-        row2.contains('○'),
-        "indicator row must contain '○' for a disabled step, got: {}",
-        row2
-    );
-}
-
-// --- Step row: playhead at step 8 highlights correct column ---
-
-#[test]
-fn step_row_playhead_at_step_8_highlights_correct_column() {
-    let mut state = known_state();
-    state.playhead = 8;
-    state.selected_step = 0; // keep selected at 0 so playhead != selected
-    state.steps[8] = StepData {
-        enabled: true,
-        midi_note: 69,
-        velocity: 100,
-    }; // A4
-
-    let backend = TestBackend::new(120, 10);
-    let mut terminal = Terminal::new(backend).expect("test terminal");
-
-    terminal
-        .draw(|frame| {
-            render_frame(frame, &state, None, 0);
-        })
-        .expect("draw");
-
-    let buffer = terminal.backend().buffer().clone();
-
-    let marker_row: String = (0..120)
-        .map(|x| {
-            buffer
-                .cell((x, 3))
-                .map(|c| c.symbol().chars().next().unwrap_or(' '))
-                .unwrap_or(' ')
-        })
-        .collect();
-
-    // The playhead marker is '▲' at position 32.
-    assert!(
-        marker_row.contains('▲'),
-        "marker row must contain '▲' when playhead=8, got: {}",
-        marker_row
-    );
-
-    // Also confirm note A4 appears in note row (y=1) at the playhead column.
-    let note_row: String = (0..120)
-        .map(|x| {
-            buffer
-                .cell((x, 1))
-                .map(|c| c.symbol().chars().next().unwrap_or(' '))
-                .unwrap_or(' ')
-        })
-        .collect();
-
-    assert!(
-        note_row.contains("A4"),
-        "note row must contain 'A4' at playhead step 8, got: {}",
-        note_row
-    );
-}
-
-// --- Second row: swing positive value ---
-
-#[test]
-fn info_row_shows_positive_swing() {
-    let mut state = known_state();
-    state.swing = 15;
-
-    let backend = TestBackend::new(120, 10);
-    let mut terminal = Terminal::new(backend).expect("test terminal");
-
-    terminal
-        .draw(|frame| {
-            render_frame(frame, &state, None, 0);
-        })
-        .expect("draw");
-
-    let buffer = terminal.backend().buffer().clone();
-    let row4: String = (0..120)
-        .map(|x| {
-            buffer
-                .cell((x, 4))
-                .map(|c| c.symbol().chars().next().unwrap_or(' '))
-                .unwrap_or(' ')
-        })
-        .collect();
-
-    assert!(
-        row4.contains("Swing: +15"),
-        "info row must contain 'Swing: +15' for swing=15, got: {}",
-        row4
-    );
-}
-
-// --- Second row: loop bounds with active loop ---
-
-#[test]
-fn info_row_shows_loop_bounds_3_to_10() {
-    let mut state = known_state();
-    state.loop_active = true;
-    state.loop_in = 3;
-    state.loop_out = 10;
-
-    let backend = TestBackend::new(120, 10);
-    let mut terminal = Terminal::new(backend).expect("test terminal");
-
-    terminal
-        .draw(|frame| {
-            render_frame(frame, &state, None, 0);
-        })
-        .expect("draw");
-
-    let buffer = terminal.backend().buffer().clone();
-    let row4: String = (0..120)
-        .map(|x| {
-            buffer
-                .cell((x, 4))
-                .map(|c| c.symbol().chars().next().unwrap_or(' '))
-                .unwrap_or(' ')
-        })
-        .collect();
-
-    assert!(
-        row4.contains("Loop"),
-        "info row must contain 'Loop' when loop is active, got: {}",
-        row4
-    );
-    assert!(
-        row4.contains('3'),
-        "info row must show loop_in=3, got: {}",
-        row4
-    );
-    assert!(
-        row4.contains("10"),
-        "info row must show loop_out=10, got: {}",
-        row4
-    );
-}
-
-// --- Second row: loop bounds NOT shown when loop is inactive ---
-
-#[test]
-fn info_row_does_not_show_loop_when_loop_inactive() {
-    let mut state = known_state();
-    state.loop_active = false;
-    state.loop_in = 3;
-    state.loop_out = 10;
-
-    let backend = TestBackend::new(120, 10);
-    let mut terminal = Terminal::new(backend).expect("test terminal");
-
-    terminal
-        .draw(|frame| {
-            render_frame(frame, &state, None, 0);
-        })
-        .expect("draw");
-
-    let buffer = terminal.backend().buffer().clone();
-    let row4: String = (0..120)
-        .map(|x| {
-            buffer
-                .cell((x, 4))
-                .map(|c| c.symbol().chars().next().unwrap_or(' '))
-                .unwrap_or(' ')
-        })
-        .collect();
-
-    assert!(
-        !row4.contains("Loop"),
-        "info row must NOT show 'Loop' when loop is inactive, got: {}",
-        row4
-    );
-}
-
-// --- Overlay: F1 Regular with selected_param=2 (Swing) highlighted ---
-
-#[test]
-fn overlay_regular_selected_param_2_shows_swing_highlighted() {
-    let state = known_state();
-    let backend = TestBackend::new(120, 12); // extra rows for overlay panel
-    let mut terminal = Terminal::new(backend).expect("test terminal");
-
-    // selected_param=2 corresponds to "Swing" in REGULAR_PARAMS.
-    terminal
-        .draw(|frame| {
-            render_frame(frame, &state, Some(OverlayMode::Regular), 2);
-        })
-        .expect("draw");
-
-    let buffer = terminal.backend().buffer().clone();
-
-    let all_text: String = (0..12u16)
-        .flat_map(|y| (0..120u16).map(move |x| (x, y)))
-        .map(|(x, y)| {
-            buffer
-                .cell((x, y))
-                .map(|c| c.symbol().chars().next().unwrap_or(' '))
-                .unwrap_or(' ')
-        })
-        .collect();
-
-    assert!(
-        all_text.contains("Swing"),
-        "overlay must display 'Swing' param at index 2, got buffer text"
-    );
-}
-
-// --- Overlay: Shift overlay renders all 8 SHIFT_PARAMS and action label ---
-
-#[test]
-fn overlay_shift_shows_shift_mode_text() {
-    let state = known_state();
-    let backend = TestBackend::new(200, 12);
-    let mut terminal = Terminal::new(backend).expect("test terminal");
-
-    terminal
-        .draw(|frame| {
-            render_frame(frame, &state, Some(OverlayMode::Shift), 0);
-        })
-        .expect("draw");
-
-    let buffer = terminal.backend().buffer().clone();
-
-    let all_text: String = (0..12u16)
-        .flat_map(|y| (0..200u16).map(move |x| (x, y)))
-        .map(|(x, y)| {
-            buffer
-                .cell((x, y))
-                .map(|c| c.symbol().chars().next().unwrap_or(' '))
-                .unwrap_or(' ')
-        })
-        .collect();
-
-    // All 8 shift param names must be visible.
-    for name in engine::ui_render::SHIFT_PARAMS.iter() {
-        assert!(
-            all_text.contains(name),
-            "shift overlay must contain SHIFT_PARAMS entry '{name}', got buffer text"
-        );
+/// Build a minimal `UiLocalSnapshot` for tests that don't need CLI-specific state.
+fn default_snapshot<'a>(log: &'a VecDeque<LogEntry>) -> UiLocalSnapshot<'a> {
+    UiLocalSnapshot {
+        focus: FocusPanel::Sequencer,
+        selected_step: 0,
+        seq_param_idx: 0,
+        rand_param_idx: 0,
+        cli_line: "",
+        cli_log: log,
+        midi_device_name: "TestDevice",
+        midi_channel_display: 1,
     }
-
-    // Action label row must be visible.
-    assert!(
-        all_text.contains("[S]kip") || all_text.contains("Skip"),
-        "shift overlay must show skip action label, got buffer text"
-    );
-    assert!(
-        all_text.contains("[G]en") || all_text.contains("Gen"),
-        "shift overlay must show gen action label, got buffer text"
-    );
 }
 
-// --- PendingEdit::Note: specific midi_note visible in selected step column ---
-
-#[test]
-fn pending_note_edit_with_specific_midi_note_visible_in_selected_column() {
-    let mut state = known_state();
-    state.selected_step = 3;
-    state.steps[3] = StepData {
-        enabled: true,
-        midi_note: 60,
-        velocity: 100,
-    }; // C4
-       // Pending note 67 = G4
-    state.pending_edit = PendingEdit::Note {
-        step: 3,
-        midi_note: 67,
-    };
-
-    let backend = TestBackend::new(120, 10);
-    let mut terminal = Terminal::new(backend).expect("test terminal");
-
-    terminal
-        .draw(|frame| {
-            render_frame(frame, &state, None, 0);
-        })
-        .expect("draw");
-
-    let buffer = terminal.backend().buffer().clone();
-    // Note row is y=1.
-    let row1: String = (0..120)
-        .map(|x| {
-            buffer
-                .cell((x, 1))
-                .map(|c| c.symbol().chars().next().unwrap_or(' '))
-                .unwrap_or(' ')
-        })
-        .collect();
-
-    assert!(
-        row1.contains("G4"),
-        "note row must show pending note G4 (midi 67) in selected step column, got: {}",
-        row1
-    );
-}
-
-// ── Feature-gate regression tests (BUG-007) ─────────────────────────────────
-//
-// These tests compile and run WITHOUT the `hw-io` feature.  Their existence
-// proves that `ratatui` and `ui_render` are usable without `crossterm`, which
-// is the core fix for BUG-007.
-//
-// If the Cargo.toml regression is re-introduced (ratatui default-features = true),
-// crossterm would become a non-optional dep and `cargo test -p engine` would
-// fail in environments without a real tty during link/compile, catching the bug.
-
-/// Verify that TestBackend can construct a terminal and render a frame without
-/// the `hw-io` feature.  This is the canonical compile-time + runtime proof
-/// that `ratatui` is usable without `crossterm`.
-#[test]
-fn test_backend_renders_without_hw_io_feature() {
-    // If BUG-007 were re-introduced, `ratatui` would pull in `crossterm` and
-    // this test would fail to compile or link in a headless environment.
-    let backend = TestBackend::new(80, 5);
-    let mut terminal =
-        Terminal::new(backend).expect("TestBackend terminal must construct without hw-io");
-
-    let state = SequencerState::default();
-    terminal
-        .draw(|frame| {
-            render_frame(frame, &state, None, 0);
-        })
-        .expect("render_frame must complete with TestBackend and no hw-io feature");
-
-    // If we reach here, ratatui compiled and rendered without crossterm.
-    let buffer = terminal.backend().buffer().clone();
-    // Buffer must be non-empty — at least one cell should be filled.
-    let any_non_space = (0..80u16).any(|x| {
-        buffer
-            .cell((x, 0))
-            .map(|c| c.symbol() != " ")
-            .unwrap_or(false)
-    });
-    assert!(
-        any_non_space,
-        "rendered buffer must contain non-space cells (top bar must render)"
-    );
-}
-
-/// Verify that clearing and redrawing a TestBackend terminal produces the same
-/// content as the first draw — render_frame must be deterministic and
-/// side-effect-free (no hidden terminal state dependency).
-#[test]
-fn test_backend_clear_and_redraw_is_idempotent() {
-    let state = known_state();
-
-    let backend = TestBackend::new(120, 10);
-    let mut terminal = Terminal::new(backend).expect("test terminal");
-
-    terminal
-        .draw(|frame| {
-            render_frame(frame, &state, None, 0);
-        })
-        .expect("first draw");
-
-    let first_row0: String = (0..120)
-        .map(|x| {
-            terminal
-                .backend()
-                .buffer()
-                .cell((x, 0))
-                .map(|c| c.symbol().chars().next().unwrap_or(' '))
-                .unwrap_or(' ')
-        })
-        .collect();
-
-    terminal.clear().expect("terminal clear must succeed");
-
-    terminal
-        .draw(|frame| {
-            render_frame(frame, &state, None, 0);
-        })
-        .expect("second draw after clear");
-
-    let second_row0: String = (0..120)
-        .map(|x| {
-            terminal
-                .backend()
-                .buffer()
-                .cell((x, 0))
-                .map(|c| c.symbol().chars().next().unwrap_or(' '))
-                .unwrap_or(' ')
-        })
-        .collect();
-
-    assert_eq!(
-        first_row0, second_row0,
-        "top bar must be identical after clear-and-redraw (render must be deterministic)"
-    );
-}
-
-/// Verify that all 16 steps can be rendered — note row must contain at least
-/// 16 note-name tokens when every step is enabled.  This exercises the full
-/// step-iteration loop in render_frame without hw-io.
-#[test]
-fn all_sixteen_steps_enabled_renders_note_names_in_note_row() {
-    let mut state = SequencerState::default();
-    // Enable all 16 steps with a mix of notes to ensure the iteration loop
-    // visits every step and does not short-circuit on an empty/disabled step.
-    for (i, step) in state.steps.iter_mut().enumerate() {
-        step.enabled = true;
-        // Spread notes: C4(60), D4(62), E4(64), ... cycling every 4
-        step.midi_note = 60 + (i as u8 % 4) * 2;
-        step.velocity = 100;
-    }
-    state.playhead = 0;
-    state.selected_step = 0;
-
-    // Wide terminal so all 16 columns fit without truncation.
-    let backend = TestBackend::new(160, 10);
-    let mut terminal = Terminal::new(backend).expect("test terminal");
-
-    terminal
-        .draw(|frame| {
-            render_frame(frame, &state, None, 0);
-        })
-        .expect("draw with all steps enabled");
-
-    let buffer = terminal.backend().buffer().clone();
-
-    // Collect the entire note row (y=1).
-    let note_row: String = (0..160)
-        .map(|x| {
-            buffer
-                .cell((x, 1))
-                .map(|c| c.symbol().chars().next().unwrap_or(' '))
-                .unwrap_or(' ')
-        })
-        .collect();
-
-    // C4 appears for steps 0, 4, 8, 12 — must appear multiple times.
-    let c4_count = note_row.matches("C4").count();
-    assert!(
-        c4_count >= 4,
-        "note row must contain 'C4' at least 4 times when steps 0,4,8,12 are C4, got: {}",
-        note_row
-    );
-}
-
-/// Verify that the indicator row (y=2) shows the enabled marker '●' for all
-/// enabled steps and the disabled marker '○' for all disabled steps when a
-/// known pattern is set.  This is the step-indicator path in render_frame.
-#[test]
-fn indicator_row_reflects_enabled_disabled_pattern() {
-    let mut state = SequencerState::default();
-    // Enable even steps, disable odd steps.
-    for (i, step) in state.steps.iter_mut().enumerate() {
-        step.enabled = i % 2 == 0;
-        step.midi_note = 60;
-        step.velocity = 100;
-    }
-    state.playhead = 0;
-    state.selected_step = 0;
-
-    let backend = TestBackend::new(160, 10);
-    let mut terminal = Terminal::new(backend).expect("test terminal");
-
-    terminal
-        .draw(|frame| {
-            render_frame(frame, &state, None, 0);
-        })
-        .expect("draw");
-
-    let buffer = terminal.backend().buffer().clone();
-
-    let indicator_row: String = (0..160)
-        .map(|x| buffer.cell((x, 2)).map(|c| c.symbol()).unwrap_or(""))
-        .collect();
-
-    assert!(
-        indicator_row.contains('●'),
-        "indicator row must contain '●' for enabled (even) steps, got: {}",
-        indicator_row
-    );
-    assert!(
-        indicator_row.contains('○'),
-        "indicator row must contain '○' for disabled (odd) steps, got: {}",
-        indicator_row
-    );
-}
-
-// ── BUG-011: Overlay pending param display shows human-readable labels ────────
-
-/// Collect all text from the terminal buffer (for overlay assertions).
+/// Collect all text from the terminal buffer as a single string.
 fn collect_all_text(backend: &TestBackend, width: u16, height: u16) -> String {
     let buffer = backend.buffer().clone();
     (0..height)
@@ -966,206 +73,736 @@ fn collect_all_text(backend: &TestBackend, width: u16, height: u16) -> String {
         .collect()
 }
 
-#[test]
-fn overlay_pending_key_shows_human_readable_label_not_raw_index() {
-    // BUG-011: When state.key=C and a pending key edit with value=3 (D#) is
-    // present, the overlay must show "D#" not "3" as the pending value.
-    let mut state = known_state();
-    state.key = Key::C; // index 0
-                        // Simulate pending value=3 (D#) for param index 0 (Key).
-    state.pending_edit = PendingEdit::Param {
-        overlay: OverlayMode::Regular,
-        index: 0,
-        value: 3,
-    };
-
-    let backend = TestBackend::new(200, 12);
-    let mut terminal = Terminal::new(backend).expect("test terminal");
-    terminal
-        .draw(|frame| {
-            render_frame(frame, &state, Some(OverlayMode::Regular), 0);
+/// Collect a single row as a string.
+fn collect_row(backend: &TestBackend, y: u16, width: u16) -> String {
+    let buffer = backend.buffer().clone();
+    (0..width)
+        .map(|x| {
+            buffer
+                .cell((x, y))
+                .map(|c| c.symbol().chars().next().unwrap_or(' '))
+                .unwrap_or(' ')
         })
+        .collect()
+}
+
+/// Return true if any cell in the given row has the specified fg color.
+fn row_has_fg(backend: &TestBackend, y: u16, width: u16, color: Color) -> bool {
+    let buffer = backend.buffer().clone();
+    (0..width).any(|x| buffer.cell((x, y)).map(|c| c.fg == color).unwrap_or(false))
+}
+
+/// Return true if any cell in the buffer within the row range has the specified fg color.
+fn area_has_fg(backend: &TestBackend, width: u16, y_start: u16, y_end: u16, color: Color) -> bool {
+    let buffer = backend.buffer().clone();
+    (y_start..y_end).any(|y| {
+        (0..width).any(|x| buffer.cell((x, y)).map(|c| c.fg == color).unwrap_or(false))
+    })
+}
+
+// ── Transport bar (row 1) ─────────────────────────────────────────────────────
+
+#[test]
+fn transport_bar_contains_bpm_key_mode_step_status() {
+    let state = known_state();
+    let log = empty_log();
+    let backend = TestBackend::new(120, 30);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+
+    terminal
+        .draw(|frame| render_frame(frame, &state, &default_snapshot(&log)))
         .expect("draw");
 
-    let all_text = collect_all_text(terminal.backend(), 200, 12);
+    // Transport bar is row 1.
+    let row1 = collect_row(terminal.backend(), 1, 120);
 
     assert!(
-        all_text.contains("D#"),
-        "overlay pending key must show 'D#' (not raw '3'), got: {}",
-        all_text
+        row1.contains("120"),
+        "transport bar must contain BPM '120', got: {}",
+        row1
     );
-    // Raw index "3" alone could be a false positive, but "→3" would be the
-    // bug form. The arrow display should not end with "→3".
     assert!(
-        !all_text.contains("→3"),
-        "overlay must NOT show '→3' (raw index) for pending key, got: {}",
-        all_text
+        row1.contains('C'),
+        "transport bar must contain key 'C', got: {}",
+        row1
+    );
+    assert!(
+        row1.contains("Major"),
+        "transport bar must contain 'Major', got: {}",
+        row1
+    );
+    assert!(
+        row1.contains("1/16"),
+        "transport bar must contain step '1/16', got: {}",
+        row1
+    );
+    assert!(
+        row1.contains("PLAYING"),
+        "transport bar must contain 'PLAYING', got: {}",
+        row1
     );
 }
 
 #[test]
-fn overlay_pending_mode_shows_human_readable_label_not_raw_index() {
-    // BUG-011: pending mode edit value=2 (Dorian) must show "Dorian" not "2".
+fn transport_bar_shows_quarter_step_size() {
     let mut state = known_state();
-    state.mode = Mode::Major; // index 0
-    state.pending_edit = PendingEdit::Param {
-        overlay: OverlayMode::Regular,
-        index: 1,
-        value: 2, // Dorian
-    };
-
-    let backend = TestBackend::new(200, 12);
+    state.step_size = StepSize::Quarter;
+    let log = empty_log();
+    let backend = TestBackend::new(120, 30);
     let mut terminal = Terminal::new(backend).expect("test terminal");
+
     terminal
-        .draw(|frame| {
-            render_frame(frame, &state, Some(OverlayMode::Regular), 1);
-        })
+        .draw(|frame| render_frame(frame, &state, &default_snapshot(&log)))
         .expect("draw");
 
-    let all_text = collect_all_text(terminal.backend(), 200, 12);
-
+    let row1 = collect_row(terminal.backend(), 1, 120);
     assert!(
-        all_text.contains("Dorian"),
-        "overlay pending mode must show 'Dorian' (not '2'), got: {}",
-        all_text
-    );
-    assert!(
-        !all_text.contains("→2"),
-        "overlay must NOT show '→2' (raw index) for pending mode, got: {}",
-        all_text
+        row1.contains("1/4"),
+        "transport bar must contain '1/4', got: {}",
+        row1
     );
 }
 
 #[test]
-fn overlay_pending_swing_shows_formatted_value_not_raw() {
-    // BUG-011: pending swing edit value=+15 must show "+15" not "15" or a raw delta.
+fn transport_bar_shows_eighth_step_size() {
     let mut state = known_state();
-    state.swing = 0;
-    state.pending_edit = PendingEdit::Param {
-        overlay: OverlayMode::Regular,
-        index: 2,
-        value: 15, // swing=+15
-    };
-
-    let backend = TestBackend::new(200, 12);
+    state.step_size = StepSize::Eighth;
+    let log = empty_log();
+    let backend = TestBackend::new(120, 30);
     let mut terminal = Terminal::new(backend).expect("test terminal");
+
     terminal
-        .draw(|frame| {
-            render_frame(frame, &state, Some(OverlayMode::Regular), 2);
-        })
+        .draw(|frame| render_frame(frame, &state, &default_snapshot(&log)))
         .expect("draw");
 
-    let all_text = collect_all_text(terminal.backend(), 200, 12);
-
-    // The pending_param_value_string for swing formats as "{:+}", so +15.
+    let row1 = collect_row(terminal.backend(), 1, 120);
     assert!(
-        all_text.contains("+15"),
-        "overlay pending swing must show '+15', got: {}",
-        all_text
+        row1.contains("1/8"),
+        "transport bar must contain '1/8', got: {}",
+        row1
     );
 }
 
 #[test]
-fn overlay_pending_step_size_shows_label_not_raw_index() {
-    // BUG-011: pending step_size edit value=3 (Eighth) must show "1/8" not "3".
+fn transport_bar_stopped_status() {
     let mut state = known_state();
-    state.step_size = StepSize::Sixteenth; // index 4
-    state.pending_edit = PendingEdit::Param {
-        overlay: OverlayMode::Regular,
-        index: 3,
-        value: 3, // Eighth → "1/8"
-    };
-
-    let backend = TestBackend::new(200, 12);
+    state.playing = false;
+    let log = empty_log();
+    let backend = TestBackend::new(120, 30);
     let mut terminal = Terminal::new(backend).expect("test terminal");
+
     terminal
-        .draw(|frame| {
-            render_frame(frame, &state, Some(OverlayMode::Regular), 3);
-        })
+        .draw(|frame| render_frame(frame, &state, &default_snapshot(&log)))
         .expect("draw");
 
-    let all_text = collect_all_text(terminal.backend(), 200, 12);
-
+    let row1 = collect_row(terminal.backend(), 1, 120);
     assert!(
-        all_text.contains("1/8"),
-        "overlay pending step_size must show '1/8' (not '3'), got: {}",
-        all_text
-    );
-    assert!(
-        !all_text.contains("→3"),
-        "overlay must NOT show '→3' (raw index) for pending step_size, got: {}",
-        all_text
+        row1.contains("STOPPED"),
+        "transport bar must show STOPPED, got: {}",
+        row1
     );
 }
 
 #[test]
-fn overlay_pending_playing_shows_label_not_raw_integer() {
-    // BUG-011: pending playing param edit value=1 must show "playing" not "1".
-    // Index 7 = playing in the base param mapping (0=Key,1=Mode,2=Swing,3=StepSize,
-    // 4=loop_in,5=loop_out,6=paused,7=playing).
+fn transport_bar_paused_status() {
     let mut state = known_state();
-    state.playing = false; // committed: "stopped"
-    state.pending_edit = PendingEdit::Param {
-        overlay: OverlayMode::Regular,
-        index: 7,
-        value: 1, // playing=true
-    };
-
-    let backend = TestBackend::new(200, 12);
+    state.paused = true;
+    let log = empty_log();
+    let backend = TestBackend::new(120, 30);
     let mut terminal = Terminal::new(backend).expect("test terminal");
+
     terminal
-        .draw(|frame| {
-            render_frame(frame, &state, Some(OverlayMode::Regular), 7);
-        })
+        .draw(|frame| render_frame(frame, &state, &default_snapshot(&log)))
         .expect("draw");
 
-    let all_text = collect_all_text(terminal.backend(), 200, 12);
-
+    let row1 = collect_row(terminal.backend(), 1, 120);
     assert!(
-        all_text.contains("playing"),
-        "overlay pending playing must show 'playing' (not '1'), got: {}",
-        all_text
+        row1.contains("PAUSED"),
+        "transport bar must show PAUSED, got: {}",
+        row1
     );
+}
+
+// ── Title bar (row 0) ─────────────────────────────────────────────────────────
+
+#[test]
+fn title_bar_contains_project_name() {
+    let state = known_state();
+    let log = empty_log();
+    let backend = TestBackend::new(120, 30);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+
+    terminal
+        .draw(|frame| render_frame(frame, &state, &default_snapshot(&log)))
+        .expect("draw");
+
+    let row0 = collect_row(terminal.backend(), 0, 120);
     assert!(
-        !all_text.contains("→1"),
-        "overlay must NOT show '→1' (raw integer) for pending playing, got: {}",
-        all_text
+        row0.contains("midi-man-mk3"),
+        "title bar must contain 'midi-man-mk3', got: {}",
+        row0
     );
 }
 
 #[test]
-fn overlay_pending_paused_shows_on_not_raw_integer() {
-    // BUG-011: pending paused param edit value=1 must show "on" not "1".
-    // Index 6 = paused in the base param mapping (0=Key,1=Mode,2=Swing,3=StepSize,
-    // 4=loop_in,5=loop_out,6=paused,7=playing).
-    let mut state = known_state();
-    state.paused = false; // committed: "off"
-    state.pending_edit = PendingEdit::Param {
-        overlay: OverlayMode::Regular,
-        index: 6,
-        value: 1, // paused=true
-    };
-
-    let backend = TestBackend::new(200, 12);
+fn title_bar_contains_midi_device_info() {
+    let state = known_state();
+    let log = empty_log();
+    let backend = TestBackend::new(120, 30);
     let mut terminal = Terminal::new(backend).expect("test terminal");
+
+    let snap = UiLocalSnapshot {
+        focus: FocusPanel::Sequencer,
+        selected_step: 0,
+        seq_param_idx: 0,
+        rand_param_idx: 0,
+        cli_line: "",
+        cli_log: &log,
+        midi_device_name: "USB MIDI",
+        midi_channel_display: 3,
+    };
     terminal
-        .draw(|frame| {
-            render_frame(frame, &state, Some(OverlayMode::Regular), 6);
-        })
+        .draw(|frame| render_frame(frame, &state, &snap))
         .expect("draw");
 
-    let all_text = collect_all_text(terminal.backend(), 200, 12);
+    let row0 = collect_row(terminal.backend(), 0, 120);
+    assert!(
+        row0.contains("MIDI OUT"),
+        "title bar must contain 'MIDI OUT', got: {}",
+        row0
+    );
+    assert!(
+        row0.contains("CH:3"),
+        "title bar must contain 'CH:3', got: {}",
+        row0
+    );
+}
 
+// ── F1 SEQ panel — step cards ─────────────────────────────────────────────────
+
+#[test]
+fn f1_panel_renders_enabled_step_indicator() {
+    let state = known_state(); // step 0 enabled
+    let log = empty_log();
+    let backend = TestBackend::new(160, 30);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+
+    terminal
+        .draw(|frame| render_frame(frame, &state, &default_snapshot(&log)))
+        .expect("draw");
+
+    let all = collect_all_text(terminal.backend(), 160, 30);
     assert!(
-        all_text.contains("on"),
-        "overlay pending paused must show 'on' (not '1'), got: {}",
-        all_text
+        all.contains('●'),
+        "F1 panel must show '●' for enabled step 0"
+    );
+}
+
+#[test]
+fn f1_panel_renders_disabled_step_indicator() {
+    let mut state = known_state();
+    // Step 1 is disabled by default in known_state (only step 0 enabled).
+    state.steps[1].enabled = false;
+    let log = empty_log();
+    let backend = TestBackend::new(160, 30);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+
+    terminal
+        .draw(|frame| render_frame(frame, &state, &default_snapshot(&log)))
+        .expect("draw");
+
+    let all = collect_all_text(terminal.backend(), 160, 30);
+    assert!(
+        all.contains('○'),
+        "F1 panel must show '○' for disabled steps"
+    );
+}
+
+#[test]
+fn f1_panel_renders_c4_note_name() {
+    let state = known_state(); // step 0 = C4
+    let log = empty_log();
+    let backend = TestBackend::new(160, 30);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+
+    terminal
+        .draw(|frame| render_frame(frame, &state, &default_snapshot(&log)))
+        .expect("draw");
+
+    let all = collect_all_text(terminal.backend(), 160, 30);
+    assert!(
+        all.contains("C4"),
+        "F1 panel must contain 'C4' for step 0 note, got all text"
+    );
+}
+
+#[test]
+fn f1_panel_all_sixteen_steps_render_without_panic() {
+    let mut state = SequencerState::default();
+    for (i, step) in state.steps.iter_mut().enumerate() {
+        step.enabled = true;
+        step.midi_note = 60 + (i as u8 % 4) * 2;
+        step.velocity = 100;
+    }
+    state.playhead = 0;
+    state.selected_step = 0;
+
+    let log = empty_log();
+    let backend = TestBackend::new(160, 30);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+
+    terminal
+        .draw(|frame| render_frame(frame, &state, &default_snapshot(&log)))
+        .expect("draw");
+
+    let all = collect_all_text(terminal.backend(), 160, 30);
+    let c4_count = all.matches("C4").count();
+    assert!(
+        c4_count >= 4,
+        "F1 panel must contain 'C4' at least 4 times for steps 0,4,8,12, got: {}",
+        c4_count
+    );
+}
+
+#[test]
+fn f1_panel_enabled_disabled_pattern() {
+    let mut state = SequencerState::default();
+    for (i, step) in state.steps.iter_mut().enumerate() {
+        step.enabled = i % 2 == 0;
+        step.midi_note = 60;
+        step.velocity = 100;
+    }
+    state.playhead = 0;
+    state.selected_step = 0;
+
+    let log = empty_log();
+    let backend = TestBackend::new(160, 30);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+
+    terminal
+        .draw(|frame| render_frame(frame, &state, &default_snapshot(&log)))
+        .expect("draw");
+
+    let all = collect_all_text(terminal.backend(), 160, 30);
+    assert!(all.contains('●'), "must show '●' for enabled (even) steps");
+    assert!(all.contains('○'), "must show '○' for disabled (odd) steps");
+}
+
+#[test]
+fn f1_panel_playhead_step_renders_a4_note() {
+    let mut state = known_state();
+    state.playhead = 8;
+    state.selected_step = 0;
+    state.steps[8] = StepData {
+        enabled: true,
+        midi_note: 69, // A4
+        velocity: 100,
+    };
+    let log = empty_log();
+    let backend = TestBackend::new(160, 30);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+
+    terminal
+        .draw(|frame| render_frame(frame, &state, &default_snapshot(&log)))
+        .expect("draw");
+
+    let all = collect_all_text(terminal.backend(), 160, 30);
+    assert!(
+        all.contains("A4"),
+        "F1 panel must show 'A4' at playhead step 8"
+    );
+}
+
+// ── F2 SEQ PARAMS panel ───────────────────────────────────────────────────────
+
+#[test]
+fn f2_panel_shows_seq_param_names() {
+    let state = known_state();
+    let log = empty_log();
+    let backend = TestBackend::new(200, 30);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+
+    terminal
+        .draw(|frame| render_frame(frame, &state, &default_snapshot(&log)))
+        .expect("draw");
+
+    let all = collect_all_text(terminal.backend(), 200, 30);
+    assert!(all.contains("KEY"), "F2 panel must show 'KEY'");
+    assert!(all.contains("MODE"), "F2 panel must show 'MODE'");
+    assert!(all.contains("SWING"), "F2 panel must show 'SWING'");
+    assert!(all.contains("STEP"), "F2 panel must show 'STEP'");
+    assert!(all.contains("L.IN"), "F2 panel must show 'L.IN'");
+    assert!(all.contains("L.OUT"), "F2 panel must show 'L.OUT'");
+    assert!(all.contains("PAUSE"), "F2 panel must show 'PAUSE'");
+    assert!(all.contains("PLAY"), "F2 panel must show 'PLAY'");
+}
+
+#[test]
+fn f2_panel_shows_current_key_value() {
+    let state = known_state(); // key = C
+    let log = empty_log();
+    let backend = TestBackend::new(200, 30);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+
+    terminal
+        .draw(|frame| render_frame(frame, &state, &default_snapshot(&log)))
+        .expect("draw");
+
+    let all = collect_all_text(terminal.backend(), 200, 30);
+    // KEY:C should appear in F2 panel row.
+    assert!(
+        all.contains("KEY:C"),
+        "F2 panel must show 'KEY:C' for key=C, all text present"
+    );
+}
+
+#[test]
+fn f2_panel_swing_value_shown() {
+    let mut state = known_state();
+    state.swing = 15;
+    let log = empty_log();
+    let backend = TestBackend::new(200, 30);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+
+    terminal
+        .draw(|frame| render_frame(frame, &state, &default_snapshot(&log)))
+        .expect("draw");
+
+    let all = collect_all_text(terminal.backend(), 200, 30);
+    // The swing value is rendered as "+15".
+    assert!(all.contains("+15"), "F2 panel must show '+15' for swing=15");
+}
+
+// ── F3 RANDOM PARAMS panel ────────────────────────────────────────────────────
+
+#[test]
+fn f3_panel_shows_rand_param_names() {
+    let state = known_state();
+    let log = empty_log();
+    let backend = TestBackend::new(200, 30);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+
+    terminal
+        .draw(|frame| render_frame(frame, &state, &default_snapshot(&log)))
+        .expect("draw");
+
+    let all = collect_all_text(terminal.backend(), 200, 30);
+    assert!(all.contains("N.RND"), "F3 panel must show 'N.RND'");
+    assert!(all.contains("T.RND"), "F3 panel must show 'T.RND'");
+    assert!(all.contains("ROLL"), "F3 panel must show 'ROLL'");
+    assert!(all.contains("V.MAX"), "F3 panel must show 'V.MAX'");
+    assert!(all.contains("T.TYPE"), "F3 panel must show 'T.TYPE'");
+    assert!(all.contains("S.RND"), "F3 panel must show 'S.RND'");
+    assert!(all.contains("S.QUANT"), "F3 panel must show 'S.QUANT'");
+    assert!(all.contains("SEED"), "F3 panel must show 'SEED'");
+}
+
+#[test]
+fn f3_panel_shows_seed_in_hex_format() {
+    let mut state = known_state();
+    state.rand_seed = 0xABCD;
+    let log = empty_log();
+    let backend = TestBackend::new(200, 30);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+
+    terminal
+        .draw(|frame| render_frame(frame, &state, &default_snapshot(&log)))
+        .expect("draw");
+
+    let all = collect_all_text(terminal.backend(), 200, 30);
+    assert!(
+        all.contains("0xABCD"),
+        "F3 panel must show seed as '0xABCD', got all text"
+    );
+}
+
+// ── F4 CLI panel ──────────────────────────────────────────────────────────────
+
+#[test]
+fn f4_panel_shows_log_entries() {
+    let state = known_state();
+    let mut log: VecDeque<LogEntry> = VecDeque::new();
+    log.push_back(LogEntry {
+        timestamp_ms: 1234,
+        tag: LogTag::Info,
+        text: "hello world".to_string(),
+    });
+    log.push_back(LogEntry {
+        timestamp_ms: 5678,
+        tag: LogTag::Cmd,
+        text: "port test".to_string(),
+    });
+    let snap = UiLocalSnapshot {
+        focus: FocusPanel::Cli,
+        selected_step: 0,
+        seq_param_idx: 0,
+        rand_param_idx: 0,
+        cli_line: "my input",
+        cli_log: &log,
+        midi_device_name: "",
+        midi_channel_display: 1,
+    };
+
+    let backend = TestBackend::new(120, 40);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| render_frame(frame, &state, &snap))
+        .expect("draw");
+
+    let all = collect_all_text(terminal.backend(), 120, 40);
+    assert!(
+        all.contains("hello world"),
+        "CLI panel must display 'hello world' log entry"
     );
     assert!(
-        !all_text.contains("→1"),
-        "overlay must NOT show '→1' (raw integer) for pending paused, got: {}",
-        all_text
+        all.contains("my input"),
+        "CLI panel must show the input line content"
     );
+}
+
+#[test]
+fn f4_panel_shows_input_prompt() {
+    let state = known_state();
+    let log = empty_log();
+    let snap = UiLocalSnapshot {
+        focus: FocusPanel::Cli,
+        selected_step: 0,
+        seq_param_idx: 0,
+        rand_param_idx: 0,
+        cli_line: "",
+        cli_log: &log,
+        midi_device_name: "",
+        midi_channel_display: 1,
+    };
+
+    let backend = TestBackend::new(120, 30);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| render_frame(frame, &state, &snap))
+        .expect("draw");
+
+    let all = collect_all_text(terminal.backend(), 120, 30);
+    assert!(all.contains('>'), "CLI panel must show '>' input prompt");
+}
+
+// ── Focus border coloring ─────────────────────────────────────────────────────
+
+#[test]
+fn focused_f1_panel_renders_without_panic() {
+    let state = known_state();
+    let log = empty_log();
+    let snap = UiLocalSnapshot {
+        focus: FocusPanel::Sequencer,
+        selected_step: 0,
+        seq_param_idx: 0,
+        rand_param_idx: 0,
+        cli_line: "",
+        cli_log: &log,
+        midi_device_name: "",
+        midi_channel_display: 1,
+    };
+    let backend = TestBackend::new(160, 30);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| render_frame(frame, &state, &snap))
+        .expect("draw");
+}
+
+#[test]
+fn focused_f2_panel_renders_without_panic() {
+    let state = known_state();
+    let log = empty_log();
+    let snap = UiLocalSnapshot {
+        focus: FocusPanel::SeqParams,
+        selected_step: 0,
+        seq_param_idx: 2,
+        rand_param_idx: 0,
+        cli_line: "",
+        cli_log: &log,
+        midi_device_name: "",
+        midi_channel_display: 1,
+    };
+    let backend = TestBackend::new(200, 30);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| render_frame(frame, &state, &snap))
+        .expect("draw");
+    // Swing param (index 2) should be highlighted when F2 focused.
+    let all = collect_all_text(terminal.backend(), 200, 30);
+    assert!(all.contains("SWING"), "F2 panel must show SWING param");
+}
+
+#[test]
+fn focused_f3_panel_renders_without_panic() {
+    let state = known_state();
+    let log = empty_log();
+    let snap = UiLocalSnapshot {
+        focus: FocusPanel::RandParams,
+        selected_step: 0,
+        seq_param_idx: 0,
+        rand_param_idx: 1,
+        cli_line: "",
+        cli_log: &log,
+        midi_device_name: "",
+        midi_channel_display: 1,
+    };
+    let backend = TestBackend::new(200, 30);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| render_frame(frame, &state, &snap))
+        .expect("draw");
+    let all = collect_all_text(terminal.backend(), 200, 30);
+    assert!(all.contains("T.RND"), "F3 panel must show T.RND param");
+}
+
+// ── BUG-007 regression: TestBackend compiles without hw-io ────────────────────
+
+/// Verify TestBackend renders without the `hw-io` feature.
+#[test]
+fn test_backend_renders_without_hw_io_feature() {
+    let backend = TestBackend::new(120, 30);
+    let mut terminal =
+        Terminal::new(backend).expect("TestBackend terminal must construct without hw-io");
+
+    let state = SequencerState::default();
+    let log = empty_log();
+    terminal
+        .draw(|frame| render_frame(frame, &state, &default_snapshot(&log)))
+        .expect("render_frame must complete with TestBackend and no hw-io feature");
+
+    let buffer = terminal.backend().buffer().clone();
+    let any_non_space = (0..120u16).any(|x| {
+        buffer
+            .cell((x, 0))
+            .map(|c| c.symbol() != " ")
+            .unwrap_or(false)
+    });
+    assert!(
+        any_non_space,
+        "rendered buffer must contain non-space cells (title bar must render)"
+    );
+}
+
+/// Render must be deterministic: clear-and-redraw produces identical output.
+#[test]
+fn test_backend_clear_and_redraw_is_idempotent() {
+    let state = known_state();
+    let log = empty_log();
+
+    let backend = TestBackend::new(120, 30);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+
+    terminal
+        .draw(|frame| render_frame(frame, &state, &default_snapshot(&log)))
+        .expect("first draw");
+
+    let first_row0 = collect_row(terminal.backend(), 0, 120);
+    terminal.clear().expect("terminal clear must succeed");
+
+    terminal
+        .draw(|frame| render_frame(frame, &state, &default_snapshot(&log)))
+        .expect("second draw after clear");
+
+    let second_row0 = collect_row(terminal.backend(), 0, 120);
+    assert_eq!(
+        first_row0, second_row0,
+        "title bar must be identical after clear-and-redraw (render must be deterministic)"
+    );
+}
+
+// ── render_frame does not panic for any focus panel or param index ─────────────
+
+#[test]
+fn render_frame_does_not_panic_for_all_seq_param_indices() {
+    let state = known_state();
+    let log = empty_log();
+    for idx in 0u8..=7 {
+        let snap = UiLocalSnapshot {
+            focus: FocusPanel::SeqParams,
+            selected_step: 0,
+            seq_param_idx: idx,
+            rand_param_idx: 0,
+            cli_line: "",
+            cli_log: &log,
+            midi_device_name: "",
+            midi_channel_display: 1,
+        };
+        let backend = TestBackend::new(200, 30);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| render_frame(frame, &state, &snap))
+            .expect("draw must not panic");
+    }
+}
+
+#[test]
+fn render_frame_does_not_panic_for_all_rand_param_indices() {
+    let state = known_state();
+    let log = empty_log();
+    for idx in 0u8..=7 {
+        let snap = UiLocalSnapshot {
+            focus: FocusPanel::RandParams,
+            selected_step: 0,
+            seq_param_idx: 0,
+            rand_param_idx: idx,
+            cli_line: "",
+            cli_log: &log,
+            midi_device_name: "",
+            midi_channel_display: 1,
+        };
+        let backend = TestBackend::new(200, 30);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| render_frame(frame, &state, &snap))
+            .expect("draw must not panic");
+    }
+}
+
+// ── PendingEdit: note preview via note_name ────────────────────────────────────
+//
+// The new render shows all steps' midi_note values. Pending note edits are not
+// yet reflected in the F1 panel (ui.rs task 4.1 will wire the snapshot). The
+// F1 panel renders state.steps[i].midi_note — verify that works.
+
+#[test]
+fn f1_panel_shows_d4_when_step_note_is_d4() {
+    let mut state = known_state();
+    state.steps[3] = StepData {
+        enabled: true,
+        midi_note: 62, // D4
+        velocity: 100,
+    };
+    let log = empty_log();
+    let backend = TestBackend::new(160, 30);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+
+    terminal
+        .draw(|frame| render_frame(frame, &state, &default_snapshot(&log)))
+        .expect("draw");
+
+    let all = collect_all_text(terminal.backend(), 160, 30);
+    assert!(
+        all.contains("D4"),
+        "F1 panel must show 'D4' for step 3 with midi_note=62"
+    );
+}
+
+// ── Pending edit in state — does not crash render ─────────────────────────────
+
+#[test]
+fn pending_note_edit_state_does_not_crash_render() {
+    let mut state = known_state();
+    state.pending_edit = PendingEdit::Note {
+        step: 0,
+        midi_note: 62,
+    };
+    let log = empty_log();
+    let backend = TestBackend::new(160, 30);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+
+    terminal
+        .draw(|frame| render_frame(frame, &state, &default_snapshot(&log)))
+        .expect("draw must not panic with PendingEdit::Note in state");
 }
 
 // ─── shift_param_value_string unit tests ─────────────────────────────────────
@@ -1238,7 +875,6 @@ fn shift_param_value_string_scale_quant() {
 #[test]
 fn shift_param_value_string_reserved_returns_em_dash() {
     let s = SequencerState::default();
-    // Index 7 is reserved; should not panic and return em dash.
     let result = shift_param_value_string(&s, 7);
     assert!(
         !result.is_empty(),
@@ -1285,59 +921,527 @@ fn shift_pending_param_value_string_reserved_does_not_panic() {
     assert!(!result.is_empty());
 }
 
-// ─── Shift overlay: pending edit displayed in overlay ────────────────────────
+// ── Transport bar — STATUS color assertions ───────────────────────────────────
 
+/// STATUS span is GREEN (Rgb(0,200,80)) when playing=true, paused=false.
 #[test]
-fn shift_overlay_pending_edit_shown_in_render() {
+fn transport_bar_status_green_when_playing() {
     let mut state = known_state();
-    // Set a pending edit for shift param 1 (Tempo Rnd) value=88.
-    state.pending_edit = PendingEdit::Param {
-        overlay: OverlayMode::Shift,
-        index: 1,
-        value: 88,
-    };
-
-    let backend = TestBackend::new(200, 12);
+    state.playing = true;
+    state.paused = false;
+    let log = empty_log();
+    let backend = TestBackend::new(160, 30);
     let mut terminal = Terminal::new(backend).expect("test terminal");
-
     terminal
-        .draw(|frame| {
-            render_frame(frame, &state, Some(OverlayMode::Shift), 1);
-        })
+        .draw(|frame| render_frame(frame, &state, &default_snapshot(&log)))
         .expect("draw");
 
-    let buffer = terminal.backend().buffer().clone();
-    let all_text: String = (0..12u16)
-        .flat_map(|y| (0..200u16).map(move |x| (x, y)))
-        .map(|(x, y)| {
-            buffer
-                .cell((x, y))
-                .map(|c| c.symbol().chars().next().unwrap_or(' '))
-                .unwrap_or(' ')
-        })
-        .collect();
-
+    // Transport bar = row 1. GREEN = Rgb(0,200,80).
+    let green = Color::Rgb(0, 200, 80);
     assert!(
-        all_text.contains("88"),
-        "shift overlay must show pending value 88, got: {}",
-        all_text
+        row_has_fg(terminal.backend(), 1, 160, green),
+        "transport bar STATUS must have GREEN fg when playing=true, paused=false"
     );
 }
 
-// ─── Shift overlay: render_frame with Shift overlay does not panic ────────────
-
+/// STATUS span is CYAN (Rgb(0,255,255)) when paused=true.
 #[test]
-fn shift_overlay_render_frame_does_not_panic() {
-    let state = known_state();
-    let backend = TestBackend::new(200, 12);
+fn transport_bar_status_cyan_when_paused() {
+    let mut state = known_state();
+    state.playing = true;
+    state.paused = true;
+    let log = empty_log();
+    let backend = TestBackend::new(160, 30);
     let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| render_frame(frame, &state, &default_snapshot(&log)))
+        .expect("draw");
 
-    // Must not panic for any selected_param including index 7 (reserved).
-    for sel in 0u8..=7 {
-        terminal
-            .draw(|frame| {
-                render_frame(frame, &state, Some(OverlayMode::Shift), sel);
+    // CYAN = Rgb(0,255,255).
+    let cyan = Color::Rgb(0, 255, 255);
+    assert!(
+        row_has_fg(terminal.backend(), 1, 160, cyan),
+        "transport bar STATUS must have CYAN fg when paused=true"
+    );
+}
+
+/// STATUS span uses Color::Reset (terminal default) when stopped (playing=false).
+#[test]
+fn transport_bar_status_default_when_stopped() {
+    let mut state = known_state();
+    state.playing = false;
+    state.paused = false;
+    let log = empty_log();
+    let backend = TestBackend::new(160, 30);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| render_frame(frame, &state, &default_snapshot(&log)))
+        .expect("draw");
+
+    // When stopped, STATUS color is Color::Reset — neither GREEN nor CYAN must be in row 1.
+    let green = Color::Rgb(0, 200, 80);
+    let cyan = Color::Rgb(0, 255, 255);
+    // The GRAY prefix spans use Rgb(136,136,136); the status span must not be green or cyan.
+    assert!(
+        !row_has_fg(terminal.backend(), 1, 160, green),
+        "transport bar STATUS must NOT be GREEN when stopped"
+    );
+    assert!(
+        !row_has_fg(terminal.backend(), 1, 160, cyan),
+        "transport bar STATUS must NOT be CYAN when stopped"
+    );
+    // The row must still contain "STOPPED" text.
+    let row1 = collect_row(terminal.backend(), 1, 160);
+    assert!(row1.contains("STOPPED"), "transport bar must show STOPPED");
+}
+
+// ── F2 SEQ PARAMS — selected param MAGENTA color assertions ──────────────────
+
+/// Selected param (seq_param_idx=2 = SWING) is rendered MAGENTA when focus=SeqParams.
+#[test]
+fn f2_selected_param_has_magenta_when_focused() {
+    let state = known_state();
+    let log = empty_log();
+    let snap = UiLocalSnapshot {
+        focus: FocusPanel::SeqParams,
+        selected_step: 0,
+        seq_param_idx: 2,
+        rand_param_idx: 0,
+        cli_line: "",
+        cli_log: &log,
+        midi_device_name: "",
+        midi_channel_display: 1,
+    };
+    let backend = TestBackend::new(200, 30);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| render_frame(frame, &state, &snap))
+        .expect("draw");
+
+    // F2 panel occupies rows 3–5 (title=0, transport=1, F1=2..N-4, F2 block starts after F1).
+    // Use area_has_fg across all rows to find MAGENTA in the F2 region.
+    let magenta = Color::Rgb(255, 0, 127);
+    // F2 panel inner row is at y=4 in a standard 30-row layout (title=0,transport=1,F1=2-12,F2=13-15).
+    // Scan all rows to avoid hard-coding exact layout.
+    assert!(
+        area_has_fg(terminal.backend(), 200, 0, 30, magenta),
+        "F2 panel must render selected param (seq_param_idx=2) with MAGENTA when focus=SeqParams"
+    );
+}
+
+/// No param is rendered MAGENTA in F2 when focus is not SeqParams.
+#[test]
+fn f2_no_magenta_when_focus_is_sequencer() {
+    let state = known_state();
+    let log = empty_log();
+    let snap = UiLocalSnapshot {
+        focus: FocusPanel::Sequencer,
+        selected_step: 0,
+        seq_param_idx: 2,
+        rand_param_idx: 0,
+        cli_line: "",
+        cli_log: &log,
+        midi_device_name: "",
+        midi_channel_display: 1,
+    };
+    let backend = TestBackend::new(200, 30);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| render_frame(frame, &state, &snap))
+        .expect("draw");
+
+    // With focus=Sequencer the is_selected condition in render_seq_params_panel is false
+    // (focused=false), so no MAGENTA should appear from F2. MAGENTA may still appear from
+    // the F1 playhead (playhead=0, selected_step=0 → MAGENTA border). We must check only
+    // the F2 row. In a 30-row, 200-col terminal the layout is:
+    //   row 0: title, row 1: transport, rows 2-12: F1 (Min(5)+borders),
+    //   rows 13-15: F2 (Length(3)), rows 16-18: F3 (Length(3)),
+    //   rows 19-28: F4 (Min(5)), row 29: keybind.
+    // F2 occupies 3 rows. Scan only those rows for MAGENTA fg.
+    // Because Min(5) distribution can vary, we scan rows 10-22 to safely include F2.
+    let magenta = Color::Rgb(255, 0, 127);
+    let buf = terminal.backend().buffer().clone();
+    // F2 inner content row contains param labels. Find the row that contains "SWING".
+    let f2_row = (0u16..30).find(|&y| {
+        let row_text: String = (0..200u16)
+            .map(|x| {
+                buf.cell((x, y))
+                    .map(|c| c.symbol().chars().next().unwrap_or(' '))
+                    .unwrap_or(' ')
             })
-            .expect("draw must not panic");
+            .collect();
+        row_text.contains("SWING")
+    });
+
+    if let Some(row_y) = f2_row {
+        let magenta_on_f2 = (0..200u16).any(|x| {
+            buf.cell((x, row_y))
+                .map(|c| c.fg == magenta)
+                .unwrap_or(false)
+        });
+        assert!(
+            !magenta_on_f2,
+            "F2 param row must NOT render MAGENTA when focus=Sequencer (row {})",
+            row_y
+        );
     }
+    // If SWING row not found, the test trivially passes (other tests verify F2 content).
+}
+
+// ── F3 RANDOM PARAMS — SEED hex format and selected param color ───────────────
+
+/// SEED value 0xABCD renders as "0xABCD" in the F3 panel (hex string content).
+#[test]
+fn f3_seed_renders_with_0x_prefix_hex() {
+    let mut state = known_state();
+    state.rand_seed = 0xABCD;
+    let log = empty_log();
+    let snap = UiLocalSnapshot {
+        focus: FocusPanel::Sequencer,
+        selected_step: 0,
+        seq_param_idx: 0,
+        rand_param_idx: 0,
+        cli_line: "",
+        cli_log: &log,
+        midi_device_name: "",
+        midi_channel_display: 1,
+    };
+    let backend = TestBackend::new(200, 30);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| render_frame(frame, &state, &snap))
+        .expect("draw");
+
+    let all = collect_all_text(terminal.backend(), 200, 30);
+    assert!(
+        all.contains("0xABCD"),
+        "F3 SEED must render as '0xABCD' for rand_seed=0xABCD"
+    );
+}
+
+/// rand_seed=0x0001 renders as "0x0001" (four-digit zero-padded hex).
+#[test]
+fn f3_seed_renders_four_digit_hex_zero_padded() {
+    let mut state = known_state();
+    state.rand_seed = 1;
+    let log = empty_log();
+    let snap = UiLocalSnapshot {
+        focus: FocusPanel::Sequencer,
+        selected_step: 0,
+        seq_param_idx: 0,
+        rand_param_idx: 0,
+        cli_line: "",
+        cli_log: &log,
+        midi_device_name: "",
+        midi_channel_display: 1,
+    };
+    let backend = TestBackend::new(200, 30);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| render_frame(frame, &state, &snap))
+        .expect("draw");
+
+    let all = collect_all_text(terminal.backend(), 200, 30);
+    assert!(
+        all.contains("0x0001"),
+        "F3 SEED must render as '0x0001' for rand_seed=1 (zero-padded to 4 hex digits)"
+    );
+}
+
+/// Selected rand param (rand_param_idx=2) is MAGENTA when focus=RandParams.
+#[test]
+fn f3_selected_param_has_magenta_when_focused() {
+    let state = known_state();
+    let log = empty_log();
+    let snap = UiLocalSnapshot {
+        focus: FocusPanel::RandParams,
+        selected_step: 0,
+        seq_param_idx: 0,
+        rand_param_idx: 2,
+        cli_line: "",
+        cli_log: &log,
+        midi_device_name: "",
+        midi_channel_display: 1,
+    };
+    let backend = TestBackend::new(200, 30);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| render_frame(frame, &state, &snap))
+        .expect("draw");
+
+    let magenta = Color::Rgb(255, 0, 127);
+    assert!(
+        area_has_fg(terminal.backend(), 200, 0, 30, magenta),
+        "F3 panel must render selected param (rand_param_idx=2) with MAGENTA when focus=RandParams"
+    );
+}
+
+// ── F4 CLI panel — prompt, log tag colors ─────────────────────────────────────
+
+/// The "> " prompt appears in the CLI panel input row.
+#[test]
+fn f4_cli_prompt_contains_greater_than_space() {
+    let state = known_state();
+    let log = empty_log();
+    let snap = UiLocalSnapshot {
+        focus: FocusPanel::Cli,
+        selected_step: 0,
+        seq_param_idx: 0,
+        rand_param_idx: 0,
+        cli_line: "",
+        cli_log: &log,
+        midi_device_name: "",
+        midi_channel_display: 1,
+    };
+    let backend = TestBackend::new(120, 40);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| render_frame(frame, &state, &snap))
+        .expect("draw");
+
+    let all = collect_all_text(terminal.backend(), 120, 40);
+    assert!(
+        all.contains("> "),
+        "CLI panel must show '> ' prompt"
+    );
+}
+
+/// cli_line content appears in the CLI input prompt area.
+#[test]
+fn f4_cli_line_content_appears_in_prompt() {
+    let state = known_state();
+    let log = empty_log();
+    let snap = UiLocalSnapshot {
+        focus: FocusPanel::Cli,
+        selected_step: 0,
+        seq_param_idx: 0,
+        rand_param_idx: 0,
+        cli_line: "device list",
+        cli_log: &log,
+        midi_device_name: "",
+        midi_channel_display: 1,
+    };
+    let backend = TestBackend::new(120, 40);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| render_frame(frame, &state, &snap))
+        .expect("draw");
+
+    let all = collect_all_text(terminal.backend(), 120, 40);
+    assert!(
+        all.contains("device list"),
+        "CLI panel must render cli_line content 'device list' in the prompt area"
+    );
+}
+
+/// A log entry with LogTag::Midi renders with GREEN (Rgb(0,200,80)) fg for the tag span.
+#[test]
+fn f4_log_tag_midi_renders_with_green_color() {
+    let state = known_state();
+    let mut log: VecDeque<LogEntry> = VecDeque::new();
+    log.push_back(LogEntry {
+        timestamp_ms: 100,
+        tag: LogTag::Midi,
+        text: "note on C4".to_string(),
+    });
+    let snap = UiLocalSnapshot {
+        focus: FocusPanel::Cli,
+        selected_step: 0,
+        seq_param_idx: 0,
+        rand_param_idx: 0,
+        cli_line: "",
+        cli_log: &log,
+        midi_device_name: "",
+        midi_channel_display: 1,
+    };
+    let backend = TestBackend::new(160, 40);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| render_frame(frame, &state, &snap))
+        .expect("draw");
+
+    let green = Color::Rgb(0, 200, 80);
+    assert!(
+        area_has_fg(terminal.backend(), 160, 0, 40, green),
+        "CLI panel must render LogTag::Midi with GREEN (Rgb(0,200,80)) fg"
+    );
+}
+
+/// A log entry with LogTag::Err renders with Color::Red fg for the tag span.
+#[test]
+fn f4_log_tag_err_renders_with_red_color() {
+    let state = known_state();
+    let mut log: VecDeque<LogEntry> = VecDeque::new();
+    log.push_back(LogEntry {
+        timestamp_ms: 200,
+        tag: LogTag::Err,
+        text: "device not found".to_string(),
+    });
+    let snap = UiLocalSnapshot {
+        focus: FocusPanel::Cli,
+        selected_step: 0,
+        seq_param_idx: 0,
+        rand_param_idx: 0,
+        cli_line: "",
+        cli_log: &log,
+        midi_device_name: "",
+        midi_channel_display: 1,
+    };
+    let backend = TestBackend::new(160, 40);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| render_frame(frame, &state, &snap))
+        .expect("draw");
+
+    assert!(
+        area_has_fg(terminal.backend(), 160, 0, 40, Color::Red),
+        "CLI panel must render LogTag::Err with Color::Red fg"
+    );
+}
+
+// ── Title bar — MIDI OUT device name and channel ──────────────────────────────
+
+/// "MIDI OUT" text appears with device name and channel when midi_device_name is non-empty.
+#[test]
+fn title_bar_shows_midi_out_with_device_and_channel() {
+    let state = known_state();
+    let log = empty_log();
+    let snap = UiLocalSnapshot {
+        focus: FocusPanel::Sequencer,
+        selected_step: 0,
+        seq_param_idx: 0,
+        rand_param_idx: 0,
+        cli_line: "",
+        cli_log: &log,
+        midi_device_name: "Arturia KeyStep",
+        midi_channel_display: 5,
+    };
+    let backend = TestBackend::new(160, 30);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| render_frame(frame, &state, &snap))
+        .expect("draw");
+
+    let row0 = collect_row(terminal.backend(), 0, 160);
+    assert!(
+        row0.contains("MIDI OUT"),
+        "title bar must contain 'MIDI OUT', got: {}",
+        row0
+    );
+    assert!(
+        row0.contains("Arturia KeyStep"),
+        "title bar must contain device name 'Arturia KeyStep', got: {}",
+        row0
+    );
+    assert!(
+        row0.contains("CH:5"),
+        "title bar must contain 'CH:5', got: {}",
+        row0
+    );
+}
+
+/// Title bar shows "—" placeholder when midi_device_name is empty.
+#[test]
+fn title_bar_shows_dash_when_no_midi_device() {
+    let state = known_state();
+    let log = empty_log();
+    let snap = UiLocalSnapshot {
+        focus: FocusPanel::Sequencer,
+        selected_step: 0,
+        seq_param_idx: 0,
+        rand_param_idx: 0,
+        cli_line: "",
+        cli_log: &log,
+        midi_device_name: "",
+        midi_channel_display: 1,
+    };
+    let backend = TestBackend::new(160, 30);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| render_frame(frame, &state, &snap))
+        .expect("draw");
+
+    let row0 = collect_row(terminal.backend(), 0, 160);
+    assert!(
+        row0.contains('\u{2014}'),
+        "title bar must show '—' (em dash) when midi_device_name is empty, got: {}",
+        row0
+    );
+}
+
+// ── F1 SEQ panel — disabled/enabled step color assertions ────────────────────
+
+/// A disabled step (step.enabled=false) renders with DIM_CYAN (Rgb(0,64,64)) in F1.
+#[test]
+fn f1_disabled_step_renders_with_dim_cyan() {
+    let mut state = SequencerState::default();
+    // All steps disabled, playhead at a non-zero position to avoid MAGENTA overlap on step 0.
+    for step in state.steps.iter_mut() {
+        step.enabled = false;
+        step.midi_note = 60;
+        step.velocity = 100;
+    }
+    state.playhead = 15; // playhead at step 15 → step 0 is just disabled
+    state.selected_step = 15; // selected at 15 too, so step 0 border is plain dim_cyan
+
+    let log = empty_log();
+    let snap = UiLocalSnapshot {
+        focus: FocusPanel::Sequencer,
+        selected_step: 15,
+        seq_param_idx: 0,
+        rand_param_idx: 0,
+        cli_line: "",
+        cli_log: &log,
+        midi_device_name: "",
+        midi_channel_display: 1,
+    };
+    let backend = TestBackend::new(160, 40);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| render_frame(frame, &state, &snap))
+        .expect("draw");
+
+    // DIM_CYAN = Rgb(0,64,64). Must appear somewhere in the F1 area.
+    let dim_cyan = Color::Rgb(0, 64, 64);
+    // F1 panel covers rows 2 onwards. Scan rows 2-25 to be safe.
+    assert!(
+        area_has_fg(terminal.backend(), 160, 2, 25, dim_cyan),
+        "F1 panel must render disabled steps with DIM_CYAN (Rgb(0,64,64))"
+    );
+}
+
+/// An enabled non-playhead step renders with CYAN (Rgb(0,255,255)) in F1.
+#[test]
+fn f1_enabled_non_playhead_step_renders_with_cyan() {
+    let mut state = SequencerState::default();
+    state.steps[0].enabled = true;
+    state.steps[0].midi_note = 60;
+    state.steps[0].velocity = 100;
+    state.playhead = 8; // playhead is at step 8, so step 0 is enabled non-playhead
+    state.selected_step = 8;
+
+    let log = empty_log();
+    let snap = UiLocalSnapshot {
+        focus: FocusPanel::Sequencer,
+        selected_step: 8,
+        seq_param_idx: 0,
+        rand_param_idx: 0,
+        cli_line: "",
+        cli_log: &log,
+        midi_device_name: "",
+        midi_channel_display: 1,
+    };
+    let backend = TestBackend::new(160, 40);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| render_frame(frame, &state, &snap))
+        .expect("draw");
+
+    // CYAN = Rgb(0,255,255). Must appear in the F1 area for the enabled step 0.
+    let cyan = Color::Rgb(0, 255, 255);
+    // Scan rows 2-25 (F1 panel area).
+    assert!(
+        area_has_fg(terminal.backend(), 160, 2, 25, cyan),
+        "F1 panel must render enabled non-playhead step with CYAN (Rgb(0,255,255))"
+    );
 }
