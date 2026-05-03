@@ -46,6 +46,15 @@ pub enum InputCommand {
     ParamValueDelta(i8),
     /// Toggle playback on/off. Stopping also clears the paused flag.
     PlayStop,
+    /// Apply a semitone offset to all steps' notes.
+    /// 0 clears the modifier. Range: -96..=96 (actual semitones).
+    NoteModifierSet(i8),
+    /// Toggle per-step skip modifier on/off.
+    SkipModifierToggle,
+    /// Set velocity offset modifier (0 = off). Range: -127..=127.
+    VelocityModifierSet(i8),
+    /// Randomise all 16 step notes within the current key/mode.
+    GenerateRandomSequence,
 }
 
 /// Pure function: translate a root-mode key event into an `InputCommand`.
