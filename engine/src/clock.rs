@@ -111,8 +111,8 @@ pub(crate) fn compute_effective_bpm(
     let fires = match params.roll_point {
         TempoRollPoint::Off => false,
         TempoRollPoint::Step => true,
-        TempoRollPoint::Beat => step_count % 4 == 0,
-        TempoRollPoint::Seq  => step_count % 16 == 0,
+        TempoRollPoint::Beat => step_count.is_multiple_of(4),
+        TempoRollPoint::Seq  => step_count.is_multiple_of(16),
     };
 
     if fires && prob_hit(rng, params.tempo_rand) {
@@ -151,14 +151,13 @@ pub(crate) fn compute_effective_bpm(
                     // Falling half: 0 → -vm → 0
                     let phase2 = phase - half;
                     let half2 = cycle - half;
-                    let pos = if phase2 < half2 / 2 {
+                    if phase2 < half2 / 2 {
                         -(phase2 as i64 * vm as i64 / (half2 as i64 / 2).max(1)) as i16
                     } else {
                         let ascend_phase = phase2 as i64 - half2 as i64 / 2;
                         let ascend_len = (half2 as i64 - half2 as i64 / 2).max(1);
                         (-(vm as i64) + ascend_phase * vm as i64 / ascend_len) as i16
-                    };
-                    pos
+                    }
                 }
             }
             TempoRandType::PingPong => {
@@ -713,6 +712,34 @@ mod tests {
 
         let final_bpm = shared.read().expect("read").tempo_bpm;
         assert_eq!(final_bpm, 240, "tempo_bpm must not be mutated by the clock thread");
+    }
+
+    // ── Seq roll point fires every 16 steps only ─────────────────────────────
+
+    #[test]
+    fn test_compute_effective_bpm_seq_fires_every_16_steps() {
+        // With Seq roll point and tempo_rand=100, jitter should only change
+        // at multiples of 16. Between those boundaries the offset stays constant.
+        let mut roll_state = TempoRollState::default();
+        let mut rng = CLOCK_RNG_INIT;
+        let base = 120u16;
+        let params = TempoRandSnapshot {
+            tempo_rand: 100,
+            roll_point: TempoRollPoint::Seq,
+            variance_max: 10,
+            rand_type: TempoRandType::Up,
+        };
+        let mut last_bpm = compute_effective_bpm(base, &mut roll_state, &params, &mut rng, 0);
+
+        for step in 1..80u64 {
+            let effective = compute_effective_bpm(base, &mut roll_state, &params, &mut rng, step);
+            if effective != last_bpm {
+                // A change must only happen at a multiple of 16.
+                assert_eq!(step % 16, 0,
+                    "Seq roll changed at step {step}, not a multiple of 16");
+                last_bpm = effective;
+            }
+        }
     }
 
     // ── Beat roll point fires every 4 steps only ─────────────────────────────
