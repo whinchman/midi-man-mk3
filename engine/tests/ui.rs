@@ -657,3 +657,204 @@ fn indicator_row_reflects_enabled_disabled_pattern() {
         indicator_row
     );
 }
+
+// ── BUG-011: Overlay pending param display shows human-readable labels ────────
+
+/// Collect all text from the terminal buffer (for overlay assertions).
+fn collect_all_text(backend: &TestBackend, width: u16, height: u16) -> String {
+    let buffer = backend.buffer().clone();
+    (0..height)
+        .flat_map(|y| (0..width).map(move |x| (x, y)))
+        .map(|(x, y)| buffer.cell((x, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
+        .collect()
+}
+
+#[test]
+fn overlay_pending_key_shows_human_readable_label_not_raw_index() {
+    // BUG-011: When state.key=C and a pending key edit with value=3 (D#) is
+    // present, the overlay must show "D#" not "3" as the pending value.
+    let mut state = known_state();
+    state.key = Key::C; // index 0
+    // Simulate pending value=3 (D#) for param index 0 (Key).
+    state.pending_edit = PendingEdit::Param {
+        overlay: OverlayMode::Regular,
+        index: 0,
+        value: 3,
+    };
+
+    let backend = TestBackend::new(200, 12);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal.draw(|frame| {
+        render_frame(frame, &state, Some(OverlayMode::Regular), 0);
+    }).expect("draw");
+
+    let all_text = collect_all_text(terminal.backend(), 200, 12);
+
+    assert!(
+        all_text.contains("D#"),
+        "overlay pending key must show 'D#' (not raw '3'), got: {}",
+        all_text
+    );
+    // Raw index "3" alone could be a false positive, but "→3" would be the
+    // bug form. The arrow display should not end with "→3".
+    assert!(
+        !all_text.contains("→3"),
+        "overlay must NOT show '→3' (raw index) for pending key, got: {}",
+        all_text
+    );
+}
+
+#[test]
+fn overlay_pending_mode_shows_human_readable_label_not_raw_index() {
+    // BUG-011: pending mode edit value=2 (Dorian) must show "Dorian" not "2".
+    let mut state = known_state();
+    state.mode = Mode::Major; // index 0
+    state.pending_edit = PendingEdit::Param {
+        overlay: OverlayMode::Regular,
+        index: 1,
+        value: 2, // Dorian
+    };
+
+    let backend = TestBackend::new(200, 12);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal.draw(|frame| {
+        render_frame(frame, &state, Some(OverlayMode::Regular), 1);
+    }).expect("draw");
+
+    let all_text = collect_all_text(terminal.backend(), 200, 12);
+
+    assert!(
+        all_text.contains("Dorian"),
+        "overlay pending mode must show 'Dorian' (not '2'), got: {}",
+        all_text
+    );
+    assert!(
+        !all_text.contains("→2"),
+        "overlay must NOT show '→2' (raw index) for pending mode, got: {}",
+        all_text
+    );
+}
+
+#[test]
+fn overlay_pending_swing_shows_formatted_value_not_raw() {
+    // BUG-011: pending swing edit value=+15 must show "+15" not "15" or a raw delta.
+    let mut state = known_state();
+    state.swing = 0;
+    state.pending_edit = PendingEdit::Param {
+        overlay: OverlayMode::Regular,
+        index: 2,
+        value: 15, // swing=+15
+    };
+
+    let backend = TestBackend::new(200, 12);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal.draw(|frame| {
+        render_frame(frame, &state, Some(OverlayMode::Regular), 2);
+    }).expect("draw");
+
+    let all_text = collect_all_text(terminal.backend(), 200, 12);
+
+    // The pending_param_value_string for swing formats as "{:+}", so +15.
+    assert!(
+        all_text.contains("+15"),
+        "overlay pending swing must show '+15', got: {}",
+        all_text
+    );
+}
+
+#[test]
+fn overlay_pending_step_size_shows_label_not_raw_index() {
+    // BUG-011: pending step_size edit value=3 (Eighth) must show "1/8" not "3".
+    let mut state = known_state();
+    state.step_size = StepSize::Sixteenth; // index 4
+    state.pending_edit = PendingEdit::Param {
+        overlay: OverlayMode::Regular,
+        index: 3,
+        value: 3, // Eighth → "1/8"
+    };
+
+    let backend = TestBackend::new(200, 12);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal.draw(|frame| {
+        render_frame(frame, &state, Some(OverlayMode::Regular), 3);
+    }).expect("draw");
+
+    let all_text = collect_all_text(terminal.backend(), 200, 12);
+
+    assert!(
+        all_text.contains("1/8"),
+        "overlay pending step_size must show '1/8' (not '3'), got: {}",
+        all_text
+    );
+    assert!(
+        !all_text.contains("→3"),
+        "overlay must NOT show '→3' (raw index) for pending step_size, got: {}",
+        all_text
+    );
+}
+
+#[test]
+fn overlay_pending_playing_shows_label_not_raw_integer() {
+    // BUG-011: pending playing param edit value=1 must show "playing" not "1".
+    // Index 7 = playing in the base param mapping (0=Key,1=Mode,2=Swing,3=StepSize,
+    // 4=loop_in,5=loop_out,6=paused,7=playing).
+    let mut state = known_state();
+    state.playing = false; // committed: "stopped"
+    state.pending_edit = PendingEdit::Param {
+        overlay: OverlayMode::Regular,
+        index: 7,
+        value: 1, // playing=true
+    };
+
+    let backend = TestBackend::new(200, 12);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal.draw(|frame| {
+        render_frame(frame, &state, Some(OverlayMode::Regular), 7);
+    }).expect("draw");
+
+    let all_text = collect_all_text(terminal.backend(), 200, 12);
+
+    assert!(
+        all_text.contains("playing"),
+        "overlay pending playing must show 'playing' (not '1'), got: {}",
+        all_text
+    );
+    assert!(
+        !all_text.contains("→1"),
+        "overlay must NOT show '→1' (raw integer) for pending playing, got: {}",
+        all_text
+    );
+}
+
+#[test]
+fn overlay_pending_paused_shows_on_not_raw_integer() {
+    // BUG-011: pending paused param edit value=1 must show "on" not "1".
+    // Index 6 = paused in the base param mapping (0=Key,1=Mode,2=Swing,3=StepSize,
+    // 4=loop_in,5=loop_out,6=paused,7=playing).
+    let mut state = known_state();
+    state.paused = false; // committed: "off"
+    state.pending_edit = PendingEdit::Param {
+        overlay: OverlayMode::Regular,
+        index: 6,
+        value: 1, // paused=true
+    };
+
+    let backend = TestBackend::new(200, 12);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal.draw(|frame| {
+        render_frame(frame, &state, Some(OverlayMode::Regular), 6);
+    }).expect("draw");
+
+    let all_text = collect_all_text(terminal.backend(), 200, 12);
+
+    assert!(
+        all_text.contains("on"),
+        "overlay pending paused must show 'on' (not '1'), got: {}",
+        all_text
+    );
+    assert!(
+        !all_text.contains("→1"),
+        "overlay must NOT show '→1' (raw integer) for pending paused, got: {}",
+        all_text
+    );
+}

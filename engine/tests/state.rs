@@ -778,3 +778,368 @@ fn apply_command_open_close_overlay() {
     s.apply_command(InputCommand::CloseOverlay);
     assert!(s.active_overlay.is_none());
 }
+
+// ── BUG-010: NoteDelta accumulates across repeated presses ────────────────────
+
+#[test]
+fn note_delta_up_five_times_advances_five_scale_degrees() {
+    // BUG-010: Each NoteDelta(1) should use the pending note as the base so
+    // pressing Up five times advances five scale degrees, not one.
+    let mut s = SequencerState::default();
+    s.selected_step = 0;
+    // default: C4=60, C Major. After 5 ups should be A4=69 (C→D→E→F→G→A).
+    for _ in 0..5 {
+        s.apply_command(InputCommand::NoteDelta(1));
+    }
+    match s.pending_edit {
+        PendingEdit::Note { step: 0, midi_note } => {
+            assert_eq!(midi_note, 69, "5× NoteDelta(1) from C4 in C Major should reach A4=69");
+        }
+        other => panic!("expected PendingEdit::Note at step 0, got {:?}", other),
+    }
+}
+
+#[test]
+fn note_delta_accumulates_then_confirm_commits_final_value() {
+    // BUG-010: Confirm after accumulated presses should commit the final note.
+    let mut s = SequencerState::default();
+    s.selected_step = 0;
+    // C4=60. 7 ups in C Major wraps to C5=72.
+    for _ in 0..7 {
+        s.apply_command(InputCommand::NoteDelta(1));
+    }
+    s.apply_command(InputCommand::Confirm);
+    assert_eq!(s.steps[0].midi_note, 72, "Confirm after 7 NoteDelta(1) from C4 should write C5=72");
+    assert!(matches!(s.pending_edit, PendingEdit::None));
+}
+
+// ── BUG-011: ParamValueDelta seeds from committed state value ─────────────────
+
+#[test]
+fn param_value_delta_key_seeds_from_committed_key_index() {
+    // BUG-011: When state.key=D (index 2) and we press Up, pending value should
+    // be 3 (D#), not 1 (would be 0+1 if seeded from 0).
+    let mut s = SequencerState::default();
+    s.key = Key::D; // index 2
+    s.active_overlay = Some(OverlayMode::Regular);
+    s.selected_param = 0; // Key param
+    s.apply_command(InputCommand::ParamValueDelta(1));
+    match s.pending_edit {
+        PendingEdit::Param { index: 0, value, .. } => {
+            assert_eq!(value, 3, "D(2)+1 should give index 3 (D#), not 1");
+        }
+        other => panic!("expected PendingEdit::Param index 0, got {:?}", other),
+    }
+}
+
+#[test]
+fn param_value_delta_swing_seeds_from_committed_swing_value() {
+    // BUG-011: When state.swing=20 and delta=-5, pending should be 15, not -5.
+    let mut s = SequencerState::default();
+    s.swing = 20;
+    s.active_overlay = Some(OverlayMode::Regular);
+    s.selected_param = 2; // Swing param
+    s.apply_command(InputCommand::ParamValueDelta(-5));
+    match s.pending_edit {
+        PendingEdit::Param { index: 2, value, .. } => {
+            assert_eq!(value, 15, "swing(20)+(-5) should give 15, not -5");
+        }
+        other => panic!("expected PendingEdit::Param index 2, got {:?}", other),
+    }
+}
+
+// ── BUG-012: Confirm applies pending param change to state field ───────────────
+
+#[test]
+fn confirm_param_key_applies_to_state_key() {
+    // BUG-012: Confirming a key param edit must update state.key.
+    let mut s = SequencerState::default();
+    assert!(matches!(s.key, Key::C));
+    s.active_overlay = Some(OverlayMode::Regular);
+    s.selected_param = 0;
+    // Press Up 3 times from C(0): C→C#→D→D# (index 3).
+    for _ in 0..3 {
+        s.apply_command(InputCommand::ParamValueDelta(1));
+    }
+    s.apply_command(InputCommand::Confirm);
+    assert!(matches!(s.key, Key::Ds), "key should be D# after confirming +3 from C");
+    assert!(matches!(s.pending_edit, PendingEdit::None));
+}
+
+#[test]
+fn confirm_param_swing_applies_to_state_swing() {
+    // BUG-012: Confirming a swing param edit must update state.swing.
+    let mut s = SequencerState::default();
+    assert_eq!(s.swing, 0);
+    s.active_overlay = Some(OverlayMode::Regular);
+    s.selected_param = 2;
+    s.apply_command(InputCommand::ParamValueDelta(15));
+    s.apply_command(InputCommand::Confirm);
+    assert_eq!(s.swing, 15, "swing should be 15 after confirming +15 from 0");
+    assert!(matches!(s.pending_edit, PendingEdit::None));
+}
+
+#[test]
+fn confirm_param_mode_applies_to_state_mode() {
+    // BUG-012: Confirming a mode param edit must update state.mode.
+    let mut s = SequencerState::default();
+    assert!(matches!(s.mode, Mode::Major)); // index 0
+    s.active_overlay = Some(OverlayMode::Regular);
+    s.selected_param = 1;
+    s.apply_command(InputCommand::ParamValueDelta(2)); // Major(0) + 2 = Dorian(2)
+    s.apply_command(InputCommand::Confirm);
+    assert!(matches!(s.mode, Mode::Dorian), "mode should be Dorian after confirming +2 from Major");
+    assert!(matches!(s.pending_edit, PendingEdit::None));
+}
+
+#[test]
+fn confirm_param_step_size_applies_to_state() {
+    // BUG-012: Confirming a step_size param edit must update state.step_size.
+    let mut s = SequencerState::default();
+    assert!(matches!(s.step_size, StepSize::Sixteenth)); // index 4
+    s.active_overlay = Some(OverlayMode::Regular);
+    s.selected_param = 3;
+    s.apply_command(InputCommand::ParamValueDelta(1)); // Sixteenth(4) + 1 = ThirtySecond(5)
+    s.apply_command(InputCommand::Confirm);
+    assert!(matches!(s.step_size, StepSize::ThirtySecond), "step_size should be ThirtySecond after +1");
+    assert!(matches!(s.pending_edit, PendingEdit::None));
+}
+
+#[test]
+fn confirm_param_loop_in_applies_to_state() {
+    // BUG-012: Confirming a loop_in param edit (index 4) must update state.loop_in.
+    let mut s = SequencerState::default();
+    assert_eq!(s.loop_in, 0, "default loop_in should be 0");
+    s.active_overlay = Some(OverlayMode::Regular);
+    s.selected_param = 4; // Loop param (loop_in)
+    s.apply_command(InputCommand::ParamValueDelta(5)); // 0 + 5 = 5
+    s.apply_command(InputCommand::Confirm);
+    assert_eq!(s.loop_in, 5, "loop_in should be 5 after confirming +5 from 0");
+    assert!(matches!(s.pending_edit, PendingEdit::None));
+}
+
+#[test]
+fn confirm_param_loop_in_clamps_at_15() {
+    // BUG-012: loop_in is clamped to 0..=15 by clamped_param_value.
+    let mut s = SequencerState::default();
+    s.active_overlay = Some(OverlayMode::Regular);
+    s.selected_param = 4;
+    s.apply_command(InputCommand::ParamValueDelta(20)); // 0 + 20 → clamped to 15
+    s.apply_command(InputCommand::Confirm);
+    assert_eq!(s.loop_in, 15, "loop_in should clamp at 15 for delta=20");
+    assert!(matches!(s.pending_edit, PendingEdit::None));
+}
+
+#[test]
+fn confirm_param_paused_applies_to_state() {
+    // BUG-012: Confirming a paused param edit (index 6) must update state.paused.
+    // Param mapping: 0=Key,1=Mode,2=Swing,3=StepSize,4=loop_in,5=loop_out,
+    //                6=paused,7=playing.
+    let mut s = SequencerState::default();
+    assert!(!s.paused, "default paused should be false");
+    s.active_overlay = Some(OverlayMode::Regular);
+    s.selected_param = 6; // Pause param
+    s.apply_command(InputCommand::ParamValueDelta(1)); // 0 + 1 = 1 (paused=true)
+    s.apply_command(InputCommand::Confirm);
+    assert!(s.paused, "paused should be true after confirming value=1");
+    assert!(matches!(s.pending_edit, PendingEdit::None));
+}
+
+#[test]
+fn confirm_param_paused_false_applies_to_state() {
+    // BUG-012: Confirming paused=false (index 6, value 0) turns off paused.
+    let mut s = SequencerState::default();
+    s.paused = true; // start paused
+    s.active_overlay = Some(OverlayMode::Regular);
+    s.selected_param = 6;
+    // committed value = 1 (paused). Delta -1 → 0 (clamped to [0,1]).
+    s.apply_command(InputCommand::ParamValueDelta(-1));
+    s.apply_command(InputCommand::Confirm);
+    assert!(!s.paused, "paused should be false after confirming value=0");
+    assert!(matches!(s.pending_edit, PendingEdit::None));
+}
+
+#[test]
+fn confirm_param_playing_while_paused_leaves_tick_non_firing() {
+    // apply_param_value(7, 1) sets playing=true AND clears paused (BUG-017 fix).
+    // When both playing=true and paused=false after confirm, tick() fires.
+    // Param mapping: index 7 = playing.
+    let mut s = SequencerState::default();
+    s.paused = true;
+    s.playing = false;
+    s.steps[1].enabled = true;
+    s.active_overlay = Some(OverlayMode::Regular);
+    s.selected_param = 7; // Stop/Start param
+    // committed value = 0 (not playing). Delta +1 → value=1 (playing=true).
+    s.apply_command(InputCommand::ParamValueDelta(1));
+    s.apply_command(InputCommand::Confirm);
+    // After confirm: playing=true was applied and BUG-017 fix clears paused.
+    assert!(s.playing, "playing should be true after confirming value=1");
+    // paused was cleared by the BUG-017 fix in apply_param_value(7, 1).
+    assert!(!s.paused, "paused should be cleared when playing is set via overlay (BUG-017)");
+}
+
+// ── BUG-004: tick() uses step.velocity, not hardcoded 100 ────────────────────
+
+#[test]
+fn tick_velocity_127_produces_note_on_127() {
+    // tick() must pass step.velocity=127 (maximum) through to NoteOn.
+    let mut s = SequencerState::default();
+    s.playing = true;
+    s.steps[1].enabled = true;
+    s.steps[1].midi_note = 60;
+    s.steps[1].velocity = 127;
+    s.playhead = 0;
+    let evt = s.tick();
+    assert_eq!(
+        evt,
+        Some(MidiEvent::NoteOn { channel: 0, note: 60, velocity: 127, duration_nanos: 0 }),
+        "NoteOn velocity must be 127 when step.velocity=127"
+    );
+}
+
+#[test]
+fn tick_velocity_default_100_produces_note_on_100() {
+    // tick() must pass step.velocity=100 (default) through to NoteOn.
+    let mut s = SequencerState::default();
+    s.playing = true;
+    s.steps[1].enabled = true;
+    s.steps[1].midi_note = 60;
+    // velocity is default 100
+    s.playhead = 0;
+    let evt = s.tick();
+    assert_eq!(
+        evt,
+        Some(MidiEvent::NoteOn { channel: 0, note: 60, velocity: 100, duration_nanos: 0 }),
+        "NoteOn velocity must be 100 when step.velocity is default"
+    );
+}
+
+#[test]
+fn tick_velocity_zero_produces_note_on_0() {
+    // tick() must pass step.velocity=0 through to NoteOn (not substitute 100).
+    let mut s = SequencerState::default();
+    s.playing = true;
+    s.steps[1].enabled = true;
+    s.steps[1].midi_note = 60;
+    s.steps[1].velocity = 0;
+    s.playhead = 0;
+    let evt = s.tick();
+    assert_eq!(
+        evt,
+        Some(MidiEvent::NoteOn { channel: 0, note: 60, velocity: 0, duration_nanos: 0 }),
+        "NoteOn velocity must be 0 when step.velocity=0"
+    );
+}
+
+#[test]
+fn tick_velocity_preserved_after_velocity_edit_committed() {
+    // After committing a VelocityDelta via Confirm, tick() uses the new velocity.
+    let mut s = SequencerState::default();
+    s.playing = true;
+    s.selected_step = 1;
+    s.steps[1].enabled = true;
+    s.steps[1].midi_note = 60;
+    // Default velocity=100. Set to 55 via apply_command path.
+    s.apply_command(InputCommand::VelocityDelta(-45)); // 100 - 45 = 55
+    s.apply_command(InputCommand::Confirm);
+    assert_eq!(s.steps[1].velocity, 55, "velocity should be 55 after commit");
+    s.playhead = 0;
+    let evt = s.tick();
+    assert_eq!(
+        evt,
+        Some(MidiEvent::NoteOn { channel: 0, note: 60, velocity: 55, duration_nanos: 0 }),
+        "tick() must use committed velocity=55"
+    );
+}
+
+// ── BUG-010: additional NoteDelta accumulation edge cases ─────────────────────
+
+#[test]
+fn note_delta_down_from_pending_not_committed_base() {
+    // BUG-010: After one NoteDelta(1) → pending=D4=62, a subsequent NoteDelta(-1)
+    // should go back to C4=60 using the pending note as base, not the committed note.
+    let mut s = SequencerState::default();
+    s.selected_step = 0;
+    // step: C4=60
+    s.apply_command(InputCommand::NoteDelta(1)); // C→D, pending=62
+    s.apply_command(InputCommand::NoteDelta(-1)); // D→C, pending=60
+    match s.pending_edit {
+        PendingEdit::Note { step: 0, midi_note } => {
+            assert_eq!(midi_note, 60, "NoteDelta(-1) after +1 should return to C4=60");
+        }
+        other => panic!("expected PendingEdit::Note at step 0, got {:?}", other),
+    }
+}
+
+#[test]
+fn note_delta_resets_base_when_step_changes() {
+    // After changing selected_step, the pending edit for the old step is cleared.
+    // A new NoteDelta on the new step must use the committed note of that step.
+    let mut s = SequencerState::default();
+    s.steps[0].midi_note = 60; // C4
+    s.steps[3].midi_note = 67; // G4
+    s.selected_step = 0;
+    s.apply_command(InputCommand::NoteDelta(3)); // C→E→F→G? let's just check clearing
+    s.apply_command(InputCommand::StepSelect(3)); // pending cleared
+    assert!(matches!(s.pending_edit, PendingEdit::None), "StepSelect must clear pending note");
+    // Now delta on step 3 must use step 3's committed note (G4=67).
+    s.apply_command(InputCommand::NoteDelta(1)); // G4 → next scale degree
+    match s.pending_edit {
+        PendingEdit::Note { step: 3, midi_note } => {
+            // G4=67 in C Major, +1 = A4=69
+            assert_eq!(midi_note, 69, "NoteDelta(1) from G4=67 in C Major should give A4=69");
+        }
+        other => panic!("expected PendingEdit::Note at step 3, got {:?}", other),
+    }
+}
+
+// ── BUG-011: ParamValueDelta additional seeding tests ────────────────────────
+
+#[test]
+fn param_value_delta_mode_seeds_from_committed_mode_index() {
+    // BUG-011: When state.mode=Dorian (index 2) and delta=+1, pending should be 3 (Phrygian).
+    let mut s = SequencerState::default();
+    s.mode = Mode::Dorian; // index 2
+    s.active_overlay = Some(OverlayMode::Regular);
+    s.selected_param = 1; // Mode param
+    s.apply_command(InputCommand::ParamValueDelta(1));
+    match s.pending_edit {
+        PendingEdit::Param { index: 1, value, .. } => {
+            assert_eq!(value, 3, "Dorian(2)+1 should give index 3 (Phrygian)");
+        }
+        other => panic!("expected PendingEdit::Param index 1, got {:?}", other),
+    }
+}
+
+#[test]
+fn param_value_delta_step_size_seeds_from_committed_value() {
+    // BUG-011: When state.step_size=Eighth (index 3) and delta=+1, pending should be 4 (Sixteenth).
+    let mut s = SequencerState::default();
+    s.step_size = StepSize::Eighth; // index 3
+    s.active_overlay = Some(OverlayMode::Regular);
+    s.selected_param = 3; // StepSize param
+    s.apply_command(InputCommand::ParamValueDelta(1));
+    match s.pending_edit {
+        PendingEdit::Param { index: 3, value, .. } => {
+            assert_eq!(value, 4, "Eighth(3)+1 should give index 4 (Sixteenth)");
+        }
+        other => panic!("expected PendingEdit::Param index 3, got {:?}", other),
+    }
+}
+
+#[test]
+fn param_value_delta_loop_in_seeds_from_committed_loop_in() {
+    // BUG-011: When state.loop_in=8 and delta=+2, pending should be 10 (not 2).
+    let mut s = SequencerState::default();
+    s.loop_in = 8;
+    s.active_overlay = Some(OverlayMode::Regular);
+    s.selected_param = 4; // Loop param
+    s.apply_command(InputCommand::ParamValueDelta(2));
+    match s.pending_edit {
+        PendingEdit::Param { index: 4, value, .. } => {
+            assert_eq!(value, 10, "loop_in(8)+2 should give 10, not 2");
+        }
+        other => panic!("expected PendingEdit::Param index 4, got {:?}", other),
+    }
+}

@@ -254,7 +254,7 @@ impl SequencerState {
             }
             InputCommand::NoteDelta(d) => {
                 let step = self.selected_step;
-                // Seed from pending note so repeated presses accumulate correctly.
+                // BUG-010 fix: use pending note as base so repeated presses accumulate.
                 let base_note = match self.pending_edit {
                     PendingEdit::Note { step: ps, midi_note } if ps == step => midi_note,
                     _ => self.steps[step].midi_note,
@@ -278,7 +278,7 @@ impl SequencerState {
                         self.pending_edit = PendingEdit::None;
                     }
                     PendingEdit::Param { index, value, .. } => {
-                        // Apply the pending param value to the matching state field.
+                        // BUG-012 fix: apply the pending param value to the state field.
                         self.apply_param_value(index, value);
                         self.pending_edit = PendingEdit::None;
                     }
@@ -321,8 +321,8 @@ impl SequencerState {
                     None => return, // No overlay open — ignore.
                 };
                 let index = self.selected_param;
-                // Seed from the current committed state value so the pending value
-                // is always in the same unit space as the state field.
+                // BUG-011 fix: seed from the current committed state value so the
+                // pending value is always in the same unit space as the state field.
                 let current_value = match self.pending_edit {
                     PendingEdit::Param { index: pi, value, .. } if pi == index => value,
                     _ => self.committed_param_value(index),
