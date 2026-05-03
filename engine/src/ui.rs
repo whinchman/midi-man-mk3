@@ -29,18 +29,20 @@
 //! rendering starts.  The render never holds the lock.
 
 use std::io;
-use std::sync::{Arc, RwLock};
 use std::sync::mpsc::{Receiver, SyncSender};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
 use crossterm::ExecutableCommand;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
-use crate::input::{InputCommand, KeyCodeSimple, OverlayMode};
 use crate::input::{overlay_key_to_command, root_key_to_command, shift_action_key_to_command};
+use crate::input::{InputCommand, KeyCodeSimple, OverlayMode};
 use crate::state::SequencerState;
 use crate::ui_render::render_frame;
 
@@ -76,7 +78,10 @@ struct UiState {
 
 impl UiState {
     fn new() -> Self {
-        Self { overlay: None, selected_param: 0 }
+        Self {
+            overlay: None,
+            selected_param: 0,
+        }
     }
 }
 
@@ -91,8 +96,13 @@ fn to_simple(code: KeyCode) -> KeyCodeSimple {
         KeyCode::Char(c) => KeyCodeSimple::Char(c),
         KeyCode::Enter => KeyCodeSimple::Enter,
         KeyCode::Esc => KeyCodeSimple::Esc,
+        KeyCode::Backspace => KeyCodeSimple::Backspace,
         KeyCode::F(1) => KeyCodeSimple::F1,
         KeyCode::F(2) => KeyCodeSimple::F2,
+        KeyCode::F(3) => KeyCodeSimple::F3,
+        KeyCode::F(4) => KeyCodeSimple::F4,
+        KeyCode::Char('+') | KeyCode::Char('=') => KeyCodeSimple::Plus,
+        KeyCode::Char('-') => KeyCodeSimple::Minus,
         _ => KeyCodeSimple::Other,
     }
 }
@@ -180,9 +190,7 @@ pub fn run_ui(
     loop {
         // ── Render ───────────────────────────────────────────────────────────
         // Acquire read lock, clone state, release lock, then render.
-        let snapshot = {
-            state.read().expect("run_ui: state RwLock poisoned").clone()
-        };
+        let snapshot = { state.read().expect("run_ui: state RwLock poisoned").clone() };
         let overlay = ui.overlay;
         let selected_param = ui.selected_param;
         if let Err(e) = terminal.draw(|frame| {
