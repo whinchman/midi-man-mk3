@@ -37,6 +37,8 @@ The current implementation only adjusts `tv_nsec` and clamps to 0 when negative,
 
 ## Notes
 
+QA pass (2026-05-02): Added 12 new tests to `engine/tests/clock.rs` covering the actual epoch-clamp path (sub-second start going below zero), zero-offset identity, multi-second positive/negative spans, and 120 BPM swing integration scenarios (+50 delay, -50 advance, -50 clamp-to-epoch). Clock test count increased from 32 to 44. Full suite: 261 tests, 0 failures. Commit: 07c21b2 on branch `task/fix-clock-nanosleep-borrow`.
+
 The fix was already present in `fix/known-bugs` at the time the task was dispatched. `add_nanos_signed` in `engine/src/clock.rs` (lines 125–132) correctly computes the total in full nanoseconds before re-normalising, handling borrow across the second boundary. The test `add_nanos_signed_clamps_to_zero` in `engine/tests/clock.rs` already asserts both `tv_sec=0` and `tv_nsec=900_000_000` for the boundary-crossing case (`tv_sec=1, tv_nsec=100_000_000, nanos=-200_000_000`). An additional test `add_nanos_signed_negative_crosses_second_boundary` covers the 120 BPM swing scenario. All 249 tests pass.
 
 Branch: `task/fix-clock-nanosleep-borrow` (worktree at `.workflow/worktrees/fix-clock-nanosleep-borrow`), based off `fix/known-bugs`.
