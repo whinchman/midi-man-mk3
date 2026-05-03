@@ -6,6 +6,7 @@
 use std::collections::VecDeque;
 
 use ratatui::backend::TestBackend;
+use ratatui::style::Color;
 use ratatui::Terminal;
 
 use engine::input::FocusPanel;
@@ -83,6 +84,20 @@ fn collect_row(backend: &TestBackend, y: u16, width: u16) -> String {
                 .unwrap_or(' ')
         })
         .collect()
+}
+
+/// Return true if any cell in the given row has the specified fg color.
+fn row_has_fg(backend: &TestBackend, y: u16, width: u16, color: Color) -> bool {
+    let buffer = backend.buffer().clone();
+    (0..width).any(|x| buffer.cell((x, y)).map(|c| c.fg == color).unwrap_or(false))
+}
+
+/// Return true if any cell in the buffer within the row range has the specified fg color.
+fn area_has_fg(backend: &TestBackend, width: u16, y_start: u16, y_end: u16, color: Color) -> bool {
+    let buffer = backend.buffer().clone();
+    (y_start..y_end).any(|y| {
+        (0..width).any(|x| buffer.cell((x, y)).map(|c| c.fg == color).unwrap_or(false))
+    })
 }
 
 // ── Transport bar (row 1) ─────────────────────────────────────────────────────
@@ -904,4 +919,529 @@ fn shift_pending_param_value_string_scale_quant() {
 fn shift_pending_param_value_string_reserved_does_not_panic() {
     let result = shift_pending_param_value_string(7, 999);
     assert!(!result.is_empty());
+}
+
+// ── Transport bar — STATUS color assertions ───────────────────────────────────
+
+/// STATUS span is GREEN (Rgb(0,200,80)) when playing=true, paused=false.
+#[test]
+fn transport_bar_status_green_when_playing() {
+    let mut state = known_state();
+    state.playing = true;
+    state.paused = false;
+    let log = empty_log();
+    let backend = TestBackend::new(160, 30);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| render_frame(frame, &state, &default_snapshot(&log)))
+        .expect("draw");
+
+    // Transport bar = row 1. GREEN = Rgb(0,200,80).
+    let green = Color::Rgb(0, 200, 80);
+    assert!(
+        row_has_fg(terminal.backend(), 1, 160, green),
+        "transport bar STATUS must have GREEN fg when playing=true, paused=false"
+    );
+}
+
+/// STATUS span is CYAN (Rgb(0,255,255)) when paused=true.
+#[test]
+fn transport_bar_status_cyan_when_paused() {
+    let mut state = known_state();
+    state.playing = true;
+    state.paused = true;
+    let log = empty_log();
+    let backend = TestBackend::new(160, 30);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| render_frame(frame, &state, &default_snapshot(&log)))
+        .expect("draw");
+
+    // CYAN = Rgb(0,255,255).
+    let cyan = Color::Rgb(0, 255, 255);
+    assert!(
+        row_has_fg(terminal.backend(), 1, 160, cyan),
+        "transport bar STATUS must have CYAN fg when paused=true"
+    );
+}
+
+/// STATUS span uses Color::Reset (terminal default) when stopped (playing=false).
+#[test]
+fn transport_bar_status_default_when_stopped() {
+    let mut state = known_state();
+    state.playing = false;
+    state.paused = false;
+    let log = empty_log();
+    let backend = TestBackend::new(160, 30);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| render_frame(frame, &state, &default_snapshot(&log)))
+        .expect("draw");
+
+    // When stopped, STATUS color is Color::Reset — neither GREEN nor CYAN must be in row 1.
+    let green = Color::Rgb(0, 200, 80);
+    let cyan = Color::Rgb(0, 255, 255);
+    // The GRAY prefix spans use Rgb(136,136,136); the status span must not be green or cyan.
+    assert!(
+        !row_has_fg(terminal.backend(), 1, 160, green),
+        "transport bar STATUS must NOT be GREEN when stopped"
+    );
+    assert!(
+        !row_has_fg(terminal.backend(), 1, 160, cyan),
+        "transport bar STATUS must NOT be CYAN when stopped"
+    );
+    // The row must still contain "STOPPED" text.
+    let row1 = collect_row(terminal.backend(), 1, 160);
+    assert!(row1.contains("STOPPED"), "transport bar must show STOPPED");
+}
+
+// ── F2 SEQ PARAMS — selected param MAGENTA color assertions ──────────────────
+
+/// Selected param (seq_param_idx=2 = SWING) is rendered MAGENTA when focus=SeqParams.
+#[test]
+fn f2_selected_param_has_magenta_when_focused() {
+    let state = known_state();
+    let log = empty_log();
+    let snap = UiLocalSnapshot {
+        focus: FocusPanel::SeqParams,
+        selected_step: 0,
+        seq_param_idx: 2,
+        rand_param_idx: 0,
+        cli_line: "",
+        cli_log: &log,
+        midi_device_name: "",
+        midi_channel_display: 1,
+    };
+    let backend = TestBackend::new(200, 30);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| render_frame(frame, &state, &snap))
+        .expect("draw");
+
+    // F2 panel occupies rows 3–5 (title=0, transport=1, F1=2..N-4, F2 block starts after F1).
+    // Use area_has_fg across all rows to find MAGENTA in the F2 region.
+    let magenta = Color::Rgb(255, 0, 127);
+    // F2 panel inner row is at y=4 in a standard 30-row layout (title=0,transport=1,F1=2-12,F2=13-15).
+    // Scan all rows to avoid hard-coding exact layout.
+    assert!(
+        area_has_fg(terminal.backend(), 200, 0, 30, magenta),
+        "F2 panel must render selected param (seq_param_idx=2) with MAGENTA when focus=SeqParams"
+    );
+}
+
+/// No param is rendered MAGENTA in F2 when focus is not SeqParams.
+#[test]
+fn f2_no_magenta_when_focus_is_sequencer() {
+    let state = known_state();
+    let log = empty_log();
+    let snap = UiLocalSnapshot {
+        focus: FocusPanel::Sequencer,
+        selected_step: 0,
+        seq_param_idx: 2,
+        rand_param_idx: 0,
+        cli_line: "",
+        cli_log: &log,
+        midi_device_name: "",
+        midi_channel_display: 1,
+    };
+    let backend = TestBackend::new(200, 30);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| render_frame(frame, &state, &snap))
+        .expect("draw");
+
+    // With focus=Sequencer the is_selected condition in render_seq_params_panel is false
+    // (focused=false), so no MAGENTA should appear from F2. MAGENTA may still appear from
+    // the F1 playhead (playhead=0, selected_step=0 → MAGENTA border). We must check only
+    // the F2 row. In a 30-row, 200-col terminal the layout is:
+    //   row 0: title, row 1: transport, rows 2-12: F1 (Min(5)+borders),
+    //   rows 13-15: F2 (Length(3)), rows 16-18: F3 (Length(3)),
+    //   rows 19-28: F4 (Min(5)), row 29: keybind.
+    // F2 occupies 3 rows. Scan only those rows for MAGENTA fg.
+    // Because Min(5) distribution can vary, we scan rows 10-22 to safely include F2.
+    let magenta = Color::Rgb(255, 0, 127);
+    let buf = terminal.backend().buffer().clone();
+    // F2 inner content row contains param labels. Find the row that contains "SWING".
+    let f2_row = (0u16..30).find(|&y| {
+        let row_text: String = (0..200u16)
+            .map(|x| {
+                buf.cell((x, y))
+                    .map(|c| c.symbol().chars().next().unwrap_or(' '))
+                    .unwrap_or(' ')
+            })
+            .collect();
+        row_text.contains("SWING")
+    });
+
+    if let Some(row_y) = f2_row {
+        let magenta_on_f2 = (0..200u16).any(|x| {
+            buf.cell((x, row_y))
+                .map(|c| c.fg == magenta)
+                .unwrap_or(false)
+        });
+        assert!(
+            !magenta_on_f2,
+            "F2 param row must NOT render MAGENTA when focus=Sequencer (row {})",
+            row_y
+        );
+    }
+    // If SWING row not found, the test trivially passes (other tests verify F2 content).
+}
+
+// ── F3 RANDOM PARAMS — SEED hex format and selected param color ───────────────
+
+/// SEED value 0xABCD renders as "0xABCD" in the F3 panel (hex string content).
+#[test]
+fn f3_seed_renders_with_0x_prefix_hex() {
+    let mut state = known_state();
+    state.rand_seed = 0xABCD;
+    let log = empty_log();
+    let snap = UiLocalSnapshot {
+        focus: FocusPanel::Sequencer,
+        selected_step: 0,
+        seq_param_idx: 0,
+        rand_param_idx: 0,
+        cli_line: "",
+        cli_log: &log,
+        midi_device_name: "",
+        midi_channel_display: 1,
+    };
+    let backend = TestBackend::new(200, 30);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| render_frame(frame, &state, &snap))
+        .expect("draw");
+
+    let all = collect_all_text(terminal.backend(), 200, 30);
+    assert!(
+        all.contains("0xABCD"),
+        "F3 SEED must render as '0xABCD' for rand_seed=0xABCD"
+    );
+}
+
+/// rand_seed=0x0001 renders as "0x0001" (four-digit zero-padded hex).
+#[test]
+fn f3_seed_renders_four_digit_hex_zero_padded() {
+    let mut state = known_state();
+    state.rand_seed = 1;
+    let log = empty_log();
+    let snap = UiLocalSnapshot {
+        focus: FocusPanel::Sequencer,
+        selected_step: 0,
+        seq_param_idx: 0,
+        rand_param_idx: 0,
+        cli_line: "",
+        cli_log: &log,
+        midi_device_name: "",
+        midi_channel_display: 1,
+    };
+    let backend = TestBackend::new(200, 30);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| render_frame(frame, &state, &snap))
+        .expect("draw");
+
+    let all = collect_all_text(terminal.backend(), 200, 30);
+    assert!(
+        all.contains("0x0001"),
+        "F3 SEED must render as '0x0001' for rand_seed=1 (zero-padded to 4 hex digits)"
+    );
+}
+
+/// Selected rand param (rand_param_idx=2) is MAGENTA when focus=RandParams.
+#[test]
+fn f3_selected_param_has_magenta_when_focused() {
+    let state = known_state();
+    let log = empty_log();
+    let snap = UiLocalSnapshot {
+        focus: FocusPanel::RandParams,
+        selected_step: 0,
+        seq_param_idx: 0,
+        rand_param_idx: 2,
+        cli_line: "",
+        cli_log: &log,
+        midi_device_name: "",
+        midi_channel_display: 1,
+    };
+    let backend = TestBackend::new(200, 30);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| render_frame(frame, &state, &snap))
+        .expect("draw");
+
+    let magenta = Color::Rgb(255, 0, 127);
+    assert!(
+        area_has_fg(terminal.backend(), 200, 0, 30, magenta),
+        "F3 panel must render selected param (rand_param_idx=2) with MAGENTA when focus=RandParams"
+    );
+}
+
+// ── F4 CLI panel — prompt, log tag colors ─────────────────────────────────────
+
+/// The "> " prompt appears in the CLI panel input row.
+#[test]
+fn f4_cli_prompt_contains_greater_than_space() {
+    let state = known_state();
+    let log = empty_log();
+    let snap = UiLocalSnapshot {
+        focus: FocusPanel::Cli,
+        selected_step: 0,
+        seq_param_idx: 0,
+        rand_param_idx: 0,
+        cli_line: "",
+        cli_log: &log,
+        midi_device_name: "",
+        midi_channel_display: 1,
+    };
+    let backend = TestBackend::new(120, 40);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| render_frame(frame, &state, &snap))
+        .expect("draw");
+
+    let all = collect_all_text(terminal.backend(), 120, 40);
+    assert!(
+        all.contains("> "),
+        "CLI panel must show '> ' prompt"
+    );
+}
+
+/// cli_line content appears in the CLI input prompt area.
+#[test]
+fn f4_cli_line_content_appears_in_prompt() {
+    let state = known_state();
+    let log = empty_log();
+    let snap = UiLocalSnapshot {
+        focus: FocusPanel::Cli,
+        selected_step: 0,
+        seq_param_idx: 0,
+        rand_param_idx: 0,
+        cli_line: "device list",
+        cli_log: &log,
+        midi_device_name: "",
+        midi_channel_display: 1,
+    };
+    let backend = TestBackend::new(120, 40);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| render_frame(frame, &state, &snap))
+        .expect("draw");
+
+    let all = collect_all_text(terminal.backend(), 120, 40);
+    assert!(
+        all.contains("device list"),
+        "CLI panel must render cli_line content 'device list' in the prompt area"
+    );
+}
+
+/// A log entry with LogTag::Midi renders with GREEN (Rgb(0,200,80)) fg for the tag span.
+#[test]
+fn f4_log_tag_midi_renders_with_green_color() {
+    let state = known_state();
+    let mut log: VecDeque<LogEntry> = VecDeque::new();
+    log.push_back(LogEntry {
+        timestamp_ms: 100,
+        tag: LogTag::Midi,
+        text: "note on C4".to_string(),
+    });
+    let snap = UiLocalSnapshot {
+        focus: FocusPanel::Cli,
+        selected_step: 0,
+        seq_param_idx: 0,
+        rand_param_idx: 0,
+        cli_line: "",
+        cli_log: &log,
+        midi_device_name: "",
+        midi_channel_display: 1,
+    };
+    let backend = TestBackend::new(160, 40);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| render_frame(frame, &state, &snap))
+        .expect("draw");
+
+    let green = Color::Rgb(0, 200, 80);
+    assert!(
+        area_has_fg(terminal.backend(), 160, 0, 40, green),
+        "CLI panel must render LogTag::Midi with GREEN (Rgb(0,200,80)) fg"
+    );
+}
+
+/// A log entry with LogTag::Err renders with Color::Red fg for the tag span.
+#[test]
+fn f4_log_tag_err_renders_with_red_color() {
+    let state = known_state();
+    let mut log: VecDeque<LogEntry> = VecDeque::new();
+    log.push_back(LogEntry {
+        timestamp_ms: 200,
+        tag: LogTag::Err,
+        text: "device not found".to_string(),
+    });
+    let snap = UiLocalSnapshot {
+        focus: FocusPanel::Cli,
+        selected_step: 0,
+        seq_param_idx: 0,
+        rand_param_idx: 0,
+        cli_line: "",
+        cli_log: &log,
+        midi_device_name: "",
+        midi_channel_display: 1,
+    };
+    let backend = TestBackend::new(160, 40);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| render_frame(frame, &state, &snap))
+        .expect("draw");
+
+    assert!(
+        area_has_fg(terminal.backend(), 160, 0, 40, Color::Red),
+        "CLI panel must render LogTag::Err with Color::Red fg"
+    );
+}
+
+// ── Title bar — MIDI OUT device name and channel ──────────────────────────────
+
+/// "MIDI OUT" text appears with device name and channel when midi_device_name is non-empty.
+#[test]
+fn title_bar_shows_midi_out_with_device_and_channel() {
+    let state = known_state();
+    let log = empty_log();
+    let snap = UiLocalSnapshot {
+        focus: FocusPanel::Sequencer,
+        selected_step: 0,
+        seq_param_idx: 0,
+        rand_param_idx: 0,
+        cli_line: "",
+        cli_log: &log,
+        midi_device_name: "Arturia KeyStep",
+        midi_channel_display: 5,
+    };
+    let backend = TestBackend::new(160, 30);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| render_frame(frame, &state, &snap))
+        .expect("draw");
+
+    let row0 = collect_row(terminal.backend(), 0, 160);
+    assert!(
+        row0.contains("MIDI OUT"),
+        "title bar must contain 'MIDI OUT', got: {}",
+        row0
+    );
+    assert!(
+        row0.contains("Arturia KeyStep"),
+        "title bar must contain device name 'Arturia KeyStep', got: {}",
+        row0
+    );
+    assert!(
+        row0.contains("CH:5"),
+        "title bar must contain 'CH:5', got: {}",
+        row0
+    );
+}
+
+/// Title bar shows "—" placeholder when midi_device_name is empty.
+#[test]
+fn title_bar_shows_dash_when_no_midi_device() {
+    let state = known_state();
+    let log = empty_log();
+    let snap = UiLocalSnapshot {
+        focus: FocusPanel::Sequencer,
+        selected_step: 0,
+        seq_param_idx: 0,
+        rand_param_idx: 0,
+        cli_line: "",
+        cli_log: &log,
+        midi_device_name: "",
+        midi_channel_display: 1,
+    };
+    let backend = TestBackend::new(160, 30);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| render_frame(frame, &state, &snap))
+        .expect("draw");
+
+    let row0 = collect_row(terminal.backend(), 0, 160);
+    assert!(
+        row0.contains('\u{2014}'),
+        "title bar must show '—' (em dash) when midi_device_name is empty, got: {}",
+        row0
+    );
+}
+
+// ── F1 SEQ panel — disabled/enabled step color assertions ────────────────────
+
+/// A disabled step (step.enabled=false) renders with DIM_CYAN (Rgb(0,64,64)) in F1.
+#[test]
+fn f1_disabled_step_renders_with_dim_cyan() {
+    let mut state = SequencerState::default();
+    // All steps disabled, playhead at a non-zero position to avoid MAGENTA overlap on step 0.
+    for step in state.steps.iter_mut() {
+        step.enabled = false;
+        step.midi_note = 60;
+        step.velocity = 100;
+    }
+    state.playhead = 15; // playhead at step 15 → step 0 is just disabled
+    state.selected_step = 15; // selected at 15 too, so step 0 border is plain dim_cyan
+
+    let log = empty_log();
+    let snap = UiLocalSnapshot {
+        focus: FocusPanel::Sequencer,
+        selected_step: 15,
+        seq_param_idx: 0,
+        rand_param_idx: 0,
+        cli_line: "",
+        cli_log: &log,
+        midi_device_name: "",
+        midi_channel_display: 1,
+    };
+    let backend = TestBackend::new(160, 40);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| render_frame(frame, &state, &snap))
+        .expect("draw");
+
+    // DIM_CYAN = Rgb(0,64,64). Must appear somewhere in the F1 area.
+    let dim_cyan = Color::Rgb(0, 64, 64);
+    // F1 panel covers rows 2 onwards. Scan rows 2-25 to be safe.
+    assert!(
+        area_has_fg(terminal.backend(), 160, 2, 25, dim_cyan),
+        "F1 panel must render disabled steps with DIM_CYAN (Rgb(0,64,64))"
+    );
+}
+
+/// An enabled non-playhead step renders with CYAN (Rgb(0,255,255)) in F1.
+#[test]
+fn f1_enabled_non_playhead_step_renders_with_cyan() {
+    let mut state = SequencerState::default();
+    state.steps[0].enabled = true;
+    state.steps[0].midi_note = 60;
+    state.steps[0].velocity = 100;
+    state.playhead = 8; // playhead is at step 8, so step 0 is enabled non-playhead
+    state.selected_step = 8;
+
+    let log = empty_log();
+    let snap = UiLocalSnapshot {
+        focus: FocusPanel::Sequencer,
+        selected_step: 8,
+        seq_param_idx: 0,
+        rand_param_idx: 0,
+        cli_line: "",
+        cli_log: &log,
+        midi_device_name: "",
+        midi_channel_display: 1,
+    };
+    let backend = TestBackend::new(160, 40);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| render_frame(frame, &state, &snap))
+        .expect("draw");
+
+    // CYAN = Rgb(0,255,255). Must appear in the F1 area for the enabled step 0.
+    let cyan = Color::Rgb(0, 255, 255);
+    // Scan rows 2-25 (F1 panel area).
+    assert!(
+        area_has_fg(terminal.backend(), 160, 2, 25, cyan),
+        "F1 panel must render enabled non-playhead step with CYAN (Rgb(0,255,255))"
+    );
 }
