@@ -501,6 +501,39 @@ mod tests {
     }
 
     #[test]
+    fn hid_log_to_writes_unix_epoch_seconds_prefix() {
+        // Locks in the on-disk format documented in `hid_log_to`: a
+        // `[<seconds>] <msg>\n` line where `<seconds>` is the Unix epoch
+        // seconds count (NOT an ISO-8601 timestamp — see reviewer note #2 on
+        // GH #75).  If the format ever changes, this test must be updated in
+        // the same commit that touches the format so log consumers know.
+        let p = unique_tmp("epoch");
+        let _ = std::fs::remove_file(&p);
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        hid_log_to(&p, "ts-check").expect("write");
+        let after = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let body = std::fs::read_to_string(&p).expect("read");
+        // Format: "[<digits>] ts-check\n"
+        let line = body.trim_end_matches('\n');
+        assert!(line.starts_with('['), "body was: {body:?}");
+        let close = line.find(']').expect("closing bracket");
+        let secs_str = &line[1..close];
+        let secs: u64 = secs_str.parse().expect("epoch seconds parse");
+        assert!(
+            secs >= before && secs <= after + 1,
+            "ts {secs} not in [{before}, {after}]"
+        );
+        assert!(line[close + 1..].contains("ts-check"));
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
     fn hid_log_does_not_panic_when_default_path_missing() {
         // Default path `.workflow/logs/hid.log` may not exist relative to the
         // test binary's cwd; the function must still not panic.  We do not
