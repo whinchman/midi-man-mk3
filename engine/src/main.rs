@@ -13,12 +13,12 @@
 //   Shutdown order: set hid_shutdown flag → join hid_thread → drop cmd_tx → join cmd_thread
 //   → join clock_thread → join midi_thread
 
-use std::sync::{Arc, RwLock, mpsc};
+use engine::cli::{parse_args_from_iter, CliArgs};
+use engine::input::InputCommand;
+use engine::state::{MidiEvent, SequencerState};
 #[cfg(feature = "hw-io")]
 use std::sync::atomic::{AtomicBool, Ordering};
-use engine::state::{MidiEvent, SequencerState};
-use engine::input::InputCommand;
-use engine::cli::{CliArgs, parse_args_from_iter};
+use std::sync::{mpsc, Arc, RwLock};
 
 fn parse_args() -> CliArgs {
     parse_args_from_iter(std::env::args().skip(1))
@@ -102,7 +102,16 @@ fn main() {
         let hid_shutdown_flag = Arc::clone(&hid_shutdown);
         std::thread::Builder::new()
             .name("hid".to_owned())
-            .spawn(move || engine::hid::run_hid(hid_cmd_tx, hid_state, hid_notify, vid, pid, hid_shutdown_flag))
+            .spawn(move || {
+                engine::hid::run_hid(
+                    hid_cmd_tx,
+                    hid_state,
+                    hid_notify,
+                    vid,
+                    pid,
+                    hid_shutdown_flag,
+                )
+            })
             .expect("failed to spawn hid thread")
     };
 
@@ -115,7 +124,8 @@ fn main() {
         .spawn(move || {
             while let Ok(cmd) = cmd_rx.recv() {
                 {
-                    let mut s = cmd_state.write()
+                    let mut s = cmd_state
+                        .write()
                         .expect("cmd-processor: state RwLock poisoned");
                     s.apply_command(cmd);
                 }

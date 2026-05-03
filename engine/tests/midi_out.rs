@@ -1,4 +1,7 @@
-use engine::midi_out::{dispatch, run_midi_out_with_sender, select_port_idx, MidiSender};
+use engine::midi_out::{
+    dispatch, run_midi_out_with_open_fn, run_midi_out_with_sender, select_port_idx, MidiCtrlMsg,
+    MidiSender,
+};
 use engine::state::MidiEvent;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -15,7 +18,12 @@ struct MockSender {
 impl MockSender {
     fn new() -> (Self, Log) {
         let log: Log = Arc::new(Mutex::new(Vec::new()));
-        (Self { log: Arc::clone(&log) }, log)
+        (
+            Self {
+                log: Arc::clone(&log),
+            },
+            log,
+        )
     }
 }
 
@@ -25,7 +33,9 @@ impl MidiSender for MockSender {
     }
 
     fn try_clone(&self) -> Box<dyn MidiSender> {
-        Box::new(MockSender { log: Arc::clone(&self.log) })
+        Box::new(MockSender {
+            log: Arc::clone(&self.log),
+        })
     }
 }
 
@@ -41,7 +51,12 @@ fn note_on_sends_correct_bytes_immediately() {
     let mut sender = boxed(mock);
     dispatch(
         &mut sender,
-        MidiEvent::NoteOn { channel: 0, note: 60, velocity: 100, duration_nanos: 0 },
+        MidiEvent::NoteOn {
+            channel: 0,
+            note: 60,
+            velocity: 100,
+            duration_nanos: 0,
+        },
     );
     // Give the spawned note-off thread (duration_nanos=0) a moment to flush.
     thread::sleep(Duration::from_millis(20));
@@ -56,17 +71,30 @@ fn note_on_spawns_note_off_after_duration() {
     let mut sender = boxed(mock);
     dispatch(
         &mut sender,
-        MidiEvent::NoteOn { channel: 0, note: 60, velocity: 100, duration_nanos: 1_000_000 }, // 1 ms
+        MidiEvent::NoteOn {
+            channel: 0,
+            note: 60,
+            velocity: 100,
+            duration_nanos: 1_000_000,
+        }, // 1 ms
     );
     // Before duration elapses: only NoteOn (3 bytes).
     {
         let bytes = log.lock().expect("lock").clone();
-        assert_eq!(bytes.len(), 3, "only NoteOn should be present before duration elapses");
+        assert_eq!(
+            bytes.len(),
+            3,
+            "only NoteOn should be present before duration elapses"
+        );
     }
     // After duration: NoteOff bytes appended by spawned thread.
     thread::sleep(Duration::from_millis(50));
     let bytes = log.lock().expect("lock").clone();
-    assert_eq!(bytes.len(), 6, "NoteOff should be appended after duration elapses");
+    assert_eq!(
+        bytes.len(),
+        6,
+        "NoteOff should be appended after duration elapses"
+    );
     assert_eq!(&bytes[3..6], &[0x80, 60, 0], "NoteOff bytes incorrect");
 }
 
@@ -76,12 +104,23 @@ fn note_on_channel_bits_masked_correctly() {
     let mut sender = boxed(mock);
     dispatch(
         &mut sender,
-        MidiEvent::NoteOn { channel: 3, note: 72, velocity: 80, duration_nanos: 0 },
+        MidiEvent::NoteOn {
+            channel: 3,
+            note: 72,
+            velocity: 80,
+            duration_nanos: 0,
+        },
     );
     thread::sleep(Duration::from_millis(20));
     let bytes = log.lock().expect("lock").clone();
-    assert_eq!(bytes[0], 0x93, "NoteOn status byte for channel 3 should be 0x93");
-    assert_eq!(bytes[3], 0x83, "NoteOff status byte for channel 3 should be 0x83");
+    assert_eq!(
+        bytes[0], 0x93,
+        "NoteOn status byte for channel 3 should be 0x93"
+    );
+    assert_eq!(
+        bytes[3], 0x83,
+        "NoteOff status byte for channel 3 should be 0x83"
+    );
 }
 
 // --- NoteOff ---
@@ -90,7 +129,13 @@ fn note_on_channel_bits_masked_correctly() {
 fn note_off_sends_correct_bytes() {
     let (mock, log) = MockSender::new();
     let mut sender = boxed(mock);
-    dispatch(&mut sender, MidiEvent::NoteOff { channel: 0, note: 60 });
+    dispatch(
+        &mut sender,
+        MidiEvent::NoteOff {
+            channel: 0,
+            note: 60,
+        },
+    );
     let bytes = log.lock().expect("lock").clone();
     assert_eq!(&bytes[..], &[0x80, 60, 0], "NoteOff bytes incorrect");
 }
@@ -99,9 +144,18 @@ fn note_off_sends_correct_bytes() {
 fn note_off_channel_bits_masked_correctly() {
     let (mock, log) = MockSender::new();
     let mut sender = boxed(mock);
-    dispatch(&mut sender, MidiEvent::NoteOff { channel: 9, note: 36 });
+    dispatch(
+        &mut sender,
+        MidiEvent::NoteOff {
+            channel: 9,
+            note: 36,
+        },
+    );
     let bytes = log.lock().expect("lock").clone();
-    assert_eq!(bytes[0], 0x89, "NoteOff channel 9 status byte should be 0x89");
+    assert_eq!(
+        bytes[0], 0x89,
+        "NoteOff channel 9 status byte should be 0x89"
+    );
 }
 
 // --- Start ---
@@ -179,7 +233,12 @@ fn note_off_not_sent_before_duration_elapses() {
     let duration_nanos: u64 = 50_000_000; // 50 ms
     dispatch(
         &mut sender,
-        MidiEvent::NoteOn { channel: 0, note: 48, velocity: 64, duration_nanos },
+        MidiEvent::NoteOn {
+            channel: 0,
+            note: 48,
+            velocity: 64,
+            duration_nanos,
+        },
     );
     // Sample before duration: only NoteOn (3 bytes).
     thread::sleep(Duration::from_millis(10));
@@ -199,7 +258,11 @@ fn note_off_not_sent_before_duration_elapses() {
         6,
         "NoteOff must be sent after duration_nanos ({duration_nanos} ns) elapses"
     );
-    assert_eq!(&bytes[3..6], &[0x80, 48, 0], "NoteOff bytes incorrect after duration");
+    assert_eq!(
+        &bytes[3..6],
+        &[0x80, 48, 0],
+        "NoteOff bytes incorrect after duration"
+    );
 }
 
 // --- Multiple concurrent NoteOn events ---
@@ -212,21 +275,40 @@ fn concurrent_note_ons_all_note_offs_arrive_in_deadline_order() {
 
     dispatch(
         &mut sender,
-        MidiEvent::NoteOn { channel: 0, note: 60, velocity: 100, duration_nanos: 10_000_000 }, // 10 ms
+        MidiEvent::NoteOn {
+            channel: 0,
+            note: 60,
+            velocity: 100,
+            duration_nanos: 10_000_000,
+        }, // 10 ms
     );
     dispatch(
         &mut sender,
-        MidiEvent::NoteOn { channel: 0, note: 62, velocity: 100, duration_nanos: 30_000_000 }, // 30 ms
+        MidiEvent::NoteOn {
+            channel: 0,
+            note: 62,
+            velocity: 100,
+            duration_nanos: 30_000_000,
+        }, // 30 ms
     );
     dispatch(
         &mut sender,
-        MidiEvent::NoteOn { channel: 0, note: 64, velocity: 100, duration_nanos: 60_000_000 }, // 60 ms
+        MidiEvent::NoteOn {
+            channel: 0,
+            note: 64,
+            velocity: 100,
+            duration_nanos: 60_000_000,
+        }, // 60 ms
     );
 
     // All three NoteOn bytes should be present immediately (9 bytes total).
     {
         let bytes = log.lock().expect("lock").clone();
-        assert_eq!(bytes.len(), 9, "all three NoteOn messages should be sent immediately");
+        assert_eq!(
+            bytes.len(),
+            9,
+            "all three NoteOn messages should be sent immediately"
+        );
     }
 
     // Wait for all note-off threads to complete (longest = 60 ms + margin).
@@ -234,7 +316,11 @@ fn concurrent_note_ons_all_note_offs_arrive_in_deadline_order() {
 
     let bytes = log.lock().expect("lock").clone();
     // 3 NoteOn (9 bytes) + 3 NoteOff (9 bytes) = 18 bytes total.
-    assert_eq!(bytes.len(), 18, "all three NoteOff messages should have arrived");
+    assert_eq!(
+        bytes.len(),
+        18,
+        "all three NoteOff messages should have arrived"
+    );
 
     // Collect NoteOff bytes (positions 9, 12, 15).
     let off0 = &bytes[9..12];
@@ -323,10 +409,9 @@ fn select_port_idx_matches_last_port() {
 // -----------------------------------------------------------------------
 // BUG-016 acceptance: select_port_idx fallback edge cases.
 //
-// choose_midi_port (hw-io path) mirrors select_port_idx logic: when a
-// non-None filter matches no port it falls back to index 0 and emits
-// an eprintln warning. The following tests lock down every edge case of
-// the fallback branch in select_port_idx, which is the pure testable proxy.
+// select_port_idx is a pure function: when a non-None filter matches no port
+// it falls back to index 0 and emits an eprintln warning. The following tests
+// lock down every edge case of the fallback branch.
 // -----------------------------------------------------------------------
 
 /// Empty-string filter is a substring of every port name: always matches
@@ -369,4 +454,202 @@ fn select_port_idx_fallback_with_many_ports_returns_zero() {
 fn select_port_idx_unique_match_not_at_zero() {
     let ports = ["Alpha", "Beta", "SpecialSynth", "Delta", "Epsilon"];
     assert_eq!(select_port_idx(&ports, Some("special")), Some(2));
+}
+
+// -----------------------------------------------------------------------
+// MidiCtrlMsg / run_midi_out_with_open_fn integration tests
+//
+// These tests cover the dual-channel polling loop behaviour without
+// requiring ALSA hardware (hw-io feature).  All port operations are
+// replaced by stub closures.
+// -----------------------------------------------------------------------
+
+/// ChangeChannel is a no-op: ctrl_rx receives ChangeChannel and the loop
+/// continues processing MIDI events normally without crashing or ignoring
+/// subsequent messages.
+#[test]
+fn change_channel_is_noop_loop_continues() {
+    let (midi_tx, midi_rx) = std::sync::mpsc::channel::<MidiEvent>();
+    let (ctrl_tx, ctrl_rx) = std::sync::mpsc::channel::<MidiCtrlMsg>();
+
+    let (mock, log) = MockSender::new();
+    let initial_sender: Option<Box<dyn MidiSender>> = Some(boxed(mock));
+
+    // Send a ChangeChannel then a real MIDI event, then disconnect both channels.
+    ctrl_tx
+        .send(MidiCtrlMsg::ChangeChannel(3))
+        .expect("send ChangeChannel");
+    midi_tx.send(MidiEvent::Start).expect("send Start");
+    drop(ctrl_tx);
+    drop(midi_tx);
+
+    run_midi_out_with_open_fn(midi_rx, ctrl_rx, initial_sender, |_| None);
+
+    // The Start event must still have been dispatched — sender was not replaced.
+    let bytes = log.lock().expect("lock").clone();
+    assert_eq!(&bytes[..], &[0xFA], "Start must be dispatched after ChangeChannel no-op");
+}
+
+/// ChangePort with a name that matches no port: open_port_fn returns None,
+/// sender becomes None, loop does not crash.
+#[test]
+fn change_port_no_match_sender_becomes_none_no_crash() {
+    let (midi_tx, midi_rx) = std::sync::mpsc::channel::<MidiEvent>();
+    let (ctrl_tx, ctrl_rx) = std::sync::mpsc::channel::<MidiCtrlMsg>();
+
+    // Start with a live sender.
+    let (mock, _log) = MockSender::new();
+    let initial_sender: Option<Box<dyn MidiSender>> = Some(boxed(mock));
+
+    // ChangePort whose name matches nothing — stub returns None.
+    ctrl_tx
+        .send(MidiCtrlMsg::ChangePort("no-such-port".to_owned()))
+        .expect("send ChangePort");
+    // Send a MIDI event after the failed port-change; it should be silently dropped.
+    midi_tx.send(MidiEvent::Stop).expect("send Stop");
+    drop(ctrl_tx);
+    drop(midi_tx);
+
+    // If the loop panics this test fails via join().
+    let handle = std::thread::spawn(move || {
+        run_midi_out_with_open_fn(midi_rx, ctrl_rx, initial_sender, |_name| {
+            None // port not found
+        });
+    });
+
+    handle.join().expect("loop must not panic on unmatched ChangePort");
+}
+
+/// Multiple ChangePort messages in sequence: all three are processed in order
+/// and a MIDI event dispatched after them goes through the last active sender.
+///
+/// Design: the three ChangePort messages are pre-queued on ctrl_rx. A MIDI
+/// event is sent from a separate thread after 200 ms, giving the loop time
+/// to drain all ctrl messages first (each loop iteration has a 50 ms
+/// recv_timeout). ctrl_tx is kept alive in the helper thread until after the
+/// MIDI event is sent, preventing premature Disconnected on ctrl_rx.
+#[test]
+fn multiple_change_port_last_port_is_active() {
+    use std::sync::{Arc, Mutex};
+
+    let (midi_tx, midi_rx) = std::sync::mpsc::channel::<MidiEvent>();
+    let (ctrl_tx, ctrl_rx) = std::sync::mpsc::channel::<MidiCtrlMsg>();
+
+    // Track which port names were requested in order.
+    let ports_opened: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let ports_opened_clone = Arc::clone(&ports_opened);
+
+    // Shared log — all TrackingSenders write here.
+    let shared_log: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let shared_log_clone = Arc::clone(&shared_log);
+
+    // Pre-queue all three ChangePort messages.
+    ctrl_tx
+        .send(MidiCtrlMsg::ChangePort("port-alpha".to_owned()))
+        .expect("send first ChangePort");
+    ctrl_tx
+        .send(MidiCtrlMsg::ChangePort("port-beta".to_owned()))
+        .expect("send second ChangePort");
+    ctrl_tx
+        .send(MidiCtrlMsg::ChangePort("port-gamma".to_owned()))
+        .expect("send third ChangePort");
+
+    // A helper thread holds both ctrl_tx and midi_tx alive. After a delay long
+    // enough for the loop to drain the three queued ChangePort messages, it sends
+    // a ChangeChannel no-op (so the loop does one final recv_timeout pass), then
+    // the Continue MIDI event, then drops both senders so the loop exits.
+    //
+    // Ordering:
+    //   1. Loop drains ChangePort alpha/beta/gamma (3 × 50 ms recv_timeout passes).
+    //   2. Thread wakes up, sends ChangeChannel(0) on ctrl_tx.
+    //   3. Loop: try_recv -> ChangeChannel(0) [no-op], recv_timeout -> Continue -> dispatch.
+    //   4. Thread drops ctrl_tx and midi_tx clone.
+    //   5. Loop: try_recv -> Disconnected -> break.
+    let midi_tx_clone = midi_tx.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(200));
+        // Send a no-op ctrl message so the loop will do one more recv_timeout
+        // pass, giving it a chance to pick up the Continue MIDI event.
+        let _ = ctrl_tx.send(MidiCtrlMsg::ChangeChannel(0));
+        let _ = midi_tx_clone.send(MidiEvent::Continue);
+        // Dropping ctrl_tx here causes Disconnected on the iteration AFTER Continue.
+        drop(ctrl_tx);
+        // midi_tx_clone dropped when thread ends.
+    });
+
+    drop(midi_tx); // only the thread clone keeps midi_rx live
+
+    run_midi_out_with_open_fn(midi_rx, ctrl_rx, None, move |name| {
+        ports_opened_clone
+            .lock()
+            .expect("ports_opened lock")
+            .push(name.to_owned());
+
+        let log_inner = Arc::clone(&shared_log_clone);
+        Some(Box::new(TrackingSender {
+            log: log_inner,
+            name: name.to_owned(),
+        }))
+    });
+
+    let opened = ports_opened.lock().expect("lock").clone();
+    assert_eq!(
+        opened,
+        vec!["port-alpha", "port-beta", "port-gamma"],
+        "open_port_fn must be called for each ChangePort in order"
+    );
+
+    // Continue (0xFB) must have been dispatched through whichever sender was
+    // active at that point — all three share the same log Arc.
+    let bytes = shared_log.lock().expect("lock").clone();
+    assert_eq!(&bytes[..], &[0xFB], "Continue must be dispatched after all port changes");
+}
+
+/// MIDI events sent while sender is None are silently dropped — no panic.
+#[test]
+fn events_dropped_silently_when_no_sender() {
+    let (midi_tx, midi_rx) = std::sync::mpsc::channel::<MidiEvent>();
+    let (ctrl_tx, ctrl_rx) = std::sync::mpsc::channel::<MidiCtrlMsg>();
+
+    // Send several MIDI events with no sender open.
+    midi_tx.send(MidiEvent::Start).expect("send Start");
+    midi_tx.send(MidiEvent::Stop).expect("send Stop");
+    midi_tx.send(MidiEvent::Continue).expect("send Continue");
+    drop(ctrl_tx);
+    drop(midi_tx);
+
+    // initial_sender = None; open_port_fn never called (no ChangePort msgs).
+    let handle = std::thread::spawn(move || {
+        run_midi_out_with_open_fn(midi_rx, ctrl_rx, None, |_| None);
+    });
+
+    handle
+        .join()
+        .expect("loop must not panic when sender is None and events arrive");
+}
+
+// ── Helper sender that writes to an externally-visible log ───────────────
+
+/// A `MidiSender` implementation that appends bytes to a shared log.
+/// Used by the multiple-ChangePort test to verify which sender is active.
+struct TrackingSender {
+    log: Arc<Mutex<Vec<u8>>>,
+    #[allow(dead_code)]
+    name: String,
+}
+
+impl MidiSender for TrackingSender {
+    fn send_bytes(&mut self, data: &[u8]) {
+        self.log
+            .lock()
+            .expect("TrackingSender lock")
+            .extend_from_slice(data);
+    }
+
+    fn try_clone(&self) -> Box<dyn MidiSender> {
+        Box::new(TrackingSender {
+            log: Arc::clone(&self.log),
+            name: self.name.clone(),
+        })
+    }
 }

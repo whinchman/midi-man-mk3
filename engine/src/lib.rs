@@ -1,22 +1,22 @@
-/// Input command abstraction — InputCommand and OverlayMode enums.
-pub mod input;
-/// USB HID report structures for the MIDI controller.
-pub mod hid;
-/// Music theory primitives: keys, modes, scale tables, and note navigation.
-pub mod music_theory;
-/// Sequencer state — the shared truth for all threads.
-pub mod state;
-/// Sequencer module — higher-level engine wiring and re-exports.
-pub mod sequencer;
+/// CLI argument parsing — exposed for integration tests.
+pub mod cli;
 /// Real-time clock thread driving the sequencer forward.
 pub mod clock;
+/// USB HID report structures for the MIDI controller.
+pub mod hid;
+/// Input command abstraction — InputCommand and OverlayMode enums.
+pub mod input;
 /// MIDI output thread — sends NoteOn/NoteOff via midir.
 /// Always compiled; hw-io–only items are individually gated within the module.
 pub mod midi_out;
-/// Ratatui render logic — pure rendering, no crossterm dependency.
-pub mod ui_render;
+/// Music theory primitives: keys, modes, scale tables, and note navigation.
+pub mod music_theory;
+/// Sequencer module — higher-level engine wiring and re-exports.
+pub mod sequencer;
+/// Sequencer state — the shared truth for all threads.
+pub mod state;
 /// Terminal UI — ratatui render loop with keyboard event handling.
 #[cfg(feature = "hw-io")]
 pub mod ui;
-/// CLI argument parsing — exposed for integration tests.
-pub mod cli;
+/// Ratatui render logic — pure rendering, no crossterm dependency.
+pub mod ui_render;

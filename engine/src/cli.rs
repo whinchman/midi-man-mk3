@@ -15,7 +15,10 @@ pub struct CliArgs {
 
 /// Parse a hex string (with or without leading "0x") into a u16.
 pub fn parse_hex_u16(s: &str) -> Result<u16, String> {
-    let stripped = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s);
+    let stripped = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .unwrap_or(s);
     u16::from_str_radix(stripped, 16).map_err(|e| format!("invalid hex '{}': {}", s, e))
 }
 
@@ -58,5 +61,9 @@ where
         }
     }
 
-    CliArgs { midi_port, hid_vid, hid_pid }
+    CliArgs {
+        midi_port,
+        hid_vid,
+        hid_pid,
+    }
 }
