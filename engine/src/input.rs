@@ -97,6 +97,22 @@ pub fn overlay_key_to_command(key_code: KeyCodeSimple) -> Option<InputCommand> {
     }
 }
 
+/// Pure function: translate a key event to a Shift overlay action command.
+///
+/// Called only when the Shift overlay is active. Returns `None` for keys that
+/// are not Shift actions (caller falls through to `overlay_key_to_command`).
+pub fn shift_action_key_to_command(key_code: KeyCodeSimple) -> Option<InputCommand> {
+    match key_code {
+        KeyCodeSimple::Char('s') | KeyCodeSimple::Char('S') => {
+            Some(InputCommand::SkipModifierToggle)
+        }
+        KeyCodeSimple::Char('g') | KeyCodeSimple::Char('G') => {
+            Some(InputCommand::GenerateRandomSequence)
+        }
+        _ => None,
+    }
+}
+
 /// A minimal key code enum that mirrors the subset of crossterm keys we care
 /// about.  This lives in `input.rs` (no feature gate) so the translation
 /// functions can be unit-tested without the `hw-io` feature.
@@ -124,5 +140,71 @@ pub enum KeyCodeSimple {
     Char(char),
     /// Any other key (ignored).
     Other,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── shift_action_key_to_command ──────────────────────────────────────────
+
+    #[test]
+    fn shift_action_s_lower_maps_to_skip_modifier_toggle() {
+        let cmd = shift_action_key_to_command(KeyCodeSimple::Char('s'));
+        assert!(matches!(cmd, Some(InputCommand::SkipModifierToggle)));
+    }
+
+    #[test]
+    fn shift_action_s_upper_maps_to_skip_modifier_toggle() {
+        let cmd = shift_action_key_to_command(KeyCodeSimple::Char('S'));
+        assert!(matches!(cmd, Some(InputCommand::SkipModifierToggle)));
+    }
+
+    #[test]
+    fn shift_action_g_lower_maps_to_generate_random_sequence() {
+        let cmd = shift_action_key_to_command(KeyCodeSimple::Char('g'));
+        assert!(matches!(cmd, Some(InputCommand::GenerateRandomSequence)));
+    }
+
+    #[test]
+    fn shift_action_g_upper_maps_to_generate_random_sequence() {
+        let cmd = shift_action_key_to_command(KeyCodeSimple::Char('G'));
+        assert!(matches!(cmd, Some(InputCommand::GenerateRandomSequence)));
+    }
+
+    #[test]
+    fn shift_action_arrow_keys_return_none() {
+        assert!(shift_action_key_to_command(KeyCodeSimple::Left).is_none());
+        assert!(shift_action_key_to_command(KeyCodeSimple::Right).is_none());
+        assert!(shift_action_key_to_command(KeyCodeSimple::Up).is_none());
+        assert!(shift_action_key_to_command(KeyCodeSimple::Down).is_none());
+    }
+
+    #[test]
+    fn shift_action_enter_esc_return_none() {
+        assert!(shift_action_key_to_command(KeyCodeSimple::Enter).is_none());
+        assert!(shift_action_key_to_command(KeyCodeSimple::Esc).is_none());
+    }
+
+    #[test]
+    fn shift_action_other_chars_return_none() {
+        assert!(shift_action_key_to_command(KeyCodeSimple::Char('p')).is_none());
+        assert!(shift_action_key_to_command(KeyCodeSimple::Char('x')).is_none());
+        assert!(shift_action_key_to_command(KeyCodeSimple::Other).is_none());
+    }
+
+    // ── overlay_key_to_command fallthrough still works ───────────────────────
+
+    #[test]
+    fn overlay_key_arrows_still_work() {
+        assert!(matches!(
+            overlay_key_to_command(KeyCodeSimple::Left),
+            Some(InputCommand::ParamSelectDelta(-1))
+        ));
+        assert!(matches!(
+            overlay_key_to_command(KeyCodeSimple::Esc),
+            Some(InputCommand::CloseOverlay)
+        ));
+    }
 }
 
