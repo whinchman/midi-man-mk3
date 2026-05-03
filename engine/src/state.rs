@@ -596,10 +596,16 @@ impl SequencerState {
             }
             InputCommand::SeedSet(seed) => {
                 self.rand_seed = seed;
-                self.rng_seed = seed as u64 | ((seed as u64) << 32);
+                // Xorshift64 with seed 0 is a zero-fixed-point; substitute a
+                // known nonzero fallback constant so the RNG is never stuck.
+                self.rng_seed = if seed == 0 {
+                    0x853C_49E6_853C_49E6u64
+                } else {
+                    seed as u64 | ((seed as u64) << 32)
+                };
             }
             InputCommand::ChannelSet(ch) => {
-                self.midi_channel = ch.saturating_sub(1); // 1-indexed → 0-indexed
+                self.midi_channel = ch.saturating_sub(1).min(15); // 1-indexed → 0-indexed, clamped to 0–15
             }
             InputCommand::MidiDeviceName(name) => {
                 self.midi_device_name = name;
@@ -851,5 +857,39 @@ mod tests {
     fn rand_seed_default_value() {
         let state = SequencerState::default();
         assert_eq!(state.rand_seed, 0x853C_49E6);
+    }
+
+    #[test]
+    fn seed_set_zero_uses_fallback_nonzero_rng_seed() {
+        let mut state = SequencerState::default();
+        state.apply_command(InputCommand::SeedSet(0));
+
+        assert_eq!(state.rand_seed, 0, "rand_seed must store the raw seed value");
+        assert_ne!(
+            state.rng_seed, 0,
+            "rng_seed must be nonzero when seed=0 to avoid xorshift64 zero-fixed-point"
+        );
+        assert_eq!(
+            state.rng_seed, 0x853C_49E6_853C_49E6u64,
+            "rng_seed must use the fallback constant when seed=0"
+        );
+    }
+
+    #[test]
+    fn channel_set_clamps_above_16() {
+        let mut state = SequencerState::default();
+
+        // Values above 16 must clamp to channel 15 (0-indexed)
+        state.apply_command(InputCommand::ChannelSet(17));
+        assert_eq!(
+            state.midi_channel, 15,
+            "ChannelSet(17) should clamp to midi_channel = 15"
+        );
+
+        state.apply_command(InputCommand::ChannelSet(255));
+        assert_eq!(
+            state.midi_channel, 15,
+            "ChannelSet(255) should clamp to midi_channel = 15"
+        );
     }
 }
