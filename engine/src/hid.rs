@@ -20,12 +20,11 @@
 //   Bytes 2-3  : led_state[15:0]
 //   Bytes 4-63 : reserved
 //
-// Translation note: overlay-aware routing (NoteDelta vs ParamValueDelta for
-// encoders when an overlay is open) is a future improvement. The HID thread
-// reads `state.active_overlay` to determine context; sending NoteDelta
-// unconditionally here is the stub behaviour documented in the task spec.
+// Translation note: HID encoder events always send NoteDelta; param-knob
+// events send PanelParamDelta. Overlay open/close hardware gestures are not
+// in scope for this refactor and are silently dropped.
 
-use crate::input::{InputCommand, OverlayMode};
+use crate::input::InputCommand;
 #[cfg(feature = "hw-io")]
 use crate::state::SequencerState;
 #[cfg(feature = "hw-io")]
@@ -133,36 +132,28 @@ impl OutReport {
 
 /// Translate one `InReport` into a sequence of `InputCommand` values.
 ///
-/// Pure function: no I/O, no locks, no side effects.  The `active_overlay`
-/// argument is the current overlay state (read from shared state by the caller).
+/// Pure function: no I/O, no locks, no side effects.
 ///
 /// Param-button mapping (0-indexed from LSB of the two `param_buttons` bytes):
-/// - Bit 0  → OpenOverlay(Regular) + ParamSelect(0) (Key)
-/// - Bit 1  → ParamSelect(1) (Mode)
-/// - Bit 2  → ParamSelect(2) (Swing)
-/// - Bit 3  → ParamSelect(3) (Step Size)
+/// - Bit 0  → PanelParamSelect(0) (Key)
+/// - Bit 1  → PanelParamSelect(1) (Mode)
+/// - Bit 2  → PanelParamSelect(2) (Swing)
+/// - Bit 3  → PanelParamSelect(3) (Step Size)
 /// - Bits 4–7 → reserved (ignored)
-/// - Bit 8  → loop cycle: active_overlay determines in/out/clear cycling
+/// - Bit 8  → PanelParamSelect(4) + PanelParamDelta(1) (loop cycle)
 /// - Bit 9  → reserved (ignored)
-/// - Bit 10 → pause toggle (ParamValueDelta(1) stub — full state write in run_hid)
+/// - Bit 10 → PanelParamSelect(5) + PanelParamDelta(1) (pause toggle stub)
 /// - Bit 11 → stop/start toggle (handled via direct state write in run_hid)
 ///
-/// Tempo delta and stop/start/pause are handled by `run_hid` with a write
-/// lock; they do NOT appear in the returned Vec.
-pub fn translate_in_report(
-    report: &InReport,
-    active_overlay: Option<OverlayMode>,
-) -> Vec<InputCommand> {
+/// Tempo delta and stop/start/pause direct state mutations are handled by
+/// `run_hid` under a write lock; they do NOT appear in the returned Vec.
+/// Hardware overlay open/close gestures are not in scope and are dropped.
+pub fn translate_in_report(report: &InReport) -> Vec<InputCommand> {
     let mut cmds: Vec<InputCommand> = Vec::new();
 
     // --- Encoder deltas (steps 0–15): note delta per step.
-    // Overlay-aware routing is a future improvement; always send NoteDelta.
     for (i, &delta) in report.encoder_deltas.iter().enumerate() {
         if delta != 0 {
-            // When an overlay is active the encoder controls param value;
-            // without overlay it controls the note for that step.
-            // Future: route to ParamValueDelta when overlay is open.
-            let _ = active_overlay; // suppress unused-variable lint
             cmds.push(InputCommand::StepSelect(i));
             cmds.push(InputCommand::NoteDelta(delta));
         }
@@ -180,35 +171,30 @@ pub fn translate_in_report(
     // --- Param buttons (bits 0–11 across two bytes).
     let param_word = (report.param_buttons[0] as u16) | ((report.param_buttons[1] as u16) << 8);
 
-    // Bits 0–3: overlay + param select.
-    // Bit 0: Key (index 0) — also opens overlay.
-    if param_word & (1 << 0) != 0 {
-        cmds.push(InputCommand::OpenOverlay(OverlayMode::Regular));
-        cmds.push(InputCommand::ParamSelect(0));
-    }
-    // Bits 1–3: Mode, Swing, Step Size (indices 1–3).
-    for idx in 1u8..=3 {
+    // Bits 0–3: param select (Key, Mode, Swing, Step Size at indices 0–3).
+    // Hardware overlay open/close is dropped — focus switching from hardware
+    // is not in scope for this refactor.
+    for idx in 0u8..=3 {
         if param_word & (1 << idx) != 0 {
-            cmds.push(InputCommand::ParamSelect(idx));
+            cmds.push(InputCommand::PanelParamSelect(idx));
         }
     }
 
     // Bit 8: loop in/out/clear cycling.
-    // Loop cycle is a 3-state machine: set loop_in → set loop_out → clear.
-    // The HID thread advances the cycle by emitting ParamSelect(4) (loop param)
-    // + ParamValueDelta(1). Full loop-state machine lives in state.rs (future).
+    // The HID thread advances the cycle by selecting param index 4 (loop param)
+    // and sending a positive delta. Full loop-state machine lives in state.rs (future).
     if param_word & (1 << 8) != 0 {
-        cmds.push(InputCommand::ParamSelect(4));
-        cmds.push(InputCommand::ParamValueDelta(1));
+        cmds.push(InputCommand::PanelParamSelect(4));
+        cmds.push(InputCommand::PanelParamDelta(1));
     }
 
     // Bit 9: reserved — ignored.
 
-    // Bit 10: pause toggle — emit ParamValueDelta on param index 5 (pause).
+    // Bit 10: pause toggle — select param index 5 (pause) and send a delta.
     // Direct state mutation (paused flag) is performed by run_hid under write lock.
     if param_word & (1 << 10) != 0 {
-        cmds.push(InputCommand::ParamSelect(5));
-        cmds.push(InputCommand::ParamValueDelta(1));
+        cmds.push(InputCommand::PanelParamSelect(5));
+        cmds.push(InputCommand::PanelParamDelta(1));
     }
 
     // Bit 11: stop/start — direct state mutation in run_hid; no InputCommand emitted.
@@ -216,7 +202,7 @@ pub fn translate_in_report(
 
     // --- Param knob delta.
     if report.param_knob_delta != 0 {
-        cmds.push(InputCommand::ParamValueDelta(report.param_knob_delta));
+        cmds.push(InputCommand::PanelParamDelta(report.param_knob_delta));
     }
 
     cmds
@@ -413,14 +399,8 @@ pub fn run_hid(
             }
         }
 
-        // Read active_overlay for translation context.
-        let active_overlay = state
-            .read()
-            .expect("hid: state read lock poisoned")
-            .active_overlay;
-
         // --- Translate to InputCommand and send. ---
-        let cmds = translate_in_report(&report, active_overlay);
+        let cmds = translate_in_report(&report);
         for cmd in cmds {
             if cmd_tx.send(cmd).is_err() {
                 // Receiver dropped — engine is shutting down.
