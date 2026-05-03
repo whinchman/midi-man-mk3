@@ -1338,5 +1338,30 @@ mod tests {
         state.apply_command(InputCommand::Confirm);
         assert_eq!(state.swing, 10);
     }
+
+    #[test]
+    fn test_shift_overlay_round_trip_note_rand_stub_is_noop() {
+        // Index 0: note_rand is owned by Stream B — delta + confirm must be safe
+        // no-ops: no panic, pending_edit cleared, no state mutation visible here.
+        let mut state = SequencerState::default();
+        open_shift_overlay(&mut state);
+        state.selected_param = 0; // note_rand stub
+        state.apply_command(InputCommand::ParamValueDelta(50));
+        state.apply_command(InputCommand::Confirm);
+        // The only thing to assert is that the state machine completes cleanly.
+        assert_eq!(state.pending_edit, PendingEdit::None);
+    }
+
+    #[test]
+    fn test_shift_overlay_round_trip_step_rand_stub_is_noop() {
+        // Index 5: step_rand is owned by Stream B — delta + confirm must be safe
+        // no-ops: no panic, pending_edit cleared, no state mutation visible here.
+        let mut state = SequencerState::default();
+        open_shift_overlay(&mut state);
+        state.selected_param = 5; // step_rand stub
+        state.apply_command(InputCommand::ParamValueDelta(50));
+        state.apply_command(InputCommand::Confirm);
+        assert_eq!(state.pending_edit, PendingEdit::None);
+    }
 }
 
