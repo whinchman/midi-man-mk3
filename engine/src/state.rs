@@ -892,4 +892,97 @@ mod tests {
             "ChannelSet(255) should clamp to midi_channel = 15"
         );
     }
+
+    #[test]
+    fn bpm_delta_boundary_at_minimum() {
+        let mut state = SequencerState::default();
+        // Start exactly at the minimum boundary.
+        state.tempo_bpm = 20;
+
+        // Negative delta at minimum stays at 20.
+        state.apply_command(InputCommand::BpmDelta(-1));
+        assert_eq!(state.tempo_bpm, 20, "BPM already at 20 must not go below");
+
+        state.apply_command(InputCommand::BpmDelta(-127));
+        assert_eq!(state.tempo_bpm, 20, "Large negative delta at 20 must clamp to 20");
+    }
+
+    #[test]
+    fn bpm_delta_boundary_at_maximum() {
+        let mut state = SequencerState::default();
+        // Start exactly at the maximum boundary.
+        state.tempo_bpm = 300;
+
+        // Positive delta at maximum stays at 300.
+        state.apply_command(InputCommand::BpmDelta(1));
+        assert_eq!(state.tempo_bpm, 300, "BPM already at 300 must not exceed 300");
+
+        state.apply_command(InputCommand::BpmDelta(127));
+        assert_eq!(state.tempo_bpm, 300, "Large positive delta at 300 must clamp to 300");
+    }
+
+    #[test]
+    fn bpm_delta_arithmetic() {
+        let mut state = SequencerState::default();
+        state.tempo_bpm = 100;
+
+        // Positive delta within range.
+        state.apply_command(InputCommand::BpmDelta(25));
+        assert_eq!(state.tempo_bpm, 125, "100 + 25 = 125");
+
+        // Negative delta within range.
+        state.apply_command(InputCommand::BpmDelta(-25));
+        assert_eq!(state.tempo_bpm, 100, "125 - 25 = 100");
+
+        // Zero delta leaves BPM unchanged.
+        state.apply_command(InputCommand::BpmDelta(0));
+        assert_eq!(state.tempo_bpm, 100, "delta 0 must leave BPM unchanged");
+    }
+
+    #[test]
+    fn seed_set_nonzero_rng_seed_formula() {
+        let mut state = SequencerState::default();
+
+        // Verify formula: rng_seed = lo | (lo << 32) for a variety of nonzero seeds.
+        for &seed in &[1u32, 0xFFFF_FFFFu32, 0x1234_5678u32] {
+            state.apply_command(InputCommand::SeedSet(seed));
+            assert_eq!(state.rand_seed, seed, "rand_seed must equal the supplied seed");
+            let lo = seed as u64;
+            let expected = lo | (lo << 32);
+            assert_eq!(
+                state.rng_seed, expected,
+                "rng_seed for seed={seed:#010x} must be lo | (lo << 32)"
+            );
+        }
+    }
+
+    #[test]
+    fn midi_device_name_overwrite_existing() {
+        let mut state = SequencerState::default();
+
+        state.apply_command(InputCommand::MidiDeviceName("First Device".to_string()));
+        assert_eq!(state.midi_device_name, "First Device");
+
+        // Overwrite with a different non-empty name.
+        state.apply_command(InputCommand::MidiDeviceName("Second Device".to_string()));
+        assert_eq!(
+            state.midi_device_name, "Second Device",
+            "MidiDeviceName must overwrite the previously stored name"
+        );
+    }
+
+    #[test]
+    fn midi_device_name_empty_string() {
+        let mut state = SequencerState::default();
+
+        state.apply_command(InputCommand::MidiDeviceName("IAC Driver".to_string()));
+        assert_eq!(state.midi_device_name, "IAC Driver");
+
+        // Overwrite with empty string.
+        state.apply_command(InputCommand::MidiDeviceName(String::new()));
+        assert_eq!(
+            state.midi_device_name, "",
+            "MidiDeviceName with empty string must clear the stored name"
+        );
+    }
 }
