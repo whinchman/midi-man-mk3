@@ -381,8 +381,20 @@ impl SequencerState {
     /// BUG-017: setting playing=true (index 7, value 1) also clears paused.
     fn apply_param_value(&mut self, index: u8, value: i64) {
         match index {
-            0 => self.key = Key::from_index(value as usize),
-            1 => self.mode = Mode::from_index(value as usize),
+            0 => {
+                let new_key = Key::from_index(value as usize);
+                if new_key != self.key {
+                    self.key = new_key;
+                    self.snap_all_steps_to_key();
+                }
+            }
+            1 => {
+                let new_mode = Mode::from_index(value as usize);
+                if new_mode != self.mode {
+                    self.mode = new_mode;
+                    self.snap_all_steps_to_key();
+                }
+            }
             2 => self.swing = value as i8,
             3 => self.step_size = StepSize::from_index(value as usize),
             4 => self.loop_in = value as u8,
@@ -395,6 +407,17 @@ impl SequencerState {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Re-snap all 16 step notes to the nearest note in the current key and mode.
+    ///
+    /// Called immediately after `self.key` or `self.mode` is updated.
+    /// No heap allocation: operates on the fixed-size `steps` array in place.
+    fn snap_all_steps_to_key(&mut self) {
+        for step in self.steps.iter_mut() {
+            step.midi_note =
+                crate::music_theory::snap_to_key(step.midi_note, self.key, self.mode);
         }
     }
 }
@@ -468,6 +491,99 @@ mod tests {
         state.apply_command(InputCommand::Confirm);
         assert!(!state.playing);
         assert!(state.paused, "paused should be unchanged when playing is set to false");
+    }
+
+    // ── Key/Mode Note Shifting ───────────────────────────────────────────────
+
+    #[test]
+    fn test_key_change_snaps_all_steps() {
+        let mut state = SequencerState::default(); // Key::C, Mode::Major
+        state.steps[0].midi_note = 61; // C#4 — not in C major
+        state.steps[1].midi_note = 62; // D4
+        // Confirm Key change to C# (index 1)
+        state.pending_edit = PendingEdit::Param {
+            overlay: OverlayMode::Regular,
+            index: 0,
+            value: 1, // Key::Cs
+        };
+        state.apply_command(InputCommand::Confirm);
+        assert_eq!(state.key, crate::music_theory::Key::Cs);
+        // C#4 (61) is the root of C# major → stays 61
+        assert_eq!(state.steps[0].midi_note, 61);
+    }
+
+    #[test]
+    fn test_mode_change_snaps_all_steps() {
+        let mut state = SequencerState::default(); // Key::C, Mode::Major
+        // B4 (71) is in C major. C NaturalMinor scale: C D Eb F G Ab Bb.
+        // Bb=70 (dist=1), C5=72 (dist=1) — tie: lower wins → Bb4=70
+        state.steps[0].midi_note = 71; // B4
+        state.pending_edit = PendingEdit::Param {
+            overlay: OverlayMode::Regular,
+            index: 1,
+            value: 1, // Mode::NaturalMinor
+        };
+        state.apply_command(InputCommand::Confirm);
+        assert_eq!(state.mode, crate::music_theory::Mode::NaturalMinor);
+        assert_eq!(state.steps[0].midi_note, 70); // snapped to Bb4
+    }
+
+    #[test]
+    fn test_same_key_no_snap() {
+        let mut state = SequencerState::default(); // Key::C
+        state.steps[0].midi_note = 61; // C#4 — out of key, set directly
+        // Confirm Key=C again (no change)
+        state.pending_edit = PendingEdit::Param {
+            overlay: OverlayMode::Regular,
+            index: 0,
+            value: 0, // Key::C — same as current
+        };
+        state.apply_command(InputCommand::Confirm);
+        // No-op guard must fire; note must NOT be snapped
+        assert_eq!(state.steps[0].midi_note, 61);
+    }
+
+    #[test]
+    fn test_snap_all_16_steps() {
+        let mut state = SequencerState::default(); // Key::C, Mode::Major
+        for step in state.steps.iter_mut() {
+            step.midi_note = 61; // C#4 — not in C major
+        }
+        // Change to D major
+        state.pending_edit = PendingEdit::Param {
+            overlay: OverlayMode::Regular,
+            index: 0,
+            value: 2, // Key::D
+        };
+        state.apply_command(InputCommand::Confirm);
+        for step in &state.steps {
+            let expected = crate::music_theory::snap_to_key(
+                61,
+                crate::music_theory::Key::D,
+                crate::music_theory::Mode::Major,
+            );
+            assert_eq!(step.midi_note, expected);
+        }
+    }
+
+    #[test]
+    fn test_disabled_steps_are_snapped() {
+        let mut state = SequencerState::default(); // Key::C, Mode::Major
+        state.steps[3].enabled = false;
+        state.steps[3].midi_note = 61; // C#4 — not in C major
+        // Change to D major
+        state.pending_edit = PendingEdit::Param {
+            overlay: OverlayMode::Regular,
+            index: 0,
+            value: 2, // Key::D
+        };
+        state.apply_command(InputCommand::Confirm);
+        let expected = crate::music_theory::snap_to_key(
+            61,
+            crate::music_theory::Key::D,
+            crate::music_theory::Mode::Major,
+        );
+        assert_eq!(state.steps[3].midi_note, expected, "disabled step should still be snapped");
     }
 }
 
