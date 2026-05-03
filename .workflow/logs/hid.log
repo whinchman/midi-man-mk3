@@ -1,0 +1,1 @@
+[1777839373] [hid] device 0x2e8a:0x000a not found: hidapi error: No HID devices with requested VID/PID found in the system.; HID thread exiting
