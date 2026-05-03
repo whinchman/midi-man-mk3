@@ -1,7 +1,7 @@
 # Task: key-mode-note-shifting
 
 **Type:** coder
-**Status:** pending
+**Status:** done
 **Feature Branch:** feature/key-mode-note-shifting
 **Branch:** feature/key-mode-note-shifting/key-mode-note-shifting
 **Base Branch:** feature/key-mode-note-shifting
@@ -114,3 +114,28 @@ Add integration tests (see plan §3 Step 4 for full test list).
 
 ## Notes
 
+Implementation complete on branch `feature/key-mode-note-shifting`.
+
+**Changes:**
+- `engine/src/music_theory.rs`: Added `pub fn snap_to_key(midi_note: u8, key: Key, mode: Mode) -> u8` — pure stack-only function sweeping all MIDI octaves; ties resolve to the lower note. 7 unit tests added.
+- `engine/src/state.rs`: Modified `apply_param_value` arms 0 and 1 to detect key/mode changes and call new private helper `snap_all_steps_to_key()`. 5 integration tests added covering key change, mode change, no-op guard, all 16 steps, and disabled steps.
+
+**Test results:** 18 new tests pass; all 310 tests pass. No new clippy warnings.
+
+---
+
+## PR Feedback
+
+PR: https://github.com/whinchman/midi-man-mk3/pull/24
+
+### Comments Requiring Action
+
+_(none)_
+
+### CI Failures
+
+_(none — repository has no GitHub Actions CI configured; statusCheckRollup is empty)_
+
+### Questions / Acknowledged
+
+_(none)_
