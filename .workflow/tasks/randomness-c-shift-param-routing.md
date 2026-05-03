@@ -1,7 +1,7 @@
 # Task: Shift Overlay Param Routing Infrastructure
 
 - **Type**: coder
-- **Status**: pending
+- **Status**: done
 - **Repo**: midi-man-mk3
 - **Parallel Group**: 2
 - **Feature Branch**: feature/randomness-layer
@@ -193,3 +193,62 @@ fn shift_committed_param_value(&self, index: u8) -> i64;
 
 ## Notes
 
+### Implementation summary
+
+Branch: `randomness-c-shift-param-routing` (worktree at `.workflow/worktrees/randomness-c-shift-param-routing`), based off `feature/randomness-layer`.
+
+**Added to `engine/src/state.rs`:**
+
+- `TempoRollPoint` enum (Off, Step, Beat, Seq) with `COUNT=4`, `from_index`, `to_index`
+- `TempoRandType` enum (Random, Up, Down, Breathe, PingPong) with `COUNT=5`, `from_index`, `to_index`
+- `SequencerState` fields: `tempo_rand: u8` (default 0), `tempo_roll_point` (default Off), `tempo_variance_max: u8` (default 10), `tempo_rand_type` (default Random), `scale_quant: bool` (default false), `note_modifier: i8` (default 0), `skip_modifier: bool` (default false), `velocity_modifier: i8` (default 0)
+- `shift_committed_param_value(index: u8) -> i64` — reads shift fields for indices 1–4, 6; stubs for 0 (note_rand, Stream B) and 5 (step_rand, Stream B); 0 for reserved index 7
+- `shift_clamped_param_value(index: u8, value: i64) -> i64` — enforces ranges (0–100 for rates, 1–99 for variance_max, enum wrapping, 0–1 for bool)
+- `shift_apply_param_value(index: u8, value: i64)` — writes to fields; no-op stubs for indices 0, 5 (Stream B); no-op for index 7 (reserved)
+- `ParamValueDelta` arm: now branches on `active_overlay` to call `shift_committed_param_value`/`shift_clamped_param_value` for Shift, or existing Regular path
+- `Confirm` arm: now branches on `PendingEdit::Param { overlay, .. }` to call `shift_apply_param_value` for Shift or `apply_param_value` for Regular
+
+**Test results:** 63 unit tests pass, all integration tests pass (89 state, 44 clock, 43 hid, 30 ui, 25 midi_out, 37 music_theory, 19 input, 12 main_wiring, 6 cargo_config, 6 cargo_profile). Clippy clean. Release build succeeds.
+
+---
+
+### Code Review + QA — 2026-05-02
+
+**Reviewer:** code-reviewer agent
+
+#### Acceptance Criteria Check
+
+| Criterion | Result |
+|-----------|--------|
+| `TempoRollPoint` COUNT=4, from_index, to_index correct | PASS |
+| `TempoRandType` COUNT=5, from_index, to_index correct | PASS |
+| All new `SequencerState` fields with correct defaults | PASS |
+| `shift_committed_param_value` for all 8 indices | PASS |
+| `shift_clamped_param_value` for all 8 indices | PASS |
+| `shift_apply_param_value` for all 8 indices | PASS |
+| `ParamValueDelta` routes by `active_overlay` | PASS |
+| `Confirm` routes by `PendingEdit::Param { overlay, .. }` | PASS |
+| Indices 0 and 5 are safe stubs (no panic, no-op apply) | PASS |
+| Index 7 is reserved no-op | PASS |
+| `note_modifier` / `velocity_modifier` fields declared with correct types | PASS |
+| `SequencerState` remains Clone | PASS |
+| All public items documented | PASS |
+| No `unwrap()` in non-test code | PASS |
+| Clippy clean | PASS |
+
+#### QA Gap Found (fixed by reviewer)
+
+**[WARNING] Missing round-trip tests for stub indices 0 and 5 via `apply_command`**
+
+The acceptance criteria required "round-trip tests for each of the 7 active shift indices" (indices 0–6). Direct method tests existed for `shift_apply_param_value(0, ...)` and `shift_apply_param_value(5, ...)`, but no test exercised the full `ParamValueDelta + Confirm` path via `apply_command` for these indices. Two tests were added:
+
+- `test_shift_overlay_round_trip_note_rand_stub_is_noop` (index 0)
+- `test_shift_overlay_round_trip_step_rand_stub_is_noop` (index 5)
+
+Both verify the command path completes without panic and clears `pending_edit`. Committed in `ba4f2d7`.
+
+#### Final Test Results
+
+65 state unit tests pass (was 63 before review). Full suite: 376 tests across all integration test files. Clippy clean.
+
+**Verdict: APPROVE** — 0 critical, 1 warning (fixed), 0 info. Code is correct, well-documented, and all acceptance criteria are met after the QA fix.
