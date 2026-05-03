@@ -144,6 +144,8 @@ pub struct SequencerState {
     pub selected_param: u8,
     /// MIDI channel to output on (0–15, where 0 = channel 1 in MIDI spec).
     pub midi_channel: u8,
+    /// RNG state for all randomness streams; advanced on every tick.
+    pub rng_seed: u64,
 }
 
 impl Default for SequencerState {
@@ -166,8 +168,31 @@ impl Default for SequencerState {
             selected_step: 0,
             selected_param: 0,
             midi_channel: 0,
+            rng_seed: 0x853C_49E6_748F_EA9B,
         }
     }
+}
+
+/// Advance seed and return a pseudo-random u64 (Xorshift64).
+fn next_rand(seed: &mut u64) -> u64 {
+    let mut x = *seed;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    *seed = x;
+    x
+}
+
+/// Returns true with probability `chance/100`. `chance` is clamped to 0–100.
+#[allow(dead_code)]
+fn prob_hit(seed: &mut u64, chance: u8) -> bool {
+    if chance == 0 {
+        return false;
+    }
+    if chance >= 100 {
+        return true;
+    }
+    (next_rand(seed) % 100) < chance as u64
 }
 
 impl SequencerState {
@@ -197,6 +222,7 @@ impl SequencerState {
     /// `duration_nanos` is set to 0 here; the clock thread must overwrite it
     /// with the actual step period before forwarding the event to `midi_out`.
     pub fn tick(&mut self) -> Option<MidiEvent> {
+        next_rand(&mut self.rng_seed);
         if !self.playing || self.paused {
             return None;
         }
@@ -599,6 +625,100 @@ mod tests {
             crate::music_theory::Mode::Major,
         );
         assert_eq!(state.steps[3].midi_note, expected, "disabled step should still be snapped");
+    }
+
+    // ── RNG Infrastructure ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_prob_hit_zero_always_false() {
+        let mut seed = 0x853C_49E6_748F_EA9Bu64;
+        for _ in 0..1000 {
+            assert!(!prob_hit(&mut seed, 0), "prob_hit(0) must always return false");
+        }
+    }
+
+    #[test]
+    fn test_prob_hit_hundred_always_true() {
+        let mut seed = 0x853C_49E6_748F_EA9Bu64;
+        for _ in 0..1000 {
+            assert!(prob_hit(&mut seed, 100), "prob_hit(100) must always return true");
+        }
+    }
+
+    #[test]
+    fn test_prob_hit_fifty_percent_statistical() {
+        let mut seed = 0x853C_49E6_748F_EA9Bu64;
+        let mut hits: u32 = 0;
+        let n = 10_000u32;
+        for _ in 0..n {
+            if prob_hit(&mut seed, 50) {
+                hits += 1;
+            }
+        }
+        let ratio = hits as f64 / n as f64;
+        assert!(
+            ratio >= 0.45 && ratio <= 0.55,
+            "prob_hit(50) hit rate {ratio:.4} outside [0.45, 0.55]"
+        );
+    }
+
+    #[test]
+    fn test_rng_seed_advances_every_tick_even_when_not_playing() {
+        let mut state = SequencerState::default();
+        assert!(!state.playing, "default state should not be playing");
+        let seed_before = state.rng_seed;
+        state.tick();
+        assert_ne!(state.rng_seed, seed_before, "rng_seed must advance on tick() even when not playing");
+    }
+
+    #[test]
+    fn test_rng_seed_default_value() {
+        let state = SequencerState::default();
+        assert_eq!(state.rng_seed, 0x853C_49E6_748F_EA9B);
+    }
+
+    #[test]
+    fn test_sequencer_state_is_clone() {
+        let state = SequencerState::default();
+        let cloned = state.clone();
+        assert_eq!(cloned.rng_seed, state.rng_seed);
+    }
+
+    #[test]
+    fn test_rng_seed_advances_every_tick_when_paused() {
+        let mut state = SequencerState::default();
+        state.playing = true;
+        state.paused = true;
+        let seed_before = state.rng_seed;
+        state.tick();
+        assert_ne!(
+            state.rng_seed, seed_before,
+            "rng_seed must advance on tick() even when paused"
+        );
+    }
+
+    #[test]
+    fn test_rng_seed_advances_every_tick_when_playing() {
+        let mut state = SequencerState::default();
+        state.playing = true;
+        state.paused = false;
+        let seed_before = state.rng_seed;
+        state.tick();
+        assert_ne!(
+            state.rng_seed, seed_before,
+            "rng_seed must advance on tick() when playing"
+        );
+    }
+
+    #[test]
+    fn test_next_rand_produces_distinct_values() {
+        // Confirm next_rand is not an identity function and advances state each call.
+        let mut seed = 0x853C_49E6_748F_EA9Bu64;
+        let v1 = next_rand(&mut seed);
+        let v2 = next_rand(&mut seed);
+        let v3 = next_rand(&mut seed);
+        assert_ne!(v1, v2, "consecutive next_rand calls must produce distinct values");
+        assert_ne!(v2, v3, "consecutive next_rand calls must produce distinct values");
     }
 }
 
