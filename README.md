@@ -12,7 +12,7 @@ A 16-step MIDI sequencer built around a custom RP2040 HID controller. A host eng
 |---|---|
 | Rust stable ≥ 1.75 | `rustup update stable` |
 | ALSA development headers | Fedora: `sudo dnf install alsa-lib-devel` · Ubuntu/Debian: `sudo apt install libasound2-dev` |
-| hidraw kernel module | Usually loaded by default on Linux; `modprobe hidraw` if not |
+| hidraw kernel support | Built into the kernel on Fedora 38+ and most modern distros — no module to load. Verify with `ls /dev/hidraw*` after plugging in the controller. |
 | libhidapi (hidraw backend) | Fedora: `sudo dnf install hidapi-devel` · Ubuntu: `sudo apt install libhidapi-dev` |
 
 The engine can be built and tested without ALSA or hidraw by omitting the `hw-io` feature (see Testing below).
