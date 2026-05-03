@@ -10,6 +10,86 @@ use crate::music_theory::{Key, Mode};
 // state (e.g. sequencer.rs) continues to compile without modification.
 pub use crate::input::OverlayMode;
 
+/// When the tempo randomness roll fires.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TempoRollPoint {
+    /// Tempo randomness disabled.
+    Off,
+    /// Roll fires on every step.
+    Step,
+    /// Roll fires on every beat (4 steps at 1/16 resolution).
+    Beat,
+    /// Roll fires on every sequence loop.
+    Seq,
+}
+
+impl TempoRollPoint {
+    /// Number of TempoRollPoint variants.
+    pub const COUNT: usize = 4;
+
+    /// Convert a zero-based index (mod 4) to the corresponding TempoRollPoint variant.
+    pub fn from_index(i: usize) -> Self {
+        match i % Self::COUNT {
+            0 => TempoRollPoint::Off,
+            1 => TempoRollPoint::Step,
+            2 => TempoRollPoint::Beat,
+            _ => TempoRollPoint::Seq,
+        }
+    }
+
+    /// Return the zero-based index of this TempoRollPoint variant.
+    pub fn to_index(self) -> usize {
+        match self {
+            TempoRollPoint::Off  => 0,
+            TempoRollPoint::Step => 1,
+            TempoRollPoint::Beat => 2,
+            TempoRollPoint::Seq  => 3,
+        }
+    }
+}
+
+/// Shape of the tempo randomness curve.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TempoRandType {
+    /// Completely random within the variance window.
+    Random,
+    /// Bias toward increasing tempo.
+    Up,
+    /// Bias toward decreasing tempo.
+    Down,
+    /// Slow oscillation between min and max (sine-like).
+    Breathe,
+    /// Bounce back and forth between min and max.
+    PingPong,
+}
+
+impl TempoRandType {
+    /// Number of TempoRandType variants.
+    pub const COUNT: usize = 5;
+
+    /// Convert a zero-based index (mod 5) to the corresponding TempoRandType variant.
+    pub fn from_index(i: usize) -> Self {
+        match i % Self::COUNT {
+            0 => TempoRandType::Random,
+            1 => TempoRandType::Up,
+            2 => TempoRandType::Down,
+            3 => TempoRandType::Breathe,
+            _ => TempoRandType::PingPong,
+        }
+    }
+
+    /// Return the zero-based index of this TempoRandType variant.
+    pub fn to_index(self) -> usize {
+        match self {
+            TempoRandType::Random   => 0,
+            TempoRandType::Up       => 1,
+            TempoRandType::Down     => 2,
+            TempoRandType::Breathe  => 3,
+            TempoRandType::PingPong => 4,
+        }
+    }
+}
+
 /// Step resolution for the sequencer clock.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum StepSize {
@@ -144,6 +224,40 @@ pub struct SequencerState {
     pub selected_param: u8,
     /// MIDI channel to output on (0–15, where 0 = channel 1 in MIDI spec).
     pub midi_channel: u8,
+    /// RNG state for all randomness streams; advanced on every tick.
+    pub rng_seed: u64,
+    /// Step Randomness (0–100): per-step probability that an enabled step fires.
+    /// 0 = always fires (existing behaviour). 100 = never fires.
+    pub step_rand: u8,
+    /// Note Randomness (0–100): per-step probability that the note modifier is
+    /// applied. Only relevant when `note_modifier != 0`.
+    /// 0 = modifier never applied. 100 = modifier always applied.
+    pub note_rand: u8,
+
+    // --- Randomness ---
+    /// Probability (0–100) that the tempo randomness roll fires.
+    pub tempo_rand: u8,
+    /// When the tempo randomness roll fires.
+    pub tempo_roll_point: TempoRollPoint,
+    /// Maximum tempo variance as a percentage of the base BPM (1–99).
+    pub tempo_variance_max: u8,
+    /// Shape of the tempo randomness curve.
+    pub tempo_rand_type: TempoRandType,
+    /// When true, outgoing notes are quantised to the current scale.
+    pub scale_quant: bool,
+
+    // --- Shift modifiers ---
+    /// Semitone offset applied to every NoteOn. 0 = off.
+    ///
+    /// ParamValueDelta steps ±1 while `abs(value) ≤ 12`, then ±12 (one octave)
+    /// beyond that. Maximum ±96 (8 octaves).
+    pub note_modifier: i8,
+    /// When true, every step is muted at play time.
+    pub skip_modifier: bool,
+    /// Velocity offset applied to every NoteOn (-127..=127). 0 = off.
+    ///
+    /// Clamped to 0–127 at emit time.
+    pub velocity_modifier: i8,
 }
 
 impl Default for SequencerState {
@@ -166,8 +280,40 @@ impl Default for SequencerState {
             selected_step: 0,
             selected_param: 0,
             midi_channel: 0,
+            rng_seed: 0x853C_49E6_748F_EA9B,
+            step_rand: 0,
+            note_rand: 0,
+            tempo_rand: 0,
+            tempo_roll_point: TempoRollPoint::Off,
+            tempo_variance_max: 10,
+            tempo_rand_type: TempoRandType::Random,
+            scale_quant: false,
+            note_modifier: 0,
+            skip_modifier: false,
+            velocity_modifier: 0,
         }
     }
+}
+
+/// Advance seed and return a pseudo-random u64 (Xorshift64).
+pub fn next_rand(seed: &mut u64) -> u64 {
+    let mut x = *seed;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    *seed = x;
+    x
+}
+
+/// Returns true with probability `chance/100`. `chance` is clamped to 0–100.
+pub fn prob_hit(seed: &mut u64, chance: u8) -> bool {
+    if chance == 0 {
+        return false;
+    }
+    if chance >= 100 {
+        return true;
+    }
+    (next_rand(seed) % 100) < chance as u64
 }
 
 impl SequencerState {
@@ -197,6 +343,7 @@ impl SequencerState {
     /// `duration_nanos` is set to 0 here; the clock thread must overwrite it
     /// with the actual step period before forwarding the event to `midi_out`.
     pub fn tick(&mut self) -> Option<MidiEvent> {
+        next_rand(&mut self.rng_seed);
         if !self.playing || self.paused {
             return None;
         }
@@ -215,12 +362,49 @@ impl SequencerState {
             self.playhead = next;
         }
 
+        // Step Randomness: probabilistic mute of the whole step.
+        // step_rand is the mute probability (0 = never mute, 100 = always mute).
+        if prob_hit(&mut self.rng_seed, self.step_rand) {
+            return None;
+        }
+
         let step = &self.steps[self.playhead as usize];
         if step.enabled {
+            // 1. Skip modifier: mute the step entirely.
+            if self.skip_modifier {
+                return None;
+            }
+
+            // 2. Compute base note.
+            let mut note = step.midi_note;
+
+            // 3. Note modifier + Note Randomness gate.
+            //    Apply note_modifier first; then gate on note_rand probability.
+            //    If the prob roll misses, revert to the original note.
+            //    note_rand == 0  → prob_hit returns false → modifier never applied.
+            //    note_rand == 100 → prob_hit returns true → modifier always applied.
+            if self.note_modifier != 0 {
+                let modified = (note as i16 + self.note_modifier as i16).clamp(0, 127) as u8;
+                if prob_hit(&mut self.rng_seed, self.note_rand) {
+                    note = modified;
+                }
+            }
+
+            // 4. Scale Quantization: snap to key after note_modifier is applied.
+            //    Apply note_modifier first, then snap_to_key. If the modifier pushes
+            //    the note out of key, quantization corrects it.
+            if self.scale_quant {
+                note = crate::music_theory::snap_to_key(note, self.key, self.mode);
+            }
+
+            // 5. Velocity modifier: clamped to 0–127 at emit time.
+            let velocity =
+                (step.velocity as i16 + self.velocity_modifier as i16).clamp(0, 127) as u8;
+
             Some(MidiEvent::NoteOn {
                 channel: self.midi_channel,
-                note: step.midi_note,
-                velocity: step.velocity,
+                note,
+                velocity,
                 duration_nanos: 0,
             })
         } else {
@@ -277,9 +461,12 @@ impl SequencerState {
                         }
                         self.pending_edit = PendingEdit::None;
                     }
-                    PendingEdit::Param { index, value, .. } => {
-                        // BUG-012 fix: apply the pending param value to the state field.
-                        self.apply_param_value(index, value);
+                    PendingEdit::Param { overlay, index, value } => {
+                        // Route to the correct overlay-specific apply method.
+                        match overlay {
+                            OverlayMode::Regular => self.apply_param_value(index, value),
+                            OverlayMode::Shift   => self.shift_apply_param_value(index, value),
+                        }
                         self.pending_edit = PendingEdit::None;
                     }
                 }
@@ -321,13 +508,19 @@ impl SequencerState {
                     None => return, // No overlay open — ignore.
                 };
                 let index = self.selected_param;
-                // BUG-011 fix: seed from the current committed state value so the
-                // pending value is always in the same unit space as the state field.
+                // Seed from the current committed state value so the pending value
+                // is always in the same unit space as the state field.
                 let current_value = match self.pending_edit {
                     PendingEdit::Param { index: pi, value, .. } if pi == index => value,
-                    _ => self.committed_param_value(index),
+                    _ => match overlay {
+                        OverlayMode::Regular => self.committed_param_value(index),
+                        OverlayMode::Shift   => self.shift_committed_param_value(index),
+                    },
                 };
-                let new_value = self.clamped_param_value(index, current_value + d as i64);
+                let new_value = match overlay {
+                    OverlayMode::Regular => self.clamped_param_value(index, current_value + d as i64),
+                    OverlayMode::Shift   => self.shift_clamped_param_value(index, current_value + d as i64),
+                };
                 self.pending_edit = PendingEdit::Param { overlay, index, value: new_value };
             }
             InputCommand::PlayStop => {
@@ -338,6 +531,18 @@ impl SequencerState {
                     self.playing = true;
                 }
             }
+            InputCommand::NoteModifierSet(s) => {
+                self.note_modifier = s;
+            }
+            InputCommand::SkipModifierToggle => {
+                self.skip_modifier = !self.skip_modifier;
+            }
+            InputCommand::VelocityModifierSet(v) => {
+                self.velocity_modifier = v;
+            }
+            InputCommand::GenerateRandomSequence => {
+                self.generate_random_sequence();
+            }
         }
     }
 
@@ -347,7 +552,7 @@ impl SequencerState {
     /// Enum params use the variant index; numeric params use the raw value.
     /// Regular overlay indices: 0=Key, 1=Mode, 2=Swing, 3=StepSize,
     /// 4=loop_in, 5=loop_out, 6=paused, 7=playing.
-    fn committed_param_value(&self, index: u8) -> i64 {
+    pub fn committed_param_value(&self, index: u8) -> i64 {
         match index {
             0 => self.key.to_index() as i64,
             1 => self.mode.to_index() as i64,
@@ -410,6 +615,88 @@ impl SequencerState {
         }
     }
 
+    /// Return the current committed state value for shift param `index` as an i64.
+    ///
+    /// Shift overlay param index map:
+    /// 0=note_rand (Stream B — stub returns 0), 1=tempo_rand, 2=tempo_roll_point,
+    /// 3=tempo_variance_max, 4=tempo_rand_type, 5=step_rand (Stream B — stub returns 0),
+    /// 6=scale_quant, 7=reserved (returns 0).
+    pub fn shift_committed_param_value(&self, index: u8) -> i64 {
+        match index {
+            // 0: note_rand — owned by Stream B; stub until B merges.
+            0 => 0,
+            1 => self.tempo_rand as i64,
+            2 => self.tempo_roll_point.to_index() as i64,
+            3 => self.tempo_variance_max as i64,
+            4 => self.tempo_rand_type.to_index() as i64,
+            // 5: step_rand — owned by Stream B; stub until B merges.
+            5 => 0,
+            6 => self.scale_quant as i64,
+            // 7: reserved — always 0.
+            _ => 0,
+        }
+    }
+
+    /// Clamp or wrap `value` into the valid range for shift param `index`.
+    ///
+    /// Shift overlay param index map:
+    /// 0=note_rand (0–100), 1=tempo_rand (0–100), 2=tempo_roll_point (wraps),
+    /// 3=tempo_variance_max (1–99), 4=tempo_rand_type (wraps),
+    /// 5=step_rand (0–100), 6=scale_quant (0–1), 7=reserved (no-op).
+    pub fn shift_clamped_param_value(&self, index: u8, value: i64) -> i64 {
+        match index {
+            // 0: note_rand — owned by Stream B; passthrough stub.
+            0 => value.clamp(0, 100),
+            1 => value.clamp(0, 100),
+            2 => value.rem_euclid(TempoRollPoint::COUNT as i64),
+            3 => value.clamp(1, 99),
+            4 => value.rem_euclid(TempoRandType::COUNT as i64),
+            // 5: step_rand — owned by Stream B; passthrough stub.
+            5 => value.clamp(0, 100),
+            6 => value.clamp(0, 1),
+            // 7: reserved — no-op, return value unchanged.
+            _ => value,
+        }
+    }
+
+    /// Write the resolved `value` for shift param `index` back to the matching state field.
+    ///
+    /// Shift overlay param index map:
+    /// 0=note_rand (Stream B — no-op stub), 1=tempo_rand, 2=tempo_roll_point,
+    /// 3=tempo_variance_max, 4=tempo_rand_type, 5=step_rand (Stream B — no-op stub),
+    /// 6=scale_quant, 7=reserved (no-op).
+    pub fn shift_apply_param_value(&mut self, index: u8, value: i64) {
+        match index {
+            // 0: note_rand — owned by Stream B; no-op until B merges.
+            0 => {}
+            1 => self.tempo_rand = value as u8,
+            2 => self.tempo_roll_point = TempoRollPoint::from_index(value as usize),
+            3 => self.tempo_variance_max = value as u8,
+            4 => self.tempo_rand_type = TempoRandType::from_index(value as usize),
+            // 5: step_rand — owned by Stream B; no-op until B merges.
+            5 => {}
+            6 => self.scale_quant = value != 0,
+            // 7: reserved — no-op.
+            _ => {}
+        }
+    }
+
+    /// Randomise all 16 steps' notes to in-key values within MIDI range 48–84.
+    ///
+    /// Uses `next_rand(&mut self.rng_seed)` for each step. Enabled flags are
+    /// left unchanged — only `midi_note` is updated.
+    /// Generated note range: 48–84 (C3–C6, 3 octaves). The raw random value
+    /// is mapped to this range, then snapped to the current key/mode via
+    /// `music_theory::snap_to_key`.
+    fn generate_random_sequence(&mut self) {
+        for step in self.steps.iter_mut() {
+            let raw = next_rand(&mut self.rng_seed);
+            let note_in_range = (raw % 37) as u8 + 48; // 48..=84
+            step.midi_note =
+                crate::music_theory::snap_to_key(note_in_range, self.key, self.mode);
+        }
+    }
+
     /// Re-snap all 16 step notes to the nearest note in the current key and mode.
     ///
     /// Called immediately after `self.key` or `self.mode` is updated.
@@ -419,186 +706,6 @@ impl SequencerState {
             step.midi_note =
                 crate::music_theory::snap_to_key(step.midi_note, self.key, self.mode);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::input::OverlayMode;
-
-    // ── BUG-014: loop_out edit path ──────────────────────────────────────────
-
-    #[test]
-    fn test_loop_out_edit_path_via_overlay() {
-        let mut state = SequencerState::default();
-        // Simulate a pending param edit for loop_out (index 5) with value 10.
-        state.pending_edit = PendingEdit::Param {
-            overlay: OverlayMode::Regular,
-            index: 5,
-            value: 10,
-        };
-        // Confirm should apply loop_out = 10.
-        state.apply_command(InputCommand::Confirm);
-        assert_eq!(state.loop_out, 10);
-        assert_eq!(state.pending_edit, PendingEdit::None);
-    }
-
-    #[test]
-    fn test_committed_param_value_loop_out() {
-        let mut state = SequencerState::default();
-        state.loop_out = 12;
-        assert_eq!(state.committed_param_value(5), 12);
-    }
-
-    #[test]
-    fn test_param_select_delta_wraps_at_8() {
-        let mut state = SequencerState::default();
-        state.selected_param = 7;
-        state.apply_command(InputCommand::ParamSelectDelta(1));
-        assert_eq!(state.selected_param, 0);
-    }
-
-    // ── BUG-017: overlay confirm playing=true clears paused ─────────────────
-
-    #[test]
-    fn test_confirm_playing_clears_paused() {
-        let mut state = SequencerState::default();
-        state.paused = true;
-        state.playing = false;
-        // Simulate a pending param edit: index 7 (playing), value 1.
-        state.pending_edit = PendingEdit::Param {
-            overlay: OverlayMode::Regular,
-            index: 7,
-            value: 1,
-        };
-        state.apply_command(InputCommand::Confirm);
-        assert!(state.playing, "playing should be true after confirm");
-        assert!(!state.paused, "paused should be cleared when playing is set via overlay");
-    }
-
-    #[test]
-    fn test_confirm_playing_false_does_not_clear_paused() {
-        let mut state = SequencerState::default();
-        state.paused = true;
-        state.playing = true;
-        // Set playing=false via overlay — paused should be left unchanged.
-        state.pending_edit = PendingEdit::Param {
-            overlay: OverlayMode::Regular,
-            index: 7,
-            value: 0,
-        };
-        state.apply_command(InputCommand::Confirm);
-        assert!(!state.playing);
-        assert!(state.paused, "paused should be unchanged when playing is set to false");
-    }
-
-    // ── Key/Mode Note Shifting ───────────────────────────────────────────────
-
-    #[test]
-    fn test_key_change_snaps_all_steps() {
-        let mut state = SequencerState::default(); // Key::C, Mode::Major
-        state.steps[0].midi_note = 61; // C#4 — not in C major
-        state.steps[1].midi_note = 62; // D4
-        // Confirm Key change to C# (index 1)
-        state.pending_edit = PendingEdit::Param {
-            overlay: OverlayMode::Regular,
-            index: 0,
-            value: 1, // Key::Cs
-        };
-        state.apply_command(InputCommand::Confirm);
-        assert_eq!(state.key, crate::music_theory::Key::Cs);
-        // C#4 (61) is the root of C# major → stays 61
-        assert_eq!(state.steps[0].midi_note, 61);
-    }
-
-    #[test]
-    fn test_mode_change_snaps_all_steps() {
-        let mut state = SequencerState::default(); // Key::C, Mode::Major
-        // B4 (71) is in C major. C NaturalMinor scale: C D Eb F G Ab Bb.
-        // Bb=70 (dist=1), C5=72 (dist=1) — tie: lower wins → Bb4=70
-        state.steps[0].midi_note = 71; // B4
-        state.pending_edit = PendingEdit::Param {
-            overlay: OverlayMode::Regular,
-            index: 1,
-            value: 1, // Mode::NaturalMinor
-        };
-        state.apply_command(InputCommand::Confirm);
-        assert_eq!(state.mode, crate::music_theory::Mode::NaturalMinor);
-        assert_eq!(state.steps[0].midi_note, 70); // snapped to Bb4
-    }
-
-    #[test]
-    fn test_same_key_no_snap() {
-        let mut state = SequencerState::default(); // Key::C
-        state.steps[0].midi_note = 61; // C#4 — out of key, set directly
-        // Confirm Key=C again (no change)
-        state.pending_edit = PendingEdit::Param {
-            overlay: OverlayMode::Regular,
-            index: 0,
-            value: 0, // Key::C — same as current
-        };
-        state.apply_command(InputCommand::Confirm);
-        // No-op guard must fire; note must NOT be snapped
-        assert_eq!(state.steps[0].midi_note, 61);
-    }
-
-    #[test]
-    fn test_same_mode_no_snap() {
-        let mut state = SequencerState::default(); // Mode::Major
-        state.steps[0].midi_note = 61; // C#4 — out of C major, set directly
-        // Confirm Mode=Major again (no change)
-        state.pending_edit = PendingEdit::Param {
-            overlay: OverlayMode::Regular,
-            index: 1,
-            value: 0, // Mode::Major — same as current
-        };
-        state.apply_command(InputCommand::Confirm);
-        // No-op guard must fire; note must NOT be snapped
-        assert_eq!(state.steps[0].midi_note, 61);
-    }
-
-    #[test]
-    fn test_snap_all_16_steps() {
-        let mut state = SequencerState::default(); // Key::C, Mode::Major
-        for step in state.steps.iter_mut() {
-            step.midi_note = 61; // C#4 — not in C major
-        }
-        // Change to D major
-        state.pending_edit = PendingEdit::Param {
-            overlay: OverlayMode::Regular,
-            index: 0,
-            value: 2, // Key::D
-        };
-        state.apply_command(InputCommand::Confirm);
-        for step in &state.steps {
-            let expected = crate::music_theory::snap_to_key(
-                61,
-                crate::music_theory::Key::D,
-                crate::music_theory::Mode::Major,
-            );
-            assert_eq!(step.midi_note, expected);
-        }
-    }
-
-    #[test]
-    fn test_disabled_steps_are_snapped() {
-        let mut state = SequencerState::default(); // Key::C, Mode::Major
-        state.steps[3].enabled = false;
-        state.steps[3].midi_note = 61; // C#4 — not in C major
-        // Change to D major
-        state.pending_edit = PendingEdit::Param {
-            overlay: OverlayMode::Regular,
-            index: 0,
-            value: 2, // Key::D
-        };
-        state.apply_command(InputCommand::Confirm);
-        let expected = crate::music_theory::snap_to_key(
-            61,
-            crate::music_theory::Key::D,
-            crate::music_theory::Mode::Major,
-        );
-        assert_eq!(state.steps[3].midi_note, expected, "disabled step should still be snapped");
     }
 }
 

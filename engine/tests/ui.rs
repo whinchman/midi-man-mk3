@@ -3,8 +3,8 @@ use ratatui::Terminal;
 
 use engine::input::OverlayMode;
 use engine::music_theory::{Key, Mode};
-use engine::state::{PendingEdit, SequencerState, StepData, StepSize};
-use engine::ui_render::render_frame;
+use engine::state::{PendingEdit, SequencerState, StepData, StepSize, TempoRollPoint, TempoRandType};
+use engine::ui_render::{render_frame, shift_param_value_string, shift_pending_param_value_string};
 
 /// Build a known state: step 0 = C4 enabled, playhead=0, 120 BPM, C Major, PLAYING.
 fn known_state() -> SequencerState {
@@ -146,9 +146,14 @@ fn overlay_shift_shows_coming_soon() {
         .map(|(x, y)| buffer.cell((x, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
         .collect();
 
+    // Verify real shift overlay rendered (not the old placeholder).
     assert!(
-        all_text.contains("shift mode"),
-        "shift overlay must contain 'shift mode', got buffer text"
+        all_text.contains("Shift Overlay"),
+        "shift overlay must contain 'Shift Overlay', got buffer text"
+    );
+    assert!(
+        all_text.contains("Note Rnd"),
+        "shift overlay must show SHIFT_PARAMS[0]='Note Rnd', got buffer text"
     );
 }
 
@@ -455,12 +460,12 @@ fn overlay_regular_selected_param_2_shows_swing_highlighted() {
     );
 }
 
-// --- Overlay: F2 Shift shows "(shift mode" text ---
+// --- Overlay: Shift overlay renders all 8 SHIFT_PARAMS and action label ---
 
 #[test]
 fn overlay_shift_shows_shift_mode_text() {
     let state = known_state();
-    let backend = TestBackend::new(120, 12);
+    let backend = TestBackend::new(200, 12);
     let mut terminal = Terminal::new(backend).expect("test terminal");
 
     terminal.draw(|frame| {
@@ -470,13 +475,26 @@ fn overlay_shift_shows_shift_mode_text() {
     let buffer = terminal.backend().buffer().clone();
 
     let all_text: String = (0..12u16)
-        .flat_map(|y| (0..120u16).map(move |x| (x, y)))
+        .flat_map(|y| (0..200u16).map(move |x| (x, y)))
         .map(|(x, y)| buffer.cell((x, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
         .collect();
 
+    // All 8 shift param names must be visible.
+    for name in engine::ui_render::SHIFT_PARAMS.iter() {
+        assert!(
+            all_text.contains(name),
+            "shift overlay must contain SHIFT_PARAMS entry '{name}', got buffer text"
+        );
+    }
+
+    // Action label row must be visible.
     assert!(
-        all_text.contains("shift mode"),
-        "shift overlay must contain '(shift mode', got buffer text"
+        all_text.contains("[S]kip") || all_text.contains("Skip"),
+        "shift overlay must show skip action label, got buffer text"
+    );
+    assert!(
+        all_text.contains("[G]en") || all_text.contains("Gen"),
+        "shift overlay must show gen action label, got buffer text"
     );
 }
 
@@ -857,4 +875,166 @@ fn overlay_pending_paused_shows_on_not_raw_integer() {
         "overlay must NOT show '→1' (raw integer) for pending paused, got: {}",
         all_text
     );
+}
+
+// ─── shift_param_value_string unit tests ─────────────────────────────────────
+
+#[test]
+fn shift_param_value_string_note_rand() {
+    let mut s = SequencerState::default();
+    s.note_rand = 42;
+    assert_eq!(shift_param_value_string(&s, 0), "42");
+}
+
+#[test]
+fn shift_param_value_string_tempo_rand() {
+    let mut s = SequencerState::default();
+    s.tempo_rand = 75;
+    assert_eq!(shift_param_value_string(&s, 1), "75");
+}
+
+#[test]
+fn shift_param_value_string_roll_point_variants() {
+    let mut s = SequencerState::default();
+    s.tempo_roll_point = TempoRollPoint::Off;
+    assert_eq!(shift_param_value_string(&s, 2), "Off");
+    s.tempo_roll_point = TempoRollPoint::Step;
+    assert_eq!(shift_param_value_string(&s, 2), "Step");
+    s.tempo_roll_point = TempoRollPoint::Beat;
+    assert_eq!(shift_param_value_string(&s, 2), "Beat");
+    s.tempo_roll_point = TempoRollPoint::Seq;
+    assert_eq!(shift_param_value_string(&s, 2), "Seq");
+}
+
+#[test]
+fn shift_param_value_string_var_max() {
+    let mut s = SequencerState::default();
+    s.tempo_variance_max = 50;
+    assert_eq!(shift_param_value_string(&s, 3), "50");
+}
+
+#[test]
+fn shift_param_value_string_tempo_rand_type_variants() {
+    let mut s = SequencerState::default();
+    s.tempo_rand_type = TempoRandType::Random;
+    assert_eq!(shift_param_value_string(&s, 4), "Random");
+    s.tempo_rand_type = TempoRandType::Up;
+    assert_eq!(shift_param_value_string(&s, 4), "Up");
+    s.tempo_rand_type = TempoRandType::Down;
+    assert_eq!(shift_param_value_string(&s, 4), "Down");
+    s.tempo_rand_type = TempoRandType::Breathe;
+    assert_eq!(shift_param_value_string(&s, 4), "Breathe");
+    s.tempo_rand_type = TempoRandType::PingPong;
+    assert_eq!(shift_param_value_string(&s, 4), "PingPong");
+}
+
+#[test]
+fn shift_param_value_string_step_rand() {
+    let mut s = SequencerState::default();
+    s.step_rand = 33;
+    assert_eq!(shift_param_value_string(&s, 5), "33");
+}
+
+#[test]
+fn shift_param_value_string_scale_quant() {
+    let mut s = SequencerState::default();
+    s.scale_quant = false;
+    assert_eq!(shift_param_value_string(&s, 6), "Off");
+    s.scale_quant = true;
+    assert_eq!(shift_param_value_string(&s, 6), "On");
+}
+
+#[test]
+fn shift_param_value_string_reserved_returns_em_dash() {
+    let s = SequencerState::default();
+    // Index 7 is reserved; should not panic and return em dash.
+    let result = shift_param_value_string(&s, 7);
+    assert!(!result.is_empty(), "reserved param must return a non-empty string");
+}
+
+// ─── shift_pending_param_value_string unit tests ──────────────────────────────
+
+#[test]
+fn shift_pending_param_value_string_numeric() {
+    assert_eq!(shift_pending_param_value_string(0, 55), "55");
+    assert_eq!(shift_pending_param_value_string(1, 80), "80");
+    assert_eq!(shift_pending_param_value_string(3, 25), "25");
+    assert_eq!(shift_pending_param_value_string(5, 10), "10");
+}
+
+#[test]
+fn shift_pending_param_value_string_roll_point() {
+    assert_eq!(shift_pending_param_value_string(2, 0), "Off");
+    assert_eq!(shift_pending_param_value_string(2, 1), "Step");
+    assert_eq!(shift_pending_param_value_string(2, 2), "Beat");
+    assert_eq!(shift_pending_param_value_string(2, 3), "Seq");
+}
+
+#[test]
+fn shift_pending_param_value_string_tempo_rand_type() {
+    assert_eq!(shift_pending_param_value_string(4, 0), "Random");
+    assert_eq!(shift_pending_param_value_string(4, 1), "Up");
+    assert_eq!(shift_pending_param_value_string(4, 2), "Down");
+    assert_eq!(shift_pending_param_value_string(4, 3), "Breathe");
+    assert_eq!(shift_pending_param_value_string(4, 4), "PingPong");
+}
+
+#[test]
+fn shift_pending_param_value_string_scale_quant() {
+    assert_eq!(shift_pending_param_value_string(6, 0), "Off");
+    assert_eq!(shift_pending_param_value_string(6, 1), "On");
+}
+
+#[test]
+fn shift_pending_param_value_string_reserved_does_not_panic() {
+    let result = shift_pending_param_value_string(7, 999);
+    assert!(!result.is_empty());
+}
+
+// ─── Shift overlay: pending edit displayed in overlay ────────────────────────
+
+#[test]
+fn shift_overlay_pending_edit_shown_in_render() {
+    let mut state = known_state();
+    // Set a pending edit for shift param 1 (Tempo Rnd) value=88.
+    state.pending_edit = PendingEdit::Param {
+        overlay: OverlayMode::Shift,
+        index: 1,
+        value: 88,
+    };
+
+    let backend = TestBackend::new(200, 12);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+
+    terminal.draw(|frame| {
+        render_frame(frame, &state, Some(OverlayMode::Shift), 1);
+    }).expect("draw");
+
+    let buffer = terminal.backend().buffer().clone();
+    let all_text: String = (0..12u16)
+        .flat_map(|y| (0..200u16).map(move |x| (x, y)))
+        .map(|(x, y)| buffer.cell((x, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
+        .collect();
+
+    assert!(
+        all_text.contains("88"),
+        "shift overlay must show pending value 88, got: {}",
+        all_text
+    );
+}
+
+// ─── Shift overlay: render_frame with Shift overlay does not panic ────────────
+
+#[test]
+fn shift_overlay_render_frame_does_not_panic() {
+    let state = known_state();
+    let backend = TestBackend::new(200, 12);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+
+    // Must not panic for any selected_param including index 7 (reserved).
+    for sel in 0u8..=7 {
+        terminal.draw(|frame| {
+            render_frame(frame, &state, Some(OverlayMode::Shift), sel);
+        }).expect("draw must not panic");
+    }
 }

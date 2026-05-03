@@ -11,10 +11,177 @@
 
 use std::sync::{Arc, RwLock, mpsc::SyncSender};
 
-use crate::state::{MidiEvent, SequencerState, StepSize};
+use crate::state::{MidiEvent, SequencerState, StepSize, TempoRandType, TempoRollPoint};
 
 /// Number of nanoseconds in one minute.
 const NANOS_PER_MINUTE: u64 = 60_000_000_000;
+
+/// Minimum allowed effective BPM.
+const BPM_MIN: u16 = 20;
+/// Maximum allowed effective BPM.
+const BPM_MAX: u16 = 300;
+
+/// Initial seed for the clock-local Xorshift64 RNG (separate from `SequencerState::rng_seed`).
+pub const CLOCK_RNG_INIT: u64 = 0xA24B_AED4_963D_37C5;
+
+// ── Clock-local tempo jitter types ──────────────────────────────────────────
+
+/// Clock-local tempo jitter state.
+///
+/// Not stored in `SequencerState` — no lock needed.
+pub struct TempoRollState {
+    /// Step counter used for phase-based roll points (Beat, Seq).
+    phase: u64,
+    /// Current signed direction for PingPong (+1 or -1).
+    direction: i8,
+    /// Last computed BPM offset (carried between steps for smooth curves).
+    current_offset: i16,
+}
+
+impl Default for TempoRollState {
+    fn default() -> Self {
+        Self { phase: 0, direction: 1, current_offset: 0 }
+    }
+}
+
+/// Snapshot of tempo randomness params read from `SequencerState` under a read lock.
+pub struct TempoRandSnapshot {
+    /// Probability (0–100) that the tempo randomness roll fires.
+    pub tempo_rand: u8,
+    /// When the tempo randomness roll fires.
+    pub roll_point: TempoRollPoint,
+    /// Maximum BPM variance applied to the base tempo.
+    pub variance_max: u8,
+    /// Shape of the tempo randomness curve.
+    pub rand_type: TempoRandType,
+}
+
+// ── Clock-local RNG (Xorshift64) ────────────────────────────────────────────
+
+/// Advance seed and return a pseudo-random u64 (Xorshift64).
+///
+/// Uses the same algorithm as `state::next_rand` but operates on the
+/// clock-local seed, keeping tempo jitter independent of step/note randomness.
+#[inline]
+fn next_rand(seed: &mut u64) -> u64 {
+    let mut x = *seed;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    *seed = x;
+    x
+}
+
+/// Returns true with probability `chance/100`. `chance` is clamped to 0–100.
+#[inline]
+fn prob_hit(seed: &mut u64, chance: u8) -> bool {
+    if chance == 0 {
+        return false;
+    }
+    if chance >= 100 {
+        return true;
+    }
+    (next_rand(seed) % 100) < chance as u64
+}
+
+// ── Effective BPM computation ────────────────────────────────────────────────
+
+/// Compute the effective BPM after applying tempo jitter.
+///
+/// `base_bpm` is the clean BPM from `SequencerState` (never mutated here).
+/// `roll_state` is mutable clock-local phase/direction state.
+/// `params` is a snapshot of randomness params copied from state under a read lock.
+/// `rng` is the clock-local Xorshift64 seed (separate from `state.rng_seed`).
+/// `step_count` is the total steps elapsed since clock start (for Beat/Seq roll points).
+///
+/// Returns the effective BPM clamped to 20–300.
+pub fn compute_effective_bpm(
+    base_bpm: u16,
+    roll_state: &mut TempoRollState,
+    params: &TempoRandSnapshot,
+    rng: &mut u64,
+    step_count: u64,
+) -> u16 {
+    // Off → jitter disabled; return base unchanged.
+    if params.roll_point == TempoRollPoint::Off {
+        return base_bpm;
+    }
+
+    // Determine whether a roll fires this step.
+    let fires = match params.roll_point {
+        TempoRollPoint::Off => false,
+        TempoRollPoint::Step => true,
+        TempoRollPoint::Beat => step_count.is_multiple_of(4),
+        TempoRollPoint::Seq  => step_count.is_multiple_of(16),
+    };
+
+    if fires && prob_hit(rng, params.tempo_rand) {
+        let vm = params.variance_max as i16;
+
+        let new_offset = match params.rand_type {
+            TempoRandType::Random => {
+                let range = vm * 2 + 1;
+                (next_rand(rng) % range as u64) as i16 - vm
+            }
+            TempoRandType::Up => {
+                let next = roll_state.current_offset + 1;
+                if next > vm { 0 } else { next }
+            }
+            TempoRandType::Down => {
+                let next = roll_state.current_offset - 1;
+                if next < -vm { 0 } else { next }
+            }
+            TempoRandType::Breathe => {
+                // Triangle wave: rise from 0 to +vm, fall through -vm, repeat.
+                // Phase counts steps; full cycle = 4 * vm steps.
+                let cycle = (4 * vm as u64).max(1);
+                let phase = roll_state.phase % cycle;
+                let half = cycle / 2;
+                if phase < half {
+                    // Rising half: 0 → +vm → 0
+                    let pos = if phase < half / 2 {
+                        phase as i64 * vm as i64 / (half as i64 / 2).max(1)
+                    } else {
+                        let descend_phase = phase as i64 - half as i64 / 2;
+                        let descend_len = (half as i64 - half as i64 / 2).max(1);
+                        vm as i64 - descend_phase * vm as i64 / descend_len
+                    };
+                    pos as i16
+                } else {
+                    // Falling half: 0 → -vm → 0
+                    let phase2 = phase - half;
+                    let half2 = cycle - half;
+                    if phase2 < half2 / 2 {
+                        -(phase2 as i64 * vm as i64 / (half2 as i64 / 2).max(1)) as i16
+                    } else {
+                        let ascend_phase = phase2 as i64 - half2 as i64 / 2;
+                        let ascend_len = (half2 as i64 - half2 as i64 / 2).max(1);
+                        (-(vm as i64) + ascend_phase * vm as i64 / ascend_len) as i16
+                    }
+                }
+            }
+            TempoRandType::PingPong => {
+                let next = roll_state.current_offset + roll_state.direction as i16;
+                if next >= vm {
+                    roll_state.direction = -1;
+                    vm
+                } else if next <= -vm {
+                    roll_state.direction = 1;
+                    -vm
+                } else {
+                    next
+                }
+            }
+        };
+
+        roll_state.current_offset = new_offset;
+        roll_state.phase = roll_state.phase.wrapping_add(1);
+    }
+
+    // Apply the current (possibly just updated) offset to base BPM.
+    let effective = base_bpm as i32 + roll_state.current_offset as i32;
+    effective.clamp(BPM_MIN as i32, BPM_MAX as i32) as u16
+}
 
 /// Returns (beats_per_step_num, beats_per_step_den) as a rational multiplier.
 /// tick_nanos = 60_000_000_000 * num / (bpm * den)
@@ -150,15 +317,28 @@ pub fn run_clock(state: Arc<RwLock<SequencerState>>, midi_tx: SyncSender<MidiEve
     // Tracks the last (channel, note) that received a NoteOn so consecutive
     // identical notes can be retriggered by sending a NoteOff first.
     let mut last_note: Option<(u8, u8)> = None;
+    // Clock-local tempo jitter state (not stored in SequencerState).
+    let mut roll_state = TempoRollState::default();
+    // Clock-local RNG seed for tempo jitter (separate from state.rng_seed).
+    let mut local_rng: u64 = CLOCK_RNG_INIT;
 
     loop {
         // --- read current parameters (read lock, released immediately) ---
-        let (bpm, step_size, swing, playing) = {
+        let (bpm, step_size, swing, playing, rand_snapshot) = {
             let s = state.read().expect("clock: state RwLock poisoned");
-            (s.tempo_bpm, s.step_size, s.swing, s.playing)
+            let snap = TempoRandSnapshot {
+                tempo_rand: s.tempo_rand,
+                roll_point: s.tempo_roll_point,
+                variance_max: s.tempo_variance_max,
+                rand_type: s.tempo_rand_type,
+            };
+            (s.tempo_bpm, s.step_size, s.swing, s.playing, snap)
         };
 
-        let period = tick_nanos(bpm, step_size);
+        // Compute effective BPM (jitter applied clock-locally; base BPM never mutated).
+        let effective_bpm = compute_effective_bpm(bpm, &mut roll_state, &rand_snapshot, &mut local_rng, step_count);
+
+        let period = tick_nanos(effective_bpm, step_size);
         let swing_off = swing_offset_nanos(swing, period);
 
         // --- compute wake time for this tick ---
@@ -204,157 +384,6 @@ pub fn run_clock(state: Arc<RwLock<SequencerState>>, midi_tx: SyncSender<MidiEve
         // Advance next absolute time by one tick period.
         next_abs = add_nanos(next_abs, period);
         step_count = step_count.wrapping_add(1);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::state::{MidiEvent, SequencerState, StepData};
-    use std::sync::mpsc;
-
-    /// Simulates the retrigger logic from `run_clock` on a single tick.
-    ///
-    /// Returns the events that would be emitted for the given `maybe_event`,
-    /// given the current `last_note` state.  Updates `last_note` in place,
-    /// mirroring the production code.
-    fn simulate_tick(
-        maybe_event: Option<MidiEvent>,
-        last_note: &mut Option<(u8, u8)>,
-        period: u64,
-    ) -> Vec<MidiEvent> {
-        let mut events = Vec::new();
-        if let Some(MidiEvent::NoteOn { channel, note, velocity, .. }) = maybe_event {
-            if *last_note == Some((channel, note)) {
-                events.push(MidiEvent::NoteOff { channel, note });
-            }
-            events.push(MidiEvent::NoteOn { channel, note, velocity, duration_nanos: period });
-            *last_note = Some((channel, note));
-        }
-        events
-    }
-
-    // ── BUG-018: repeated-note retrigger ────────────────────────────────────
-
-    /// Two consecutive steps with the same note must each produce a NoteOn,
-    /// with a NoteOff inserted between them.
-    #[test]
-    fn test_retrigger_same_note_inserts_note_off() {
-        let mut state = SequencerState::default();
-        // Steps 0 and 1 both enabled with note 60, channel 0.
-        state.steps[0] = StepData { enabled: true, midi_note: 60, velocity: 100 };
-        state.steps[1] = StepData { enabled: true, midi_note: 60, velocity: 100 };
-        state.playing = true;
-        // playhead starts at 0; first tick advances to step 0.
-        // (tick() increments before reading: 0+1 wraps at 16 → step 1, no — let's
-        //  check: default playhead=0, tick advances next=1 when loop_active=false
-        //  and next<16, so sets playhead=1. We want steps 0,1 both enabled.)
-        // Re-initialise so playhead is at 15 (wraps to 0 on first tick).
-        state.playhead = 15;
-
-        let period: u64 = 500_000;
-        let mut last_note: Option<(u8, u8)> = None;
-
-        let e1 = simulate_tick(state.tick(), &mut last_note, period);
-        assert_eq!(e1, vec![MidiEvent::NoteOn { channel: 0, note: 60, velocity: 100, duration_nanos: period }],
-            "first tick: NoteOn only");
-        assert_eq!(last_note, Some((0, 60)));
-
-        let e2 = simulate_tick(state.tick(), &mut last_note, period);
-        assert_eq!(e2, vec![
-            MidiEvent::NoteOff { channel: 0, note: 60 },
-            MidiEvent::NoteOn  { channel: 0, note: 60, velocity: 100, duration_nanos: period },
-        ], "second tick: NoteOff then NoteOn for retrigger");
-    }
-
-    /// A different note on the second step must NOT produce a NoteOff first.
-    #[test]
-    fn test_no_retrigger_for_different_note() {
-        let mut state = SequencerState::default();
-        state.steps[0] = StepData { enabled: true, midi_note: 60, velocity: 100 };
-        state.steps[1] = StepData { enabled: true, midi_note: 62, velocity: 100 };
-        state.playing = true;
-        state.playhead = 15;
-
-        let period: u64 = 500_000;
-        let mut last_note: Option<(u8, u8)> = None;
-
-        let e1 = simulate_tick(state.tick(), &mut last_note, period);
-        assert_eq!(e1, vec![MidiEvent::NoteOn { channel: 0, note: 60, velocity: 100, duration_nanos: period }]);
-
-        let e2 = simulate_tick(state.tick(), &mut last_note, period);
-        assert_eq!(e2, vec![MidiEvent::NoteOn { channel: 0, note: 62, velocity: 100, duration_nanos: period }],
-            "different note: no NoteOff inserted");
-    }
-
-    /// A disabled step must NOT update last_note, so no phantom NoteOff fires.
-    #[test]
-    fn test_disabled_step_does_not_update_last_note() {
-        let mut state = SequencerState::default();
-        state.steps[0] = StepData { enabled: true,  midi_note: 60, velocity: 100 };
-        state.steps[1] = StepData { enabled: false, midi_note: 60, velocity: 100 };
-        state.steps[2] = StepData { enabled: true,  midi_note: 60, velocity: 100 };
-        state.playing = true;
-        state.playhead = 15;
-
-        let period: u64 = 500_000;
-        let mut last_note: Option<(u8, u8)> = None;
-
-        let _e1 = simulate_tick(state.tick(), &mut last_note, period); // step 0 → NoteOn
-        let e2 = simulate_tick(state.tick(), &mut last_note, period); // step 1 → disabled, None
-        assert!(e2.is_empty(), "disabled step emits no events");
-        assert_eq!(last_note, Some((0, 60)), "last_note unchanged after disabled step");
-
-        // Step 2 has the same note: because last_note is still set, a NoteOff fires.
-        // This is correct behaviour — the note from step 0 is still logically held.
-        let e3 = simulate_tick(state.tick(), &mut last_note, period); // step 2 → retrigger
-        assert_eq!(e3, vec![
-            MidiEvent::NoteOff { channel: 0, note: 60 },
-            MidiEvent::NoteOn  { channel: 0, note: 60, velocity: 100, duration_nanos: period },
-        ], "retrigger fires after disabled gap");
-    }
-
-    // ── run_clock integration: channel-based smoke test ─────────────────────
-
-    /// Two consecutive same-note steps both produce NoteOn events on the MIDI
-    /// channel, with a NoteOff sandwiched between them.
-    ///
-    /// This test drives `run_clock` in a real thread (sleep_until is a no-op on
-    /// non-Linux so the loop spins fast). We collect exactly 3 events and then
-    /// drop the receiver so the clock thread exits cleanly.
-    #[test]
-    fn test_run_clock_retrigger_via_channel() {
-        use std::sync::{Arc, RwLock};
-
-        let mut state = SequencerState::default();
-        // Two enabled steps with the same note; rest disabled.
-        state.steps[0] = StepData { enabled: true, midi_note: 60, velocity: 100 };
-        state.steps[1] = StepData { enabled: true, midi_note: 60, velocity: 100 };
-        state.playing = true;
-        state.playhead = 15; // wraps to 0 on first tick
-        // Very fast tempo and small step so the thread doesn't wait long.
-        state.tempo_bpm = 240;
-        state.step_size = StepSize::ThirtySecond;
-
-        let shared = Arc::new(RwLock::new(state));
-        // Capacity 3: thread will block after 3 events; dropping rx causes the
-        // next send to error, exiting the loop.
-        let (tx, rx) = mpsc::sync_channel::<MidiEvent>(3);
-
-        let shared_clone = Arc::clone(&shared);
-        let handle = std::thread::spawn(move || run_clock(shared_clone, tx));
-
-        // Collect the first 3 events.
-        let ev1 = rx.recv().expect("event 1");
-        let ev2 = rx.recv().expect("event 2");
-        let ev3 = rx.recv().expect("event 3");
-        // Drop receiver — causes the clock thread to exit on its next send.
-        drop(rx);
-        handle.join().ok();
-
-        assert!(matches!(ev1, MidiEvent::NoteOn { note: 60, .. }), "ev1 NoteOn");
-        assert!(matches!(ev2, MidiEvent::NoteOff { note: 60, .. }), "ev2 NoteOff retrigger");
-        assert!(matches!(ev3, MidiEvent::NoteOn { note: 60, .. }), "ev3 NoteOn again");
     }
 }
 

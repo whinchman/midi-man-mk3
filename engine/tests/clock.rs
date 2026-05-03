@@ -1,6 +1,10 @@
-use engine::clock::{add_nanos_signed, add_nanos, swing_offset_nanos, tick_nanos, step_ratio};
-use engine::state::{MidiEvent, SequencerState, StepSize};
+use engine::clock::{
+    add_nanos_signed, add_nanos, compute_effective_bpm, run_clock, swing_offset_nanos,
+    tick_nanos, step_ratio, TempoRandSnapshot, TempoRollState, CLOCK_RNG_INIT,
+};
+use engine::state::{MidiEvent, SequencerState, StepData, StepSize, TempoRandType, TempoRollPoint};
 use libc;
+use std::sync::mpsc;
 
 // --- tick_nanos formula ---
 
@@ -434,6 +438,348 @@ fn swing_120bpm_negative50_odd_step_advance_is_correct() {
     let result = add_nanos_signed(ts, offset);
     assert_eq!(result.tv_sec, 5, "tv_sec should remain 5");
     assert_eq!(result.tv_nsec, 37_500_000, "tv_nsec should be 37_500_000 ns");
+}
+
+// --- retrigger helpers (moved from src/clock.rs inline tests) ---
+
+/// Simulates the retrigger logic from `run_clock` on a single tick.
+///
+/// Returns the events that would be emitted for the given `maybe_event`,
+/// given the current `last_note` state.  Updates `last_note` in place,
+/// mirroring the production code.
+fn simulate_tick(
+    maybe_event: Option<MidiEvent>,
+    last_note: &mut Option<(u8, u8)>,
+    period: u64,
+) -> Vec<MidiEvent> {
+    let mut events = Vec::new();
+    if let Some(MidiEvent::NoteOn { channel, note, velocity, .. }) = maybe_event {
+        if *last_note == Some((channel, note)) {
+            events.push(MidiEvent::NoteOff { channel, note });
+        }
+        events.push(MidiEvent::NoteOn { channel, note, velocity, duration_nanos: period });
+        *last_note = Some((channel, note));
+    }
+    events
+}
+
+// ── BUG-018: repeated-note retrigger ────────────────────────────────────────
+
+/// Two consecutive steps with the same note must each produce a NoteOn,
+/// with a NoteOff inserted between them.
+#[test]
+fn test_retrigger_same_note_inserts_note_off() {
+    let mut state = SequencerState::default();
+    state.steps[0] = StepData { enabled: true, midi_note: 60, velocity: 100 };
+    state.steps[1] = StepData { enabled: true, midi_note: 60, velocity: 100 };
+    state.playing = true;
+    state.playhead = 15;
+
+    let period: u64 = 500_000;
+    let mut last_note: Option<(u8, u8)> = None;
+
+    let e1 = simulate_tick(state.tick(), &mut last_note, period);
+    assert_eq!(e1, vec![MidiEvent::NoteOn { channel: 0, note: 60, velocity: 100, duration_nanos: period }],
+        "first tick: NoteOn only");
+    assert_eq!(last_note, Some((0, 60)));
+
+    let e2 = simulate_tick(state.tick(), &mut last_note, period);
+    assert_eq!(e2, vec![
+        MidiEvent::NoteOff { channel: 0, note: 60 },
+        MidiEvent::NoteOn  { channel: 0, note: 60, velocity: 100, duration_nanos: period },
+    ], "second tick: NoteOff then NoteOn for retrigger");
+}
+
+/// A different note on the second step must NOT produce a NoteOff first.
+#[test]
+fn test_no_retrigger_for_different_note() {
+    let mut state = SequencerState::default();
+    state.steps[0] = StepData { enabled: true, midi_note: 60, velocity: 100 };
+    state.steps[1] = StepData { enabled: true, midi_note: 62, velocity: 100 };
+    state.playing = true;
+    state.playhead = 15;
+
+    let period: u64 = 500_000;
+    let mut last_note: Option<(u8, u8)> = None;
+
+    let e1 = simulate_tick(state.tick(), &mut last_note, period);
+    assert_eq!(e1, vec![MidiEvent::NoteOn { channel: 0, note: 60, velocity: 100, duration_nanos: period }]);
+
+    let e2 = simulate_tick(state.tick(), &mut last_note, period);
+    assert_eq!(e2, vec![MidiEvent::NoteOn { channel: 0, note: 62, velocity: 100, duration_nanos: period }],
+        "different note: no NoteOff inserted");
+}
+
+/// A disabled step must NOT update last_note, so no phantom NoteOff fires.
+#[test]
+fn test_disabled_step_does_not_update_last_note() {
+    let mut state = SequencerState::default();
+    state.steps[0] = StepData { enabled: true,  midi_note: 60, velocity: 100 };
+    state.steps[1] = StepData { enabled: false, midi_note: 60, velocity: 100 };
+    state.steps[2] = StepData { enabled: true,  midi_note: 60, velocity: 100 };
+    state.playing = true;
+    state.playhead = 15;
+
+    let period: u64 = 500_000;
+    let mut last_note: Option<(u8, u8)> = None;
+
+    let _e1 = simulate_tick(state.tick(), &mut last_note, period); // step 0 → NoteOn
+    let e2 = simulate_tick(state.tick(), &mut last_note, period); // step 1 → disabled, None
+    assert!(e2.is_empty(), "disabled step emits no events");
+    assert_eq!(last_note, Some((0, 60)), "last_note unchanged after disabled step");
+
+    // Step 2 has the same note: because last_note is still set, a NoteOff fires.
+    let e3 = simulate_tick(state.tick(), &mut last_note, period); // step 2 → retrigger
+    assert_eq!(e3, vec![
+        MidiEvent::NoteOff { channel: 0, note: 60 },
+        MidiEvent::NoteOn  { channel: 0, note: 60, velocity: 100, duration_nanos: period },
+    ], "retrigger fires after disabled gap");
+}
+
+// ── run_clock integration: channel-based smoke test ─────────────────────────
+
+/// Two consecutive same-note steps both produce NoteOn events on the MIDI
+/// channel, with a NoteOff sandwiched between them.
+#[test]
+fn test_run_clock_retrigger_via_channel() {
+    use std::sync::{Arc, RwLock};
+
+    let mut state = SequencerState::default();
+    state.steps[0] = StepData { enabled: true, midi_note: 60, velocity: 100 };
+    state.steps[1] = StepData { enabled: true, midi_note: 60, velocity: 100 };
+    state.playing = true;
+    state.playhead = 15;
+    state.tempo_bpm = 240;
+    state.step_size = StepSize::ThirtySecond;
+
+    let shared = Arc::new(RwLock::new(state));
+    let (tx, rx) = mpsc::sync_channel::<MidiEvent>(3);
+
+    let shared_clone = Arc::clone(&shared);
+    let handle = std::thread::spawn(move || run_clock(shared_clone, tx));
+
+    let ev1 = rx.recv().expect("event 1");
+    let ev2 = rx.recv().expect("event 2");
+    let ev3 = rx.recv().expect("event 3");
+    drop(rx);
+    handle.join().ok();
+
+    assert!(matches!(ev1, MidiEvent::NoteOn { note: 60, .. }), "ev1 NoteOn");
+    assert!(matches!(ev2, MidiEvent::NoteOff { note: 60, .. }), "ev2 NoteOff retrigger");
+    assert!(matches!(ev3, MidiEvent::NoteOn { note: 60, .. }), "ev3 NoteOn again");
+}
+
+// ── compute_effective_bpm tests ──────────────────────────────────────────────
+
+#[test]
+fn test_compute_effective_bpm_tempo_rand_zero_returns_base() {
+    let mut roll_state = TempoRollState::default();
+    let mut rng = CLOCK_RNG_INIT;
+    let params = TempoRandSnapshot {
+        tempo_rand: 0,
+        roll_point: TempoRollPoint::Step,
+        variance_max: 20,
+        rand_type: TempoRandType::Random,
+    };
+    for step in 0..1000u64 {
+        let effective = compute_effective_bpm(120, &mut roll_state, &params, &mut rng, step);
+        assert_eq!(effective, 120, "tempo_rand=0 must always return base BPM");
+    }
+}
+
+#[test]
+fn test_compute_effective_bpm_off_returns_base() {
+    let mut roll_state = TempoRollState::default();
+    let mut rng = CLOCK_RNG_INIT;
+    let params = TempoRandSnapshot {
+        tempo_rand: 100,
+        roll_point: TempoRollPoint::Off,
+        variance_max: 20,
+        rand_type: TempoRandType::Random,
+    };
+    for step in 0..1000u64 {
+        let effective = compute_effective_bpm(120, &mut roll_state, &params, &mut rng, step);
+        assert_eq!(effective, 120, "roll_point=Off must always return base BPM");
+    }
+}
+
+#[test]
+fn test_compute_effective_bpm_random_stays_in_bounds() {
+    let mut roll_state = TempoRollState::default();
+    let mut rng = CLOCK_RNG_INIT;
+    let base = 120u16;
+    let vm = 20u8;
+    let params = TempoRandSnapshot {
+        tempo_rand: 100,
+        roll_point: TempoRollPoint::Step,
+        variance_max: vm,
+        rand_type: TempoRandType::Random,
+    };
+    for step in 0..1000u64 {
+        let effective = compute_effective_bpm(base, &mut roll_state, &params, &mut rng, step);
+        assert!(
+            effective >= base - vm as u16 && effective <= base + vm as u16,
+            "Random BPM {effective} out of [{}, {}]",
+            base - vm as u16, base + vm as u16
+        );
+    }
+}
+
+#[test]
+fn test_compute_effective_bpm_clamped_to_range() {
+    let mut roll_state = TempoRollState::default();
+    let mut rng = CLOCK_RNG_INIT;
+    let params = TempoRandSnapshot {
+        tempo_rand: 100,
+        roll_point: TempoRollPoint::Step,
+        variance_max: 99,
+        rand_type: TempoRandType::Random,
+    };
+    for step in 0..1000u64 {
+        let effective = compute_effective_bpm(25, &mut roll_state, &params, &mut rng, step);
+        assert!(effective >= 20, "BPM {effective} below minimum 20");
+        assert!(effective <= 300, "BPM {effective} above maximum 300");
+    }
+}
+
+#[test]
+fn test_compute_effective_bpm_pingpong_bounces() {
+    let mut roll_state = TempoRollState::default();
+    let mut rng = CLOCK_RNG_INIT;
+    let base = 120u16;
+    let vm = 10u8;
+    let params = TempoRandSnapshot {
+        tempo_rand: 100,
+        roll_point: TempoRollPoint::Step,
+        variance_max: vm,
+        rand_type: TempoRandType::PingPong,
+    };
+
+    let mut prev = base as i32;
+    let mut direction_up = true;
+
+    for step in 0..200u64 {
+        let effective = compute_effective_bpm(base, &mut roll_state, &params, &mut rng, step) as i32;
+        let offset = effective - base as i32;
+        assert!(offset >= -(vm as i32) && offset <= vm as i32,
+            "PingPong offset {offset} out of bounds at step {step}");
+
+        if direction_up {
+            if effective < prev {
+                direction_up = false;
+            }
+        } else if effective > prev {
+            direction_up = true;
+        }
+        prev = effective;
+    }
+}
+
+#[test]
+fn test_compute_effective_bpm_breathe_within_bounds() {
+    let mut roll_state = TempoRollState::default();
+    let mut rng = CLOCK_RNG_INIT;
+    let base = 120u16;
+    let vm = 10u8;
+    let params = TempoRandSnapshot {
+        tempo_rand: 100,
+        roll_point: TempoRollPoint::Step,
+        variance_max: vm,
+        rand_type: TempoRandType::Breathe,
+    };
+    for step in 0..1000u64 {
+        let effective = compute_effective_bpm(base, &mut roll_state, &params, &mut rng, step);
+        let offset = effective as i32 - base as i32;
+        assert!(
+            offset >= -(vm as i32) && offset <= vm as i32,
+            "Breathe offset {offset} out of bounds at step {step}"
+        );
+    }
+}
+
+#[test]
+fn test_tempo_bpm_never_mutated_by_run_clock() {
+    use std::sync::{Arc, RwLock};
+
+    let initial_bpm = 120u16;
+    let mut state = SequencerState::default();
+    state.tempo_bpm = initial_bpm;
+    state.tempo_rand = 100;
+    state.tempo_roll_point = TempoRollPoint::Step;
+    state.tempo_variance_max = 20;
+    state.tempo_rand_type = TempoRandType::Random;
+    state.playing = true;
+    state.steps[0] = StepData { enabled: true, midi_note: 60, velocity: 100 };
+    state.tempo_bpm = 240;
+    state.step_size = StepSize::ThirtySecond;
+
+    let shared = Arc::new(RwLock::new(state));
+    let (tx, rx) = mpsc::sync_channel::<MidiEvent>(32);
+
+    let shared_clone = Arc::clone(&shared);
+    let handle = std::thread::spawn(move || run_clock(shared_clone, tx));
+
+    for _ in 0..10 {
+        let _ = rx.recv();
+    }
+    drop(rx);
+    handle.join().ok();
+
+    let final_bpm = shared.read().expect("read").tempo_bpm;
+    assert_eq!(final_bpm, 240, "tempo_bpm must not be mutated by the clock thread");
+}
+
+#[test]
+fn test_compute_effective_bpm_seq_fires_every_16_steps() {
+    let mut roll_state = TempoRollState::default();
+    let mut rng = CLOCK_RNG_INIT;
+    let base = 120u16;
+    let params = TempoRandSnapshot {
+        tempo_rand: 100,
+        roll_point: TempoRollPoint::Seq,
+        variance_max: 10,
+        rand_type: TempoRandType::Up,
+    };
+    let mut last_bpm = compute_effective_bpm(base, &mut roll_state, &params, &mut rng, 0);
+
+    for step in 1..80u64 {
+        let effective = compute_effective_bpm(base, &mut roll_state, &params, &mut rng, step);
+        if effective != last_bpm {
+            assert_eq!(step % 16, 0,
+                "Seq roll changed at step {step}, not a multiple of 16");
+            last_bpm = effective;
+        }
+    }
+}
+
+#[test]
+fn test_compute_effective_bpm_beat_fires_every_4_steps() {
+    let mut roll_state = TempoRollState::default();
+    let mut rng = CLOCK_RNG_INIT;
+    let base = 120u16;
+    let params = TempoRandSnapshot {
+        tempo_rand: 100,
+        roll_point: TempoRollPoint::Beat,
+        variance_max: 10,
+        rand_type: TempoRandType::Up,
+    };
+    let mut last_update_step: Option<u64> = None;
+    let mut last_bpm = compute_effective_bpm(base, &mut roll_state, &params, &mut rng, 0);
+
+    for step in 1..40u64 {
+        let effective = compute_effective_bpm(base, &mut roll_state, &params, &mut rng, step);
+        if effective != last_bpm {
+            assert_eq!(step % 4, 0,
+                "Beat roll changed at step {step}, not a multiple of 4");
+            last_update_step = Some(step);
+            last_bpm = effective;
+        } else {
+            if let Some(last) = last_update_step {
+                assert!(step - last < 4,
+                    "BPM unchanged for {} steps (expected change at beat boundary)", step - last);
+            }
+        }
+    }
 }
 
 // --- NoteOn carries duration_nanos from tick_nanos ---
