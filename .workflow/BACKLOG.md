@@ -33,6 +33,5 @@ Updates or improvements to existing functionality.
 ## Issues
 
 Possible bugs, regressions, or things that feel broken or degraded.
-- [ ] changing notes with up/down on keyboard only allows for changing 1 note up or down from current note. (pressing enter properly sets new note though, but we should be able to cycle all the way up or down)
-- [ ] in Regular Overlay mode - all selections show a number instead of proper selection type (ie [key:C->1] not [Key:C->D]).
-- [ ] in regular overlay mode - none of the options actually work.
+
+<!-- All three issues (note cycling, overlay display, overlay functionality) fixed in PR #22 (BUG-010, BUG-011, BUG-012, BUG-014, BUG-017) -->
