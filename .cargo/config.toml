@@ -1,6 +1,29 @@
 [build]
 # Default build targets the host. The firmware crate must be built explicitly
 # with `-p firmware` after setting its own .cargo/config.toml target.
+#
+# Local developer overrides (gitignored):
+# If your system is missing alsa-lib-devel, create .cargo/config.local.toml
+# with the following content and point Cargo at it via CARGO_CONFIG_TOML
+# or by temporarily editing this file (do not commit those changes):
+#
+#   # .cargo/config.local.toml  (gitignored)
+#   [env]
+#   PKG_CONFIG_PATH = "/tmp/alsa-pkg"
+#   [target.x86_64-unknown-linux-gnu]
+#   rustflags = ["-L", "/tmp/alsa-lib"]
+#
+# Create the helper files:
+#   mkdir -p /tmp/alsa-pkg && cat > /tmp/alsa-pkg/alsa.pc << 'EOF'
+#   prefix=/usr
+#   libdir=/usr/lib64
+#   includedir=/usr/include
+#   Name: alsa
+#   Version: 1.0
+#   Libs: -L/tmp/alsa-lib -lasound
+#   Cflags: -I/usr/include/alsa
+#   EOF
+#   mkdir -p /tmp/alsa-lib && ln -sf /usr/lib64/libasound.so.2 /tmp/alsa-lib/libasound.so
 
 [target.x86_64-unknown-linux-gnu]
 # No special linker needed for the engine on the host.
