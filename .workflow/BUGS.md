@@ -423,3 +423,34 @@ The comment references a "Step 7" that was never implemented. Pressing Enter in 
 Implement the `PendingEdit::Param` commit arm to dispatch to the correct field based on `index`. The exact form depends on whether enum helpers (`Key::from_index`, etc.) exist — add them if not. At minimum: index 0 → `self.key`, 1 → `self.mode`, 2 → `self.swing`, 3 → `self.step_size`, with appropriate clamping/wrapping.
 
 ---
+
+## BUG-013 — [WARNING] `.cargo/config.toml` comment references non-existent `CARGO_CONFIG_TOML` env var
+
+- **File:** `.cargo/config.toml` (lines 7–8 on branch `fix/known-bugs`, commit 75b7cdd)
+- **Branch:** `fix/known-bugs`
+- **Discovered:** 2026-05-02 by code-reviewer agent (fix-cargo-config-tmp-paths review)
+- **Severity:** warning
+
+### Description
+
+The comment added in commit 75b7cdd tells developers they can use the `.cargo/config.local.toml` override file "via `CARGO_CONFIG_TOML`". No such environment variable exists in Cargo (verified against Cargo 1.93.1). A developer following the instructions will be unable to find any documentation or support for this env var, and may conclude the override mechanism is broken or unavailable.
+
+### Reproduction
+
+1. Read the comment in `.cargo/config.toml` on `fix/known-bugs` (line 7–8).
+2. Search Cargo documentation for `CARGO_CONFIG_TOML` — not found.
+3. Try `CARGO_CONFIG_TOML=.cargo/config.local.toml cargo build` — env var is silently ignored.
+
+### Suggested Fix
+
+Replace the `CARGO_CONFIG_TOML` reference with the actual supported mechanism — the `--config` flag:
+
+```
+# To activate without editing this file, pass --config on the command line:
+#   cargo build --config .cargo/config.local.toml
+# Or export the overrides directly in your shell before building:
+#   export PKG_CONFIG_PATH=/tmp/alsa-pkg
+#   export RUSTFLAGS="-L /tmp/alsa-lib"
+```
+
+---
