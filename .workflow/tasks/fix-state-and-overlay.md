@@ -1,6 +1,6 @@
 # Task: fix-state-and-overlay
 
-- **Status**: pending
+- **Status**: request-changes
 - **Type**: coder
 - **Feature Branch**: fix/known-bugs
 - **Branch**: fix/known-bugs/fix-state-and-overlay
@@ -80,3 +80,86 @@ Add/expose `from_index` helpers on Key, Mode, StepSize if they don't exist. Add 
 
 ## Notes
 
+Branch: `fix-state-and-overlay` (worktree at `.workflow/worktrees/fix-state-and-overlay`)
+
+### Changes
+
+- `engine/src/music_theory.rs`: Added `Key::from_index`/`to_index` and `Mode::from_index`/`to_index` helpers.
+- `engine/src/state.rs`:
+  - Added `StepSize::from_index`/`to_index` helpers.
+  - BUG-010: `NoteDelta` arm now reads pending note as base if pending edit is for the same step.
+  - BUG-011: `ParamValueDelta` seeds `current_value` from `committed_param_value()` (variant index for enums, raw value for numerics) instead of 0.
+  - BUG-012: `Confirm` for `PendingEdit::Param` dispatches to the correct state field via `apply_param_value()`.
+  - Added private helpers: `committed_param_value`, `clamped_param_value`, `apply_param_value`.
+- `engine/src/ui_render.rs`: Added `pending_param_value_string()` which formats pending param values using the same human-readable formatters as the committed values (key_name, mode_name, step_size_label, etc.).
+- `engine/tests/state.rs`: Added 8 new tests covering BUG-010, BUG-011, BUG-012.
+
+### Test results
+
+All 257 tests pass (`cargo test -p engine`).
+
+---
+
+### Code Review Findings
+
+**Reviewer:** code-reviewer agent  
+**Date:** 2026-05-02  
+**Verdict:** request-changes
+
+#### Summary
+
+BUG-010 (NoteDelta accumulation) and BUG-011 (param seeding) are correctly fixed with clean tests. BUG-012 (Confirm dispatch) is partially implemented — key, mode, swing, step_size, paused, and playing are wired up, but `loop_out` is never written and a state inconsistency is introduced when playing is set via the overlay while paused. BUG-004 credit in the task header is inaccurate (the tick/velocity fix was already in the base branch `fix/known-bugs`; no BUG-004-related diff appears in this branch), but the fix itself is present and correct in the base.
+
+---
+
+#### [WARNING] engine/src/state.rs:381 — `apply_param_value` index 4 writes only `loop_in`; `loop_out` is unreachable
+
+The `REGULAR_PARAMS` UI table has a single "Loop" slot at index 4. The task spec says index 4 → `self.loop_in` / `self.loop_out`. However, `committed_param_value(4)` returns only `self.loop_in`, `apply_param_value(4, v)` writes only `self.loop_in`, and there is no mechanism to edit `loop_out` at all through the param overlay.
+
+This means a user turning the param knob on "Loop" only adjusts the loop start point; the loop end point (`loop_out`) cannot be changed via the overlay. A full implementation requires either a two-value representation for index 4 (e.g., encode as `loop_in * 16 + loop_out`) or splitting loop control across two param slots.
+
+**Suggested fix:** For a minimal patch, document the limitation in a TODO comment in `committed_param_value` and `apply_param_value`. For a proper fix: either encode both in a single i64 (upper nibble = loop_out, lower nibble = loop_in), or add a second param slot (index 7+) for `loop_out` and resize `REGULAR_PARAMS`.
+
+---
+
+#### [WARNING] engine/src/state.rs:383 — `apply_param_value(6, 1)` sets `playing=true` without clearing `paused`
+
+`apply_param_value` index 6 sets `self.playing = value != 0`. If `playing` is set to `true` while `paused` is `true`, `tick()` returns `None` unconditionally (`if !self.playing || self.paused { return None; }`). The normal `PlayStop` command always clears `paused` when transitioning — but the overlay confirm path does not.
+
+**Reproduction:**
+1. Set `state.paused = true; state.playing = true;` (the paused state).
+2. Open overlay, navigate to index 6 (Stop/Start), press Up then Confirm.
+3. `state.playing` is now `true`, `state.paused` is still `true`. `tick()` never fires.
+
+**Suggested fix:** In `apply_param_value`, mirror the PlayStop behavior for index 6:
+```rust
+6 => {
+    self.playing = value != 0;
+    if self.playing { self.paused = false; }  // clear paused when starting
+}
+```
+
+---
+
+#### [INFO] engine/src/ui_render.rs:331 — `pending_param_value_string(4, v)` format inconsistent with `param_value_string(4, ...)`
+
+`param_value_string(4)` shows `"off"` (loop inactive) or `"X–Y"` (loop active). `pending_param_value_string(4, v)` returns `format!("{}", v)` — just a raw integer. The arrow display for Loop is therefore asymmetric: `[Loop:off→3]` or `[Loop:0–15→3]` where `3` is `loop_in`. This is not a regression (BUG-011 is fixed — it no longer shows a delta from 0 for other params), but the Loop param display is still visually unclear.
+
+**Suggested fix:** Format pending loop as `format!("{}–{}", v, state.loop_out)` or update the format when loop_out editing is properly implemented.
+
+---
+
+#### [INFO] engine/tests/state.rs — No test for the `playing`+`paused` edge case after param confirm
+
+The new tests cover key, mode, swing, step_size confirms (BUG-012), and key/swing delta seeding (BUG-011), and five-degree accumulation (BUG-010). They do not cover: confirming playing=true while paused, confirming loop_in change, or confirming paused param. These gaps leave the `playing`+`paused` inconsistency (see WARNING above) without a failing test to catch it.
+
+---
+
+#### [INFO] Task header lists BUG-004 as fixed in this branch — not accurate
+
+The diff from `fix/known-bugs` to `fix-state-and-overlay` contains no changes to `tick()` velocity handling or the `tick_note_on_has_correct_fields` test. Both were already in the `fix/known-bugs` base. The fix is present and correct; only the attribution in the task header is misleading.
+
+---
+
+**Findings total:** 2 warning, 2 info  
+**Verdict:** request-changes (2 warnings must be addressed before merge)

@@ -489,6 +489,72 @@ if let Some(f) = filter {
 
 ---
 
+## BUG-014 — [WARNING] `apply_param_value` index 4 writes only `loop_in`; `loop_out` is unreachable through the overlay
+
+- **File:** `engine/src/state.rs`, lines 348–386
+- **Branch:** `fix-state-and-overlay`
+- **Discovered:** 2026-05-02 by code-reviewer agent (fix-state-and-overlay review)
+- **Severity:** warning
+
+### Description
+
+The "Loop" param (index 4 in `REGULAR_PARAMS`) is specified to control `loop_in` and `loop_out`. The implementation in `committed_param_value(4)` seeds only from `self.loop_in`, and `apply_param_value(4, v)` writes only `self.loop_in`. There is no mechanism to edit `loop_out` through the param overlay. A user turning the knob on "Loop" can only adjust the loop start point; the loop end point is permanently stuck at its default (15) unless set directly in code.
+
+### Reproduction
+
+1. Open the regular overlay.
+2. Navigate to the "Loop" param (index 4).
+3. Press Up/Down multiple times and Confirm.
+4. Only `state.loop_in` changes; `state.loop_out` remains at 15.
+
+### Suggested Fix
+
+Either:
+- Add a second param slot for `loop_out` (resize `REGULAR_PARAMS` to 8 entries and add index 7).
+- Encode both as `loop_in * 16 + loop_out` in the single i64 value and decode on apply.
+- At minimum, document in a `// TODO` comment that `loop_out` editing is not yet implemented.
+
+---
+
+## BUG-015 — [WARNING] `apply_param_value(6, 1)` sets `playing=true` without clearing `paused`
+
+- **File:** `engine/src/state.rs`, line 383
+- **Branch:** `fix-state-and-overlay`
+- **Discovered:** 2026-05-02 by code-reviewer agent (fix-state-and-overlay review)
+- **Severity:** warning
+
+### Description
+
+`apply_param_value` for index 6 (Stop/Start param) executes `self.playing = value != 0`. If `playing` is set to `true` while `paused` is still `true`, `tick()` returns `None` unconditionally (`if !self.playing || self.paused { return None; }`). The normal `PlayStop` command always clears `paused` when starting, but the overlay confirm path does not. This means the sequencer can enter a `playing=true, paused=true` state that silently prevents any MIDI notes from firing.
+
+### Reproduction
+
+```rust
+let mut s = SequencerState::default();
+s.paused = true;
+s.playing = false;
+s.active_overlay = Some(OverlayMode::Regular);
+s.selected_param = 6; // Stop/Start
+s.apply_command(InputCommand::ParamValueDelta(1)); // pending value → 1 (playing=true)
+s.apply_command(InputCommand::Confirm);
+// state.playing=true, state.paused=true → tick() returns None every call
+```
+
+### Suggested Fix
+
+In `apply_param_value`, clear `paused` when setting `playing = true`, mirroring `PlayStop`:
+
+```rust
+6 => {
+    self.playing = value != 0;
+    if self.playing {
+        self.paused = false;
+    }
+}
+```
+
+---
+
 ## BUG-013 — [WARNING] `.cargo/config.toml` comment references non-existent `CARGO_CONFIG_TOML` env var
 
 - **File:** `.cargo/config.toml` (lines 7–8 on branch `fix/known-bugs`, commit 75b7cdd)
