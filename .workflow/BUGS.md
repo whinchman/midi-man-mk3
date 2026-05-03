@@ -347,3 +347,79 @@ let _ = _midi_thread.join();
 ```
 
 ---
+
+## BUG-010 — [WARNING] `NoteDelta` accumulates only ±1 from committed note; repeated Up/Down is a no-op
+
+- **File:** `engine/src/state.rs` (NoteDelta arm), `engine/src/music_theory.rs` (`next_note`)
+- **Branch:** main
+- **Discovered:** 2026-05-02 by user report
+- **Severity:** warning
+
+### Description
+
+`InputCommand::NoteDelta(d)` always reads `self.steps[step].midi_note` (the last *committed* value) as the base for `next_note`. The result is stored in `PendingEdit::Note`, but the pending value is never fed back as the base for the *next* delta. So the second Up/Down keypress overwrites the first pending edit with the same result — the note effectively sticks at ±1 from the committed value until Enter is pressed.
+
+### Reproduction
+
+1. Select a step. Press Up five times without pressing Enter.
+2. The note preview jumps by one degree on the first press and stays there on presses 2–5.
+3. Pressing Enter commits only ±1 from the original note.
+
+### Suggested Fix
+
+In the `NoteDelta` arm, use the current pending note value (if it exists for the selected step) as the base instead of the committed value:
+
+```rust
+InputCommand::NoteDelta(d) => {
+    let step = self.selected_step;
+    let base_note = match self.pending_edit {
+        PendingEdit::Note { step: ps, midi_note } if ps == step => midi_note,
+        _ => self.steps[step].midi_note,
+    };
+    let new_note = crate::music_theory::next_note(base_note, self.key, self.mode, d);
+    self.pending_edit = PendingEdit::Note { step, midi_note: new_note };
+}
+```
+
+---
+
+## BUG-011 — [WARNING] Regular Overlay shows raw numeric delta instead of human-readable value label
+
+- **File:** `engine/src/ui_render.rs` (`render_overlay`, `param_value_string`), `engine/src/state.rs` (`ParamValueDelta` arm)
+- **Branch:** main
+- **Discovered:** 2026-05-02 by user report
+- **Severity:** warning
+
+### Description
+
+When a param is selected in the Regular Overlay and Up/Down is pressed, `ParamValueDelta` stores `PendingEdit::Param { index, value: current_value + d, .. }` where `current_value` starts at 0 (not the current state value). The render code then displays `format!(" {}[{}→{}] ", name, value_str, pv)` where `pv` is that raw integer (`0`, `1`, `-1`, etc.) — showing e.g. `[key:C->1]` instead of `[key:C->D]`.
+
+### Suggested Fix
+
+`ParamValueDelta` should seed `current_value` from the actual committed state value (converted to the same integer space used by `PendingEdit::Param`), not from 0. The pending value stored in `PendingEdit::Param` should represent the fully-resolved new value (same units as the committed field), and `param_value_string` should format it the same way it formats the committed value.
+
+---
+
+## BUG-012 — [WARNING] Regular Overlay `Confirm` discards param edit; state fields are never updated
+
+- **File:** `engine/src/state.rs` (Confirm arm for `PendingEdit::Param`)
+- **Branch:** main
+- **Discovered:** 2026-05-02 by user report
+- **Severity:** warning
+
+### Description
+
+The `Confirm` handler for `PendingEdit::Param` contains only:
+```rust
+PendingEdit::Param { .. } => {
+    // Param commits are handled by Step 7 (param overlay logic).
+    self.pending_edit = PendingEdit::None;
+}
+```
+The comment references a "Step 7" that was never implemented. Pressing Enter in the overlay clears the pending edit without writing to any state field (`self.key`, `self.swing`, `self.step_size`, etc.), so every overlay edit is silently discarded.
+
+### Suggested Fix
+
+Implement the `PendingEdit::Param` commit arm to dispatch to the correct field based on `index`. The exact form depends on whether enum helpers (`Key::from_index`, etc.) exist — add them if not. At minimum: index 0 → `self.key`, 1 → `self.mode`, 2 → `self.swing`, 3 → `self.step_size`, with appropriate clamping/wrapping.
+
+---
