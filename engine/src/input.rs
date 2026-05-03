@@ -397,4 +397,175 @@ mod tests {
             Some(InputCommand::CloseOverlay)
         ));
     }
+
+    // ── panel_key_to_command — unmapped keys return None ─────────────────────
+
+    #[test]
+    fn sequencer_focus_unmapped_keys_return_none() {
+        assert!(panel_key_to_command(KeyCodeSimple::Esc, FocusPanel::Sequencer).is_none());
+        assert!(panel_key_to_command(KeyCodeSimple::Plus, FocusPanel::Sequencer).is_none());
+        assert!(panel_key_to_command(KeyCodeSimple::Minus, FocusPanel::Sequencer).is_none());
+        assert!(panel_key_to_command(KeyCodeSimple::Backspace, FocusPanel::Sequencer).is_none());
+        assert!(panel_key_to_command(KeyCodeSimple::Other, FocusPanel::Sequencer).is_none());
+    }
+
+    #[test]
+    fn seq_params_focus_unmapped_keys_return_none() {
+        assert!(panel_key_to_command(KeyCodeSimple::Esc, FocusPanel::SeqParams).is_none());
+        assert!(panel_key_to_command(KeyCodeSimple::Space, FocusPanel::SeqParams).is_none());
+        assert!(panel_key_to_command(KeyCodeSimple::Enter, FocusPanel::SeqParams).is_none());
+        assert!(panel_key_to_command(KeyCodeSimple::Plus, FocusPanel::SeqParams).is_none());
+        assert!(panel_key_to_command(KeyCodeSimple::Minus, FocusPanel::SeqParams).is_none());
+    }
+
+    #[test]
+    fn rand_params_focus_left_right_return_none_for_caller_to_handle() {
+        assert!(panel_key_to_command(KeyCodeSimple::Left, FocusPanel::RandParams).is_none());
+        assert!(panel_key_to_command(KeyCodeSimple::Right, FocusPanel::RandParams).is_none());
+    }
+
+    #[test]
+    fn rand_params_focus_unmapped_keys_return_none() {
+        assert!(panel_key_to_command(KeyCodeSimple::Esc, FocusPanel::RandParams).is_none());
+        assert!(panel_key_to_command(KeyCodeSimple::Space, FocusPanel::RandParams).is_none());
+        assert!(panel_key_to_command(KeyCodeSimple::Backspace, FocusPanel::RandParams).is_none());
+    }
+
+    // ── KeyCodeSimple::Backspace — present and handled ────────────────────────
+
+    #[test]
+    fn backspace_variant_exists_and_returns_none_from_all_panels() {
+        // Backspace is in the enum (compile-time guarantee via this use site).
+        // panel_key_to_command must return None for every panel.
+        let key = KeyCodeSimple::Backspace;
+        assert!(panel_key_to_command(key, FocusPanel::Sequencer).is_none());
+        assert!(panel_key_to_command(key, FocusPanel::SeqParams).is_none());
+        assert!(panel_key_to_command(key, FocusPanel::RandParams).is_none());
+        assert!(panel_key_to_command(key, FocusPanel::Cli).is_none());
+    }
+
+    // ── root_key_to_command — focus keys with shift held ─────────────────────
+
+    #[test]
+    fn f1_with_shift_still_sets_focus_sequencer() {
+        let cmd = root_key_to_command(KeyCodeSimple::F1, true);
+        assert!(matches!(
+            cmd,
+            Some(InputCommand::SetFocus(FocusPanel::Sequencer))
+        ));
+    }
+
+    #[test]
+    fn f2_with_shift_still_sets_focus_seq_params() {
+        let cmd = root_key_to_command(KeyCodeSimple::F2, true);
+        assert!(matches!(
+            cmd,
+            Some(InputCommand::SetFocus(FocusPanel::SeqParams))
+        ));
+    }
+
+    #[test]
+    fn f3_with_shift_still_sets_focus_rand_params() {
+        let cmd = root_key_to_command(KeyCodeSimple::F3, true);
+        assert!(matches!(
+            cmd,
+            Some(InputCommand::SetFocus(FocusPanel::RandParams))
+        ));
+    }
+
+    #[test]
+    fn f4_with_shift_still_sets_focus_cli() {
+        let cmd = root_key_to_command(KeyCodeSimple::F4, true);
+        assert!(matches!(
+            cmd,
+            Some(InputCommand::SetFocus(FocusPanel::Cli))
+        ));
+    }
+
+    // ── FocusPanel derives: Clone, Copy, Debug, PartialEq, Eq ────────────────
+
+    #[test]
+    fn focus_panel_clone_produces_equal_value() {
+        let original = FocusPanel::SeqParams;
+        let cloned = original.clone();
+        assert_eq!(original, cloned);
+    }
+
+    #[test]
+    fn focus_panel_copy_allows_independent_use_after_move_context() {
+        let panel = FocusPanel::RandParams;
+        // Copy: pass to function and still use the binding afterward.
+        let _ = panel_key_to_command(KeyCodeSimple::Up, panel);
+        // If FocusPanel were not Copy this would be a compile error.
+        let _ = panel_key_to_command(KeyCodeSimple::Down, panel);
+    }
+
+    #[test]
+    fn focus_panel_debug_format_contains_variant_name() {
+        assert!(format!("{:?}", FocusPanel::Sequencer).contains("Sequencer"));
+        assert!(format!("{:?}", FocusPanel::SeqParams).contains("SeqParams"));
+        assert!(format!("{:?}", FocusPanel::RandParams).contains("RandParams"));
+        assert!(format!("{:?}", FocusPanel::Cli).contains("Cli"));
+    }
+
+    #[test]
+    fn focus_panel_partial_eq_same_variant_is_equal() {
+        assert_eq!(FocusPanel::Sequencer, FocusPanel::Sequencer);
+        assert_eq!(FocusPanel::SeqParams, FocusPanel::SeqParams);
+        assert_eq!(FocusPanel::RandParams, FocusPanel::RandParams);
+        assert_eq!(FocusPanel::Cli, FocusPanel::Cli);
+    }
+
+    #[test]
+    fn focus_panel_partial_eq_different_variants_are_not_equal() {
+        assert_ne!(FocusPanel::Sequencer, FocusPanel::SeqParams);
+        assert_ne!(FocusPanel::SeqParams, FocusPanel::RandParams);
+        assert_ne!(FocusPanel::RandParams, FocusPanel::Cli);
+        assert_ne!(FocusPanel::Cli, FocusPanel::Sequencer);
+    }
+
+    // ── PanelParamSelect and PanelParamDelta round-trip ──────────────────────
+
+    #[test]
+    fn panel_param_select_roundtrip_preserves_index() {
+        let cmd = InputCommand::PanelParamSelect(5);
+        let cloned = cmd.clone();
+        assert!(matches!(cloned, InputCommand::PanelParamSelect(5)));
+    }
+
+    #[test]
+    fn panel_param_select_zero_index_roundtrip() {
+        let cmd = InputCommand::PanelParamSelect(0);
+        assert!(matches!(cmd.clone(), InputCommand::PanelParamSelect(0)));
+    }
+
+    #[test]
+    fn panel_param_select_max_u8_roundtrip() {
+        let cmd = InputCommand::PanelParamSelect(u8::MAX);
+        assert!(matches!(cmd.clone(), InputCommand::PanelParamSelect(255)));
+    }
+
+    #[test]
+    fn panel_param_delta_negative_roundtrip() {
+        let cmd = InputCommand::PanelParamDelta(-3);
+        assert!(matches!(cmd.clone(), InputCommand::PanelParamDelta(-3)));
+    }
+
+    #[test]
+    fn panel_param_delta_positive_roundtrip() {
+        let cmd = InputCommand::PanelParamDelta(1);
+        assert!(matches!(cmd.clone(), InputCommand::PanelParamDelta(1)));
+    }
+
+    #[test]
+    fn panel_param_delta_max_i8_roundtrip() {
+        let cmd = InputCommand::PanelParamDelta(i8::MAX);
+        assert!(matches!(cmd.clone(), InputCommand::PanelParamDelta(127)));
+    }
+
+    #[test]
+    fn panel_param_delta_min_i8_roundtrip() {
+        let cmd = InputCommand::PanelParamDelta(i8::MIN);
+        assert!(matches!(cmd.clone(), InputCommand::PanelParamDelta(-128)));
+    }
 }
