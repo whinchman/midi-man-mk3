@@ -932,11 +932,13 @@ fn confirm_param_loop_in_clamps_at_15() {
 
 #[test]
 fn confirm_param_paused_applies_to_state() {
-    // BUG-012: Confirming a paused param edit (index 5) must update state.paused.
+    // BUG-012: Confirming a paused param edit (index 6) must update state.paused.
+    // Param mapping: 0=Key,1=Mode,2=Swing,3=StepSize,4=loop_in,5=loop_out,
+    //                6=paused,7=playing.
     let mut s = SequencerState::default();
     assert!(!s.paused, "default paused should be false");
     s.active_overlay = Some(OverlayMode::Regular);
-    s.selected_param = 5; // Pause param
+    s.selected_param = 6; // Pause param
     s.apply_command(InputCommand::ParamValueDelta(1)); // 0 + 1 = 1 (paused=true)
     s.apply_command(InputCommand::Confirm);
     assert!(s.paused, "paused should be true after confirming value=1");
@@ -945,11 +947,11 @@ fn confirm_param_paused_applies_to_state() {
 
 #[test]
 fn confirm_param_paused_false_applies_to_state() {
-    // BUG-012: Confirming paused=false (index 5, value 0) turns off paused.
+    // BUG-012: Confirming paused=false (index 6, value 0) turns off paused.
     let mut s = SequencerState::default();
     s.paused = true; // start paused
     s.active_overlay = Some(OverlayMode::Regular);
-    s.selected_param = 5;
+    s.selected_param = 6;
     // committed value = 1 (paused). Delta -1 → 0 (clamped to [0,1]).
     s.apply_command(InputCommand::ParamValueDelta(-1));
     s.apply_command(InputCommand::Confirm);
@@ -959,27 +961,22 @@ fn confirm_param_paused_false_applies_to_state() {
 
 #[test]
 fn confirm_param_playing_while_paused_leaves_tick_non_firing() {
-    // Reviewer WARNING: apply_param_value(6, 1) sets playing=true but does NOT
-    // clear paused. When both playing=true and paused=true, tick() returns None.
-    // This test documents the current (incomplete) behavior so any future fix
-    // is visible as a test change.
+    // apply_param_value(7, 1) sets playing=true AND clears paused (BUG-017 fix).
+    // When both playing=true and paused=false after confirm, tick() fires.
+    // Param mapping: index 7 = playing.
     let mut s = SequencerState::default();
     s.paused = true;
     s.playing = false;
     s.steps[1].enabled = true;
     s.active_overlay = Some(OverlayMode::Regular);
-    s.selected_param = 6; // Stop/Start param
+    s.selected_param = 7; // Stop/Start param
     // committed value = 0 (not playing). Delta +1 → value=1 (playing=true).
     s.apply_command(InputCommand::ParamValueDelta(1));
     s.apply_command(InputCommand::Confirm);
-    // After confirm: playing=true was applied. paused is still true.
+    // After confirm: playing=true was applied and BUG-017 fix clears paused.
     assert!(s.playing, "playing should be true after confirming value=1");
-    // tick() must return None because paused=true still blocks playback.
-    let evt = s.tick();
-    assert!(
-        evt.is_none(),
-        "tick() must return None when paused=true even after overlay sets playing=true"
-    );
+    // paused was cleared by the BUG-017 fix in apply_param_value(7, 1).
+    assert!(!s.paused, "paused should be cleared when playing is set via overlay (BUG-017)");
 }
 
 // ── BUG-004: tick() uses step.velocity, not hardcoded 100 ────────────────────

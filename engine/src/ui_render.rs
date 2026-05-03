@@ -327,9 +327,9 @@ fn pending_param_value_string(index: u8, v: i64) -> String {
         1 => mode_name(Mode::from_index(v as usize)).to_string(),
         2 => format!("{:+}", v as i8),
         3 => step_size_label(StepSize::from_index(v as usize)).to_string(),
-        4 => format!("{}", v),
-        5 => if v != 0 { "on".to_string() } else { "off".to_string() },
-        6 => if v != 0 { "playing".to_string() } else { "stopped".to_string() },
+        4 | 5 => format!("{}", v),
+        6 => if v != 0 { "on".to_string() } else { "off".to_string() },
+        7 => if v != 0 { "playing".to_string() } else { "stopped".to_string() },
         _ => "?".to_string(),
     }
 }
