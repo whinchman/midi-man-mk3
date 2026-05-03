@@ -17,8 +17,20 @@ use ratatui::Frame;
 
 use crate::input::OverlayMode;
 use crate::music_theory::note_name;
-use crate::state::{PendingEdit, SequencerState, StepSize};
+use crate::state::{PendingEdit, SequencerState, StepSize, TempoRollPoint, TempoRandType};
 use crate::music_theory::{Key, Mode};
+
+/// Shift overlay parameter names (index 0–7).
+pub const SHIFT_PARAMS: [&str; 8] = [
+    "Note Rnd",    // 0 — note_rand (0–100)
+    "Tempo Rnd",   // 1 — tempo_rand (0–100)
+    "Roll Point",  // 2 — tempo_roll_point enum
+    "Var Max",     // 3 — tempo_variance_max (1–99)
+    "Tempo Type",  // 4 — tempo_rand_type enum
+    "Step Rnd",    // 5 — step_rand (0–100)
+    "Scale Quant", // 6 — scale_quant bool
+    "(reserved)",  // 7 — Key Transposition if accepted; empty for now
+];
 
 /// Regular overlay parameter names (index 0–7).
 pub const REGULAR_PARAMS: [&str; 8] = [
@@ -102,7 +114,13 @@ pub fn render_frame(
     let area = frame.area();
 
     // Vertical split: top bar | step rows | info row | overlay panel (if active)
-    let overlay_height = if overlay.is_some() { 3u16 } else { 0u16 };
+    // Shift overlay needs height 4 (border top + param row + action row + border bottom).
+    // Regular overlay needs height 3 (border top + param row + border bottom).
+    let overlay_height = match overlay {
+        None => 0u16,
+        Some(OverlayMode::Shift) => 4u16,
+        Some(OverlayMode::Regular) => 3u16,
+    };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -244,8 +262,50 @@ fn render_overlay(
     match overlay {
         None => {}
         Some(OverlayMode::Shift) => {
-            let para = Paragraph::new("(shift mode — coming soon)")
-                .block(Block::default().title("Shift Overlay").borders(Borders::ALL));
+            let pending_param_value: Option<(u8, i64)> = match state.pending_edit {
+                PendingEdit::Param { overlay: OverlayMode::Shift, index, value } => {
+                    Some((index, value))
+                }
+                _ => None,
+            };
+
+            let mut spans: Vec<Span> = Vec::with_capacity(8 * 3);
+            for (i, name) in SHIFT_PARAMS.iter().enumerate() {
+                let idx = i as u8;
+                let is_highlighted = idx == selected_param;
+
+                let value_str = shift_param_value_string(state, idx);
+                let display = if let Some((pi, pv)) = pending_param_value {
+                    if pi == idx {
+                        let pending_str = shift_pending_param_value_string(idx, pv);
+                        format!(" {}[{}→{}] ", name, value_str, pending_str)
+                    } else {
+                        format!(" {}:{} ", name, value_str)
+                    }
+                } else {
+                    format!(" {}:{} ", name, value_str)
+                };
+
+                let style = if is_highlighted && idx < 7 {
+                    Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)
+                } else if idx == 7 {
+                    Style::default().add_modifier(Modifier::DIM)
+                } else {
+                    Style::default()
+                };
+                spans.push(Span::styled(display, style));
+                if i < SHIFT_PARAMS.len() - 1 {
+                    spans.push(Span::raw("|"));
+                }
+            }
+
+            let action_label = Line::from(Span::styled(
+                "  [S]kip  [G]en",
+                Style::default().add_modifier(Modifier::DIM),
+            ));
+            let param_line = Line::from(spans);
+            let para = Paragraph::new(vec![param_line, action_label])
+                .block(Block::default().title("Shift Overlay (Esc to close)").borders(Borders::ALL));
             frame.render_widget(para, area);
         }
         Some(OverlayMode::Regular) => {
@@ -291,6 +351,59 @@ fn render_overlay(
                 .block(Block::default().title("Regular Overlay (Esc to close)").borders(Borders::ALL));
             frame.render_widget(para, area);
         }
+    }
+}
+
+/// Return the display string for shift param `index` given the current state.
+///
+/// Index map: 0=note_rand, 1=tempo_rand, 2=tempo_roll_point, 3=tempo_variance_max,
+/// 4=tempo_rand_type, 5=step_rand, 6=scale_quant, 7=reserved.
+pub fn shift_param_value_string(state: &SequencerState, index: u8) -> String {
+    match index {
+        0 => state.note_rand.to_string(),
+        1 => state.tempo_rand.to_string(),
+        2 => tempo_roll_point_name(state.tempo_roll_point).to_string(),
+        3 => state.tempo_variance_max.to_string(),
+        4 => tempo_rand_type_name(state.tempo_rand_type).to_string(),
+        5 => state.step_rand.to_string(),
+        6 => if state.scale_quant { "On".to_string() } else { "Off".to_string() },
+        _ => "\u{2014}".to_string(), // em dash for reserved
+    }
+}
+
+/// Return the display string for a pending shift param edit.
+///
+/// `v` is the raw `i64` from `PendingEdit::Param { value, .. }`.
+/// Index map: 0=note_rand, 1=tempo_rand, 2=tempo_roll_point, 3=tempo_variance_max,
+/// 4=tempo_rand_type, 5=step_rand, 6=scale_quant, 7=reserved.
+pub fn shift_pending_param_value_string(index: u8, v: i64) -> String {
+    match index {
+        0 | 1 | 3 | 5 => format!("{}", v),
+        2 => tempo_roll_point_name(TempoRollPoint::from_index(v as usize)).to_string(),
+        4 => tempo_rand_type_name(TempoRandType::from_index(v as usize)).to_string(),
+        6 => if v != 0 { "On".to_string() } else { "Off".to_string() },
+        _ => "\u{2014}".to_string(), // em dash for reserved
+    }
+}
+
+/// Return a human-readable string for a `TempoRollPoint`.
+fn tempo_roll_point_name(trp: TempoRollPoint) -> &'static str {
+    match trp {
+        TempoRollPoint::Off  => "Off",
+        TempoRollPoint::Step => "Step",
+        TempoRollPoint::Beat => "Beat",
+        TempoRollPoint::Seq  => "Seq",
+    }
+}
+
+/// Return a human-readable string for a `TempoRandType`.
+fn tempo_rand_type_name(trt: TempoRandType) -> &'static str {
+    match trt {
+        TempoRandType::Random   => "Random",
+        TempoRandType::Up       => "Up",
+        TempoRandType::Down     => "Down",
+        TempoRandType::Breathe  => "Breathe",
+        TempoRandType::PingPong => "PingPong",
     }
 }
 
