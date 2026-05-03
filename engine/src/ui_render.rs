@@ -20,13 +20,14 @@ use crate::music_theory::note_name;
 use crate::state::{PendingEdit, SequencerState, StepSize};
 use crate::music_theory::{Key, Mode};
 
-/// Regular overlay parameter names (index 0–6).
-pub const REGULAR_PARAMS: [&str; 7] = [
+/// Regular overlay parameter names (index 0–7).
+pub const REGULAR_PARAMS: [&str; 8] = [
     "Key",
     "Mode",
     "Swing",
     "Step Size",
-    "Loop",
+    "Loop In",
+    "Loop Out",
     "Pause",
     "Stop/Start",
 ];
@@ -254,7 +255,7 @@ fn render_overlay(
                 _ => None,
             };
 
-            let mut spans: Vec<Span> = Vec::with_capacity(7 * 3);
+            let mut spans: Vec<Span> = Vec::with_capacity(8 * 3);
             for (i, name) in REGULAR_PARAMS.iter().enumerate() {
                 let idx = i as u8;
                 let is_highlighted = idx == selected_param;
@@ -277,7 +278,7 @@ fn render_overlay(
                     Style::default()
                 };
                 spans.push(Span::styled(display, style));
-                if i < 6 {
+                if i < REGULAR_PARAMS.len() - 1 {
                     spans.push(Span::raw("|"));
                 }
             }
@@ -291,23 +292,21 @@ fn render_overlay(
 }
 
 /// Return a short string representation of parameter `index` current value.
+///
+/// Index map: 0=Key, 1=Mode, 2=Swing, 3=StepSize, 4=loop_in, 5=loop_out,
+/// 6=paused, 7=playing.
 fn param_value_string(state: &SequencerState, index: u8) -> String {
     match index {
         0 => key_name(state.key).to_string(),
         1 => mode_name(state.mode).to_string(),
         2 => format!("{:+}", state.swing),
         3 => step_size_label(state.step_size).to_string(),
-        4 => {
-            if state.loop_active {
-                format!("{}–{}", state.loop_in, state.loop_out)
-            } else {
-                "off".to_string()
-            }
-        }
-        5 => {
+        4 => state.loop_in.to_string(),
+        5 => state.loop_out.to_string(),
+        6 => {
             if state.paused { "on" } else { "off" }.to_string()
         }
-        6 => {
+        7 => {
             if state.playing { "playing" } else { "stopped" }.to_string()
         }
         _ => "?".to_string(),
