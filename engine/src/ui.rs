@@ -630,6 +630,164 @@ mod tests {
         );
     }
 
+    #[test]
+    fn global_key_f1_produces_set_focus_sequencer() {
+        use crate::input::{FocusPanel, KeyCodeSimple};
+        let cmd = super::global_key_to_command(KeyCodeSimple::F1);
+        assert!(
+            matches!(cmd, Some(InputCommand::SetFocus(FocusPanel::Sequencer))),
+            "F1 should produce SetFocus(Sequencer)"
+        );
+    }
+
+    #[test]
+    fn global_key_f3_produces_set_focus_rand_params() {
+        use crate::input::{FocusPanel, KeyCodeSimple};
+        let cmd = super::global_key_to_command(KeyCodeSimple::F3);
+        assert!(
+            matches!(cmd, Some(InputCommand::SetFocus(FocusPanel::RandParams))),
+            "F3 should produce SetFocus(RandParams)"
+        );
+    }
+
+    #[test]
+    fn global_key_f4_produces_set_focus_cli() {
+        use crate::input::{FocusPanel, KeyCodeSimple};
+        let cmd = super::global_key_to_command(KeyCodeSimple::F4);
+        assert!(
+            matches!(cmd, Some(InputCommand::SetFocus(FocusPanel::Cli))),
+            "F4 should produce SetFocus(Cli)"
+        );
+    }
+
+    #[test]
+    fn global_key_all_f1_f4_produce_set_focus_variants() {
+        use crate::input::{FocusPanel, KeyCodeSimple};
+        let cases = [
+            (KeyCodeSimple::F1, FocusPanel::Sequencer),
+            (KeyCodeSimple::F2, FocusPanel::SeqParams),
+            (KeyCodeSimple::F3, FocusPanel::RandParams),
+            (KeyCodeSimple::F4, FocusPanel::Cli),
+        ];
+        for (key, expected_panel) in cases {
+            let cmd = super::global_key_to_command(key);
+            assert!(
+                matches!(&cmd, Some(InputCommand::SetFocus(p)) if *p == expected_panel),
+                "key {key:?} should produce SetFocus({expected_panel:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn global_key_unknown_produces_none() {
+        use crate::input::KeyCodeSimple;
+        // Keys that are not globally handled should return None.
+        for key in [
+            KeyCodeSimple::Left,
+            KeyCodeSimple::Right,
+            KeyCodeSimple::Up,
+            KeyCodeSimple::Down,
+            KeyCodeSimple::Enter,
+            KeyCodeSimple::Backspace,
+            KeyCodeSimple::Esc,
+            KeyCodeSimple::Space,
+            KeyCodeSimple::Other,
+            KeyCodeSimple::Char('a'),
+            KeyCodeSimple::Char('z'),
+        ] {
+            let cmd = super::global_key_to_command(key);
+            assert!(cmd.is_none(), "key {key:?} should produce None but got {cmd:?}");
+        }
+    }
+
+    // ── handle_cli_submit additional edge-case tests ──────────────────────────
+
+    #[test]
+    fn cli_submit_port_alone_without_name_is_unknown_command() {
+        // "port" (no trailing space and no name) trims to "port" which does not
+        // match the "port " prefix, so it falls through to the unknown-command branch.
+        let (cmd_tx, _cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
+        let mut ui = UiState::new();
+        ui.cli_line = "port".into();
+
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+
+        assert_eq!(ui.cli_log.len(), 1, "unknown command should produce one error log entry");
+        assert!(matches!(ui.cli_log[0].tag, LogTag::Err), "bare 'port' should log an error");
+        assert!(_ctrl_rx.try_recv().is_err(), "no MidiCtrlMsg for bare 'port'");
+        assert!(_cmd_rx.try_recv().is_err(), "no InputCommand for bare 'port'");
+    }
+
+    #[test]
+    fn cli_submit_channel_17_is_out_of_range() {
+        let (cmd_tx, _cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
+        let mut ui = UiState::new();
+        ui.cli_line = "channel 17".into();
+
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+
+        assert_eq!(ui.cli_log.len(), 1);
+        assert!(matches!(ui.cli_log[0].tag, LogTag::Err));
+        assert!(_cmd_rx.try_recv().is_err(), "no InputCommand should be sent for channel 17");
+        assert!(_ctrl_rx.try_recv().is_err(), "no MidiCtrlMsg should be sent for channel 17");
+    }
+
+    #[test]
+    fn cli_submit_channel_255_is_out_of_range() {
+        let (cmd_tx, _cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
+        let mut ui = UiState::new();
+        ui.cli_line = "channel 255".into();
+
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+
+        assert_eq!(ui.cli_log.len(), 1);
+        assert!(matches!(ui.cli_log[0].tag, LogTag::Err));
+    }
+
+    #[test]
+    fn cli_submit_seed_invalid_hex_appends_error() {
+        let (cmd_tx, cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
+        let mut ui = UiState::new();
+        ui.cli_line = "seed ZZZZ".into();
+
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+
+        assert!(cmd_rx.try_recv().is_err(), "no command should be sent for invalid hex");
+        assert_eq!(ui.cli_log.len(), 1);
+        assert!(matches!(ui.cli_log[0].tag, LogTag::Err));
+        assert!(ui.cli_log[0].text.contains("invalid hex"));
+        drop(ctrl_tx);
+    }
+
+    #[test]
+    fn cli_submit_seed_0x_prefix_is_accepted() {
+        // Uppercase 0X prefix should also be stripped.
+        let (cmd_tx, cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
+        let mut ui = UiState::new();
+        ui.cli_line = "seed 0XBEEF".into();
+
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+
+        let cmd = cmd_rx.try_recv().expect("expected SeedSet");
+        assert!(matches!(cmd, InputCommand::SeedSet(0xBEEF)), "0X-prefixed hex should parse correctly");
+        assert_eq!(ui.cli_log.len(), 1);
+        assert!(matches!(ui.cli_log[0].tag, LogTag::Cmd));
+    }
+
+    #[test]
+    fn cli_submit_truly_empty_line_is_noop() {
+        // Submitting a completely empty cli_line (not just whitespace) is a no-op.
+        let (cmd_tx, cmd_rx, ctrl_tx, ctrl_rx) = make_channels();
+        let mut ui = UiState::new();
+        ui.cli_line = String::new();
+
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+
+        assert!(cmd_rx.try_recv().is_err(), "no command for empty line");
+        assert!(ctrl_rx.try_recv().is_err(), "no ctrl msg for empty line");
+        assert!(ui.cli_log.is_empty(), "no log entry for empty line");
+    }
+
     // ── push_log tests ────────────────────────────────────────────────────────
 
     #[test]
@@ -645,5 +803,22 @@ mod tests {
         assert_eq!(log.len(), CLI_LOG_CAPACITY);
         assert_eq!(log[0].text, "entry 1");
         assert_eq!(log[log.len() - 1].text, "new entry");
+    }
+
+    #[test]
+    fn push_log_capacity_200_enforced_with_201_entries() {
+        // Explicitly verify the CLI_LOG_CAPACITY constant is 200 and that inserting
+        // 201 entries results in exactly 200 entries with the first dropped.
+        assert_eq!(CLI_LOG_CAPACITY, 200, "CLI_LOG_CAPACITY must be 200");
+
+        let mut log: VecDeque<LogEntry> = VecDeque::new();
+        for i in 0..201_usize {
+            push_log(&mut log, i as u64, LogTag::Info, format!("msg{i}"));
+        }
+
+        assert_eq!(log.len(), 200, "log should hold exactly 200 entries after 201 inserts");
+        // The first entry (msg0) should have been dropped; msg1 is now the oldest.
+        assert_eq!(log[0].text, "msg1", "oldest entry (msg0) should have been evicted");
+        assert_eq!(log[199].text, "msg200", "newest entry should be msg200");
     }
 }
