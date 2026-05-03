@@ -392,9 +392,9 @@ fn render_cli_panel(frame: &mut Frame, ui: &UiLocalSnapshot<'_>, area: Rect) {
         );
         let tag_span = match entry.tag {
             LogTag::Cmd => Span::styled("[CMD] ", Style::default().fg(CYAN)),
-            LogTag::Info => Span::styled("[INFO]", Style::default().fg(Color::White)),
+            LogTag::Info => Span::styled("[INFO]", Style::default().fg(Color::Reset)),
             LogTag::Err => Span::styled("[ERR] ", Style::default().fg(Color::Red)),
-            LogTag::Midi => Span::styled("[MIDI]", Style::default().fg(CYAN)),
+            LogTag::Midi => Span::styled("[MIDI]", Style::default().fg(GREEN)),
         };
         let text = Span::raw(format!(" {}", entry.text));
         log_lines.push(Line::from(vec![ts, tag_span, text]));
@@ -732,6 +732,44 @@ mod tests {
         assert!(
             all_text.contains("my input"),
             "CLI panel should show the input line"
+        );
+    }
+
+    #[test]
+    fn step_cards_playhead_has_magenta_style() {
+        let backend = TestBackend::new(160, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let mut state = SequencerState::default();
+        state.playhead = 0;
+        let log: VecDeque<LogEntry> = VecDeque::new();
+        let ui = UiLocalSnapshot {
+            focus: FocusPanel::Sequencer,
+            selected_step: 0,
+            seq_param_idx: 0,
+            rand_param_idx: 0,
+            cli_line: "",
+            cli_log: &log,
+            midi_device_name: "",
+            midi_channel_display: 1,
+        };
+        terminal
+            .draw(|frame| render_frame(frame, &state, &ui))
+            .expect("draw");
+
+        // F1 SEQ panel starts at row 2. The first step card occupies the leftmost
+        // columns of the inner area (row 3 is inside the panel border).
+        // Scan a window of the first ~12 columns rows 2-10 for a MAGENTA cell.
+        let buf = terminal.backend().buffer().clone();
+        let magenta_found = (2u16..10).any(|y| {
+            (0u16..12).any(|x| {
+                buf.cell((x, y))
+                    .map(|c| c.fg == MAGENTA || c.bg == MAGENTA)
+                    .unwrap_or(false)
+            })
+        });
+        assert!(
+            magenta_found,
+            "first step card (playhead=0) should render with MAGENTA color"
         );
     }
 
