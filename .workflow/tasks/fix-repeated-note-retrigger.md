@@ -1,7 +1,7 @@
 # Task: fix-repeated-note-retrigger
 
 **Type:** coder
-**Status:** pending
+**Status:** done
 **Feature Branch:** feature/fix-repeated-note-retrigger
 **Branch:** feature/fix-repeated-note-retrigger/fix-repeated-note-retrigger
 **Base Branch:** feature/fix-repeated-note-retrigger
@@ -68,3 +68,30 @@ let mut last_note: Option<(u8, u8)> = None;
 
 ## Notes
 
+Implemented on branch `feature/fix-repeated-note-retrigger` (worktree at
+`.workflow/worktrees/fix-repeated-note-retrigger`).
+
+**Changes:**
+- `engine/src/clock.rs` — added `last_note: Option<(u8, u8)>` before the
+  loop in `run_clock`. When a NoteOn fires for the same (channel, note) as
+  `last_note`, a `MidiEvent::NoteOff` is sent immediately before the NoteOn.
+  `last_note` is updated only on NoteOn (disabled steps leave it unchanged).
+  Updated module docstring to reflect the new NoteOff behaviour.
+- `engine/src/cli.rs` — fixed pre-existing clippy warning (module-level
+  comment written as outer doc comment; converted to `//!` inner comment).
+- `engine/src/main.rs` — fixed pre-existing clippy warning
+  (`loop { match recv() }` rewritten as `while let Ok(cmd) = recv()`).
+
+**Tests added** (`engine/src/clock.rs` `#[cfg(test)]` module):
+- `test_retrigger_same_note_inserts_note_off` — two same-note steps produce
+  NoteOff then NoteOn on the second step.
+- `test_no_retrigger_for_different_note` — different note on second step
+  produces no NoteOff.
+- `test_disabled_step_does_not_update_last_note` — disabled step leaves
+  `last_note` unchanged; retrigger fires correctly after the gap.
+- `test_run_clock_retrigger_via_channel` — end-to-end smoke test driving
+  `run_clock` in a real thread; verifies NoteOn → NoteOff → NoteOn sequence
+  on the channel.
+
+**Test results:** 333 tests pass, 0 failures. Clippy clean. Release build
+successful.
