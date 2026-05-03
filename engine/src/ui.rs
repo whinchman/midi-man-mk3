@@ -40,7 +40,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
 use crate::input::{InputCommand, KeyCodeSimple, OverlayMode};
-use crate::input::{overlay_key_to_command, root_key_to_command};
+use crate::input::{overlay_key_to_command, root_key_to_command, shift_action_key_to_command};
 use crate::state::SequencerState;
 use crate::ui_render::render_frame;
 
@@ -105,7 +105,11 @@ fn translate_key(event: KeyEvent, ui: &UiState) -> Option<InputCommand> {
 
     match ui.overlay {
         None => root_key_to_command(simple, shift),
-        Some(_) => overlay_key_to_command(simple),
+        Some(OverlayMode::Shift) => {
+            // Action shortcuts (s/g) take priority; arrow/enter/esc fall through.
+            shift_action_key_to_command(simple).or_else(|| overlay_key_to_command(simple))
+        }
+        Some(OverlayMode::Regular) => overlay_key_to_command(simple),
     }
 }
 
