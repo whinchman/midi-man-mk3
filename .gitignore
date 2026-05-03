@@ -1,0 +1,20 @@
+# Agent worktrees (created and destroyed at runtime)
+.workflow/worktrees/*
+!.workflow/worktrees/.gitkeep
+
+# Claude project-level memory (contains local paths and session data)
+.claude/projects/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Agent container config (regenerated per run)
+.workflow/container/docker-compose.yml

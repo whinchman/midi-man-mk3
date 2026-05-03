@@ -1,0 +1,45 @@
+project:
+  name: "midi-man-mk3"
+  description: "groove-based midi controller and engine"
+
+git:
+  default_branch: "main"
+  feature_prefix: "feature/"
+  commit_style: "conventional"
+  co_author: "will hinchman <will.hinchman@gmail.com>"
+
+workflow:
+  plans_dir: ".workflow/plans"
+  reports_dir: ".workflow/reports"
+  logs_dir: ".workflow/logs"
+  worktrees_dir: ".workflow/worktrees"
+  backlog_file: ".workflow/BACKLOG.md"
+  todo_file: ".workflow/TODO.md"
+  done_file: ".workflow/DONE.md"
+  bugs_file: ".workflow/BUGS.md"
+
+testing:
+  enabled: true
+  command: "cargo test -p engine"
+  test_dir: "engine/src/"
+  test_pattern: "*_test.rs"
+
+build:
+  command: "cargo build -p engine --release"
+
+code_standards: |
+  Rust stable, edition 2021. Safe Rust only — no unsafe without a comment explaining why.
+  No heap allocation on the hot path (clock thread, MIDI send path). Pre-allocate or use stack arrays.
+  Two plain std::threads for clock and UI — no async runtime on the hot path.
+  clippy must pass. rustfmt for formatting. Document all public items with a single short line.
+  No unwrap() in non-test code — use expect() with a message or propagate errors.
+
+container:
+  template: "rust"
+  memory: "8G"
+  cpus: "4"
+
+agents:
+  default_type: "coder"
+  tasks_dir: ".workflow/tasks"
+  max_workers: 3

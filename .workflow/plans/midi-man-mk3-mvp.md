@@ -1,9 +1,16 @@
 # Midi-Man Mk3 — MVP Architecture Plan
 
-**Status:** draft  
-**Author:** Architect agent  
+**Status:** revised  
+**Author:** Architect agent + Coordinator  
 **Date:** 2026-05-02  
-**Scope:** MVP only — 16-step sequencer, clock, key/mode, swing, step-size, loop, pause/stop-start, MIDI out, PC UI, HID control surface protocol. Shift-mode randomness layer is explicitly out of scope.
+**Scope:** MVP only — 16-step sequencer, clock, key/mode, swing, step-size, loop, pause/stop-start, MIDI out, PC UI, keyboard input, HID control surface protocol. Shift-mode randomness layer is explicitly out of scope.
+
+### Revision Notes (2026-05-02)
+
+- **Keyboard input added:** Engine UI handles keyboard controls so the MVP is fully testable before physical hardware arrives. HID connection is now optional (graceful degradation if no Pico is connected).
+- **Phasing:** Implementation is split into two phases. Phase 1 = all engine steps (Steps 1–9 + keyboard). Phase 2 = firmware steps (Steps 10–15), to begin once MCP23017 I/O expanders are in hand.
+- **Shared InputCommand abstraction added** (new Step 6b): both keyboard and HID produce the same `InputCommand` enum; sequencer state mutation is handled in one place.
+- **Confirm contract:** keyboard mode matches physical surface — parameter changes via up/down are "pending" until Enter confirms them. Applies in both Root and overlay modes.
 
 ---
 
@@ -435,6 +442,119 @@ Tasks:
 
 ---
 
+### Step 6b — InputCommand Abstraction and Keyboard Input
+
+**Agent:** coder  
+**Files:** `engine/src/input.rs`, `engine/src/ui.rs` (keyboard event loop added)
+
+#### InputCommand Enum
+
+Both the keyboard handler and the HID reader produce `InputCommand` values on a shared `SyncSender<InputCommand>`. The sequencer/HID thread consumes them and applies state mutations. This keeps all state mutation logic in one place.
+
+```rust
+pub enum InputCommand {
+    // Step navigation
+    StepSelect(usize),          // absolute step index 0–15
+    StepSelectDelta(i8),        // +1 / -1 relative
+
+    // Note editing (Root mode)
+    NoteDelta(i8),              // +1 / -1; pending until Confirm
+    Confirm,                    // apply pending note change for selected step
+    ToggleStep,                 // enable/disable selected step
+
+    // Velocity editing (Root mode, Shift held)
+    VelocityDelta(i8),          // +1 / -1; pending until Confirm
+
+    // Parameter overlay (F1 = regular, F2 = shift)
+    OpenOverlay(OverlayMode),   // RegularSettings | ShiftSettings
+    CloseOverlay,               // Esc — discard pending param change
+
+    ParamSelect(u8),            // highlight param by index (0-based)
+    ParamSelectDelta(i8),       // left/right in overlay
+    ParamValueDelta(i8),        // up/down in overlay; pending until Confirm
+    // Confirm re-used for param confirm
+}
+
+pub enum OverlayMode { Regular, Shift }
+```
+
+**Pending state:** `engine/src/state.rs` gains a `PendingEdit` field:
+```rust
+pub enum PendingEdit {
+    None,
+    Note { step: usize, midi_note: u8 },
+    Velocity { step: usize, velocity: u8 },
+    Param { overlay: OverlayMode, index: u8, value: i64 },
+}
+```
+`Confirm` commits the pending edit to the live state. `CloseOverlay` / `StepSelectDelta` / `StepSelect` discard a pending note/velocity edit.
+
+#### Keyboard Mapping
+
+**Root mode (no overlay):**
+
+| Key | InputCommand |
+|---|---|
+| Left arrow | `StepSelectDelta(-1)` |
+| Right arrow | `StepSelectDelta(+1)` |
+| Up arrow | `NoteDelta(+1)` |
+| Down arrow | `NoteDelta(-1)` |
+| Shift + Up | `VelocityDelta(+1)` |
+| Shift + Down | `VelocityDelta(-1)` |
+| Space | `ToggleStep` |
+| Enter | `Confirm` |
+| F1 | `OpenOverlay(Regular)` |
+| F2 | `OpenOverlay(Shift)` |
+
+**Regular settings overlay (F1):**
+
+| Key | InputCommand |
+|---|---|
+| Left arrow | `ParamSelectDelta(-1)` |
+| Right arrow | `ParamSelectDelta(+1)` |
+| Up arrow | `ParamValueDelta(+1)` |
+| Down arrow | `ParamValueDelta(-1)` |
+| Enter | `Confirm` |
+| Esc | `CloseOverlay` |
+
+**Shift settings overlay (F2):** same key map as F1.
+
+**Regular overlay parameters (left→right):**
+1. Key (musical key)
+2. Mode (scale/mode)
+3. Swing (−50 to +50)
+4. Step Size (1/4, 1/8, 1/16)
+5. Loop (in/out/clear — three sequential Enter presses cycles through)
+6. Pause (toggle)
+7. Stop / Start (toggle)
+
+**Shift overlay parameters:** placeholder row for now (MVP); renders as "(shift mode — coming soon)" to reserve the overlay structure.
+
+#### HID Becomes Optional
+
+`engine/src/hid.rs`: if `hidapi::HidApi::new()` or `open()` fails (device not connected), the HID thread logs a warning and exits immediately. The engine continues running with keyboard-only input. The `SyncSender<InputCommand>` is still the sole path into state mutation — HID and keyboard are peers on the same channel.
+
+#### UI Changes (Step 8 impact)
+
+The UI thread is no longer read-only. It runs a crossterm event loop alongside the render loop:
+- On `Event::Key`: translate to `InputCommand`, send on channel.
+- On `Event::Resize` or 50 ms timeout: redraw.
+- Overlay state (`Option<OverlayMode>`, `selected_param: u8`) lives in the UI thread only — it is presentation state, not sequencer state.
+- Pending edit value is read from `SequencerState.pending_edit` for display.
+
+**Tasks:**
+1. Define `InputCommand` and `OverlayMode` enums in `engine/src/input.rs`.
+2. Add `PendingEdit` to `SequencerState`; implement `apply_command(cmd: InputCommand)` on `SequencerState`.
+3. Implement keyboard event loop in `ui.rs`; translate crossterm `KeyEvent` → `InputCommand`.
+4. Update overlay render: F1/F2 overlays with highlighted param, current value, pending value.
+5. Update `hid.rs` to translate `InReport` fields into `InputCommand` values (matching same semantics as keyboard).
+6. Make HID thread non-fatal on device-not-found.
+7. Unit tests: `apply_command` for each command variant; keyboard translation for each mapped key.
+
+**Expected outcome:** Full engine is playable from keyboard alone, no Pico required.
+
+---
+
 ### Step 6 — HID Report Structs (shared definitions)
 
 **Agent:** coder  
@@ -571,6 +691,17 @@ Tasks:
 2. Initialize peripherals: I2C0 (expanders for encoders 1–8 + step buttons 1–8), I2C1 (expanders for encoders 9–16 + step buttons 9–16 + param buttons), SPI0 (LEDs), USB.
 3. Spawn tasks: `run_usb_hid`, `run_encoders`, `run_buttons`, `run_leds`.
 4. Verify: `.uf2` builds and device enumerates on host as HID vendor device.
+
+---
+
+---
+
+## Phase Boundary
+
+**Phase 1 (engine — start now):** Steps 1, 2, 3, 4, 5, 6, 6b, 7, 8, 9
+**Phase 2 (firmware — begin once MCP23017s arrive):** Steps 10, 11, 12, 13, 14, 15
+
+Phase 1 is fully self-contained. The engine runs with keyboard input only; HID connection is optional. No firmware or hardware is required to develop, test, or demo Phase 1.
 
 ---
 

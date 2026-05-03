@@ -1,7 +1,7 @@
 # Task: InputCommand Abstraction and Keyboard Input
 
 - **Type**: coder
-- **Status**: pending
+- **Status**: done
 - **Repo**: midi-man-mk3
 - **Parallel Group**: 4
 - **Feature Branch**: feature/engine-phase1
@@ -135,3 +135,50 @@ The SyncSender<InputCommand> is the sole path into state mutation — HID and ke
 
 ## Notes
 
+Implementation complete on branch `engine-phase1/input-command-abstraction`.
+
+**What was implemented:**
+
+- `engine/src/input.rs` — `InputCommand` and `OverlayMode` enums (canonical definitions). Includes `KeyCodeSimple` mirror enum and two pure translation functions (`root_key_to_command`, `overlay_key_to_command`) that are feature-gate-free so they can be unit-tested without hw-io.
+
+- `engine/src/state.rs` — Removed stub `OverlayMode` and re-exported the canonical one from `input.rs`. Added `selected_step: usize` and `selected_param: u8` fields with wrapping navigation. Added `velocity: u8` field to `StepData`. Implemented `apply_command` covering all 11 `InputCommand` variants with correct note/velocity clamping (0–127), step wrapping (mod 16), param wrapping (mod 7), Confirm commit semantics, and CloseOverlay discard.
+
+- `engine/src/hid.rs` — Added non-fatal `open_device()` helper (hw-io gated) that logs a warning to stderr and returns `None` instead of panicking when HidApi init or device open fails.
+
+- `engine/src/ui.rs` — Keyboard event loop (hw-io gated). Uses crossterm `event::poll` with 50 ms timeout for ~20 FPS render. Translates root-mode and overlay-mode key events to `InputCommand`. Overlay state (`Option<OverlayMode>`, `selected_param`) tracked in UI thread only. Ratatui render stub with Regular overlay param list (highlighted selected param) and Shift overlay placeholder.
+
+- `engine/src/lib.rs` — Added `pub mod input;` and `#[cfg(feature = "hw-io")] pub mod ui;`.
+
+**Test results:** 157 tests passing (108 pre-existing + 19 keyboard translation tests in input.rs + 30 apply_command tests in state.rs). Clippy: 2 pre-existing warnings in clock.rs, no new warnings.
+
+---
+
+## Code Review — 2026-05-02
+
+**Reviewer:** code-reviewer agent
+**Verdict:** REQUEST-CHANGES
+**Findings:** 0 critical, 2 warning, 2 info
+
+### [WARNING] engine/src/state.rs:185 — `tick()` hardcodes velocity 100; ignores `StepData.velocity`
+
+`StepData.velocity` was added in this step and the `VelocityDelta`/`Confirm` pipeline correctly commits it to `StepData`. However, `tick()` still emits `velocity: 100` in every `MidiEvent::NoteOn` instead of reading `step.velocity`. Every note plays at velocity 100 regardless of user edits. The existing test `tick_note_on_has_correct_fields` masks this because it also asserts `velocity: 100`. Logged as BUG-004 in `.workflow/BUGS.md`.
+
+Fix: change line 185 to `velocity: step.velocity,` and update the test to assert a non-default velocity.
+
+### [WARNING] engine/src/hid.rs:317 — `unsafe { std::mem::transmute(report) }` in test violates project code standard
+
+The code standard requires "Safe Rust only — no unsafe without a comment explaining why." The comment is present but the justification is incomplete. The `transmute` can be replaced entirely with `std::mem::offset_of!` (stable since Rust 1.77) with no unsafe at all. Logged as BUG-005 in `.workflow/BUGS.md`.
+
+Fix: replace the transmute block with `offset_of!(InReport, field)` assertions.
+
+### [INFO] engine/src/ui.rs:98 — Dead code in `update_local_overlay`: `Confirm` arm has no effect
+
+`InputCommand::CloseOverlay | InputCommand::Confirm` is a combined match arm. The body checks `if matches!(cmd, InputCommand::CloseOverlay)` — meaning the `Confirm` branch of the arm always takes the else path and does nothing. `Confirm` in this arm is dead code. The functional behavior is correct (Confirm should not close the overlay), but the combined arm is misleading and likely a leftover from an earlier refactor.
+
+Fix: split into `InputCommand::CloseOverlay => { ui.overlay = None; }` and remove `Confirm` from this arm entirely.
+
+### [INFO] engine/src/state.rs:268 — `ParamSelect(n)` does not clamp `n` to 0–6
+
+`StepSelect(n)` clamps to 15 (line 202: `n.min(15)`), but `ParamSelect(n)` stores `n` directly with no bounds check. Passing `ParamSelect(7)` sets `selected_param = 7`, which is out of the 0–6 range. Downstream, `ParamValueDelta` uses `selected_param` as the `index` field in `PendingEdit::Param`, so an out-of-range index would propagate into shared state. Since only Step 7 (HID) produces `ParamSelect` and has 7 physical buttons, this cannot be triggered from the keyboard, but defensive clamping is consistent with the existing `StepSelect` treatment.
+
+Fix: add `.min(6)` clamp: `self.selected_param = n.min(6);`

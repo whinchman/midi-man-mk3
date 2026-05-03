@@ -1,0 +1,43 @@
+[package]
+name = "firmware"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "firmware"
+path = "src/main.rs"
+
+[dependencies]
+# Embassy async executor — platform-cortex-m pulls in cortex-m support;
+# executor-thread enables the #[embassy_executor::main] entry macro.
+embassy-executor = { version = "0.10", features = ["platform-cortex-m", "executor-thread", "defmt"] }
+
+# Embassy RP2040 HAL — rp2040 selects the RP2040 chip; time-driver enables
+# embassy-time; defmt enables structured logging over RTT.
+embassy-rp = { version = "0.10", features = ["rp2040", "time-driver", "defmt"] }
+
+# Embassy USB stack — required for HID vendor-class device.
+embassy-usb = { version = "0.6", features = ["defmt"] }
+
+# Embassy time abstractions (Instant, Duration, Timer).
+embassy-time = { version = "0.5", features = ["defmt"] }
+
+# Embedded HAL traits (used indirectly via embassy-rp).
+embedded-hal = "1.0"
+
+# flip-link is the linker binary itself; it is not a Rust library crate.
+# It is configured in firmware/.cargo/config.toml as the linker for the
+# thumbv6m-none-eabi target.
+
+# mcp23017: community I2C I/O expander driver.
+# Uncomment once I2C task is added (Step 10+):
+# mcp23017 = "0.1"
+
+# Structured logging over RTT via defmt.
+defmt = "0.3"
+defmt-rtt = "0.4"
+panic-probe = { version = "0.3", features = ["print-defmt"] }
+
+# Cortex-M support crates (pulled in by embassy-rp but explicit here for clarity).
+cortex-m = { version = "0.7", features = ["inline-asm"] }
+cortex-m-rt = "0.7"

@@ -1,7 +1,7 @@
 # Task: Clock Thread
 
 - **Type**: coder
-- **Status**: pending
+- **Status**: done
 - **Repo**: midi-man-mk3
 - **Parallel Group**: 3
 - **Feature Branch**: feature/engine-phase1
@@ -21,7 +21,7 @@ Implement `engine/src/clock.rs`. This is the real-time tick loop that drives the
 - [ ] Tick period computed from `state.tempo_bpm` and `state.step_size` on each iteration so tempo and step-size changes take effect on the next tick without restarting the thread.
 - [ ] Tick period formula: `tick_nanos = 60_000_000_000 / (bpm * steps_per_beat)` where steps_per_beat is 1 for Quarter, 2 for Eighth, 4 for Sixteenth.
 - [ ] Swing applied: even steps (0-indexed: 0, 2, 4…) fire at `next_abs`; odd steps (1, 3, 5…) fire at `next_abs + swing_offset_nanos`. Swing offset = `swing_factor * tick_nanos / 100` where `swing_factor` is `state.swing` (range -50 to +50).
-- [ ] On each tick: acquire write lock, call `state.tick()`, release lock, send returned `MidiEvent` on `midi_tx` if `Some`.
+- [ ] On each tick: compute `tick_nanos` for the current tempo/step size, acquire write lock, call `state.tick()`, release lock immediately. If `Some(MidiEvent::NoteOn)` returned, set `duration_nanos = tick_nanos` on the event before sending on `midi_tx`. Clock does NOT send NoteOff — that is owned by `midi_out.rs`.
 - [ ] SCHED_FIFO priority 50 requested at thread start via `libc::sched_setscheduler`; if denied (non-root), logs a warning to stderr and continues.
 - [ ] Thread exits cleanly when `midi_tx` channel is disconnected (sender dropped).
 - [ ] Unit tests (no actual sleep): mock `SequencerState` advancing 32 ticks and verify playhead is at position 0 after 32 ticks (wraps at 16). Verify swing offset math for representative BPM/swing values.
@@ -48,7 +48,8 @@ Depends on `SequencerState` fields (from Step 3):
 `MidiEvent` enum (from Step 3):
 ```rust
 pub enum MidiEvent {
-    NoteOn { channel: u8, note: u8, velocity: u8 },
+    // duration_nanos passed through from clock; midi_out.rs fires NoteOff after this delay
+    NoteOn { channel: u8, note: u8, velocity: u8, duration_nanos: u64 },
     NoteOff { channel: u8, note: u8 },
     Start, Stop, Continue,
 }
@@ -75,3 +76,85 @@ The clock thread holds the write lock only for the duration of calling `state.ti
 
 ## Notes
 
+### Implementation Summary
+
+Implemented on branch `clock-thread` (worktree at `.workflow/worktrees/clock-thread`),
+based off `feature/engine-phase1`.
+
+**Files added/modified:**
+- `engine/src/clock.rs` — `run_clock()` + pure helper functions + 17 unit tests
+- `engine/src/state.rs` — copied from step3 worktree (SequencerState, MidiEvent, StepSize)
+- `engine/src/sequencer.rs` — copied from step3 worktree (re-exports)
+- `engine/src/lib.rs` — added state, sequencer, clock module declarations
+- `engine/Cargo.toml` — made midir/hidapi/ratatui/crossterm optional under `hw-io` feature so `cargo test -p engine` runs without system ALSA/hidraw dev packages
+
+**Key design decisions honored:**
+- `libc::clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME)` with absolute wake times
+- Tick period recomputed each iteration; swing offset on odd steps
+- NoteOn carries `duration_nanos = tick_nanos`; no NoteOff sent
+- SCHED_FIFO priority 50 attempted; non-fatal if denied
+- Thread exits on `midi_tx` disconnect
+
+**Test results:** 87 tests pass (`cargo test -p engine`); clippy clean; release build succeeds.
+
+---
+
+### Code Review Findings (2026-05-02)
+
+**Reviewer:** code-reviewer agent
+**Status:** request-changes
+**Summary:** 0 critical, 1 warning, several info findings
+
+#### Checklist — all items verified PASS unless noted
+
+- [x] `clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME)` — correct, line 91–94
+- [x] Tick period formula `60_000_000_000 / (bpm * steps_per_beat)` — correct, lines 31–33; steps_per_beat returns 1/2/4 for Quarter/Eighth/Sixteenth
+- [x] Swing offset applied on odd steps only (`step_count % 2 == 1`) — correct, lines 153–158
+- [x] Write lock held only for `state.tick()` — released immediately after, lines 165–167
+- [x] `duration_nanos` set to `tick_nanos` (called `period`) on NoteOn before sending, lines 170–175
+- [x] No NoteOff sent by clock — only NoteOn forwarded, confirmed
+- [x] SCHED_FIFO requested non-fatally — warning to stderr on failure, continues, lines 53–63
+- [x] Thread exits cleanly on channel disconnect (`send().is_err()` → break), line 176–179
+- [x] `hw-io` feature flag wires optional deps correctly in `engine/Cargo.toml`; `cargo test -p engine` passes without the flag (87 tests pass)
+
+#### [WARNING] `add_nanos_signed` drops `tv_sec` borrow on negative swing overflow
+
+- **File:** `engine/src/clock.rs`, lines 114–124
+- **Severity:** warning
+
+`add_nanos_signed` adds the signed nanosecond offset only to `tv_nsec`, then clamps the result to `max(0)`. When a negative swing offset exceeds `tv_nsec` (crossing a whole-second boundary), the borrow from `tv_sec` is silently discarded. The returned wake time has the original `tv_sec` and `tv_nsec=0` instead of `tv_sec-1` with the correct sub-second remainder.
+
+For 120 BPM sixteenth note steps with swing=-50, the offset is -62.5 ms. Any tick that starts within the first 62.5 ms of a second will produce a wake time ~62–1000 ms too late (pinned to the second boundary). `clock_nanosleep` with a past absolute time fires immediately, so odd steps fire too early rather than at the correct swing time.
+
+The existing test `add_nanos_signed_clamps_to_zero` only checks `tv_nsec >= 0`, missing the `tv_sec` error.
+
+**Suggested fix:**
+
+```rust
+fn add_nanos_signed(ts: libc::timespec, nanos: i64) -> libc::timespec {
+    let total_ns: i64 = ts.tv_sec as i64 * 1_000_000_000 + ts.tv_nsec + nanos;
+    let total_ns = total_ns.max(0);
+    libc::timespec {
+        tv_sec: (total_ns / 1_000_000_000) as libc::time_t,
+        tv_nsec: (total_ns % 1_000_000_000) as libc::c_long,
+    }
+}
+```
+
+Also update `add_nanos_signed_clamps_to_zero` to assert the corrected `tv_sec` value. Filed as BUG-002 in `.workflow/BUGS.md`.
+
+#### [INFO] `step_count` advances while `playing=false`
+
+- **File:** `engine/src/clock.rs`, line 185
+- **Severity:** info
+
+`step_count` (used for even/odd swing parity) increments unconditionally each tick, including when the sequencer is paused or stopped. On resume, the swing phase may not align with the playhead's actual even/odd position in the pattern. This is an intentional design note in the code comment ("does not reset with playhead") but is worth tracking as it can create subtle swing misalignment after pause/resume. Not a bug in the current spec, but worth revisiting when transport controls are wired.
+
+#### [INFO] Swing clamping philosophy
+
+- **File:** `engine/src/clock.rs`, lines 113–124 (doc comment)
+- **Severity:** info
+
+The doc comment says "clamped to 0 so they don't go before the beat" but negative swing is explicitly in-spec (-50 to +50). The intent is that a step should not fire before its nominal beat position, which is reasonable, but the actual behaviour (when the bug above is fixed) is that only cross-second-boundary cases get clamped. Small negative offsets that stay within the current second work correctly. The comment should be clarified.
+
+**Overall verdict:** request-changes — the `add_nanos_signed` bug (BUG-002) causes incorrect absolute wake times for negative swing values that cross a second boundary. Fix is straightforward. All other acceptance criteria pass.
