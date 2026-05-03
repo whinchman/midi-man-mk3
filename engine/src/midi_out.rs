@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 use crate::state::MidiEvent;
 
 /// Runtime control messages for the MIDI output thread.
+#[derive(Debug)]
 pub enum MidiCtrlMsg {
     /// Switch to the port whose name contains this substring (case-insensitive).
     ChangePort(String),
@@ -251,6 +252,49 @@ pub fn run_midi_out_with_sender(rx: Receiver<MidiEvent>, sender: &mut Box<dyn Mi
     // Loop exits when channel closes (sender dropped).
 }
 
+/// Run the dual-channel polling loop with an injected port-open function.
+///
+/// This is a testable entry point that mirrors `run_midi_out` without requiring
+/// the `hw-io` feature. The `open_port_fn` closure is called when a
+/// `ChangePort` message arrives; returning `None` disables MIDI output.
+///
+/// Exits when `ctrl_rx` is disconnected or `midi_rx` is disconnected.
+pub fn run_midi_out_with_open_fn<F>(
+    midi_rx: std::sync::mpsc::Receiver<MidiEvent>,
+    ctrl_rx: std::sync::mpsc::Receiver<MidiCtrlMsg>,
+    initial_sender: Option<Box<dyn MidiSender>>,
+    mut open_port_fn: F,
+) where
+    F: FnMut(&str) -> Option<Box<dyn MidiSender>>,
+{
+    use std::sync::mpsc::RecvTimeoutError;
+    use std::sync::mpsc::TryRecvError;
+
+    let mut sender = initial_sender;
+
+    loop {
+        match ctrl_rx.try_recv() {
+            Ok(MidiCtrlMsg::ChangePort(name)) => {
+                sender = open_port_fn(&name);
+            }
+            Ok(MidiCtrlMsg::ChangeChannel(_)) => {
+                // Channel is applied at the MidiEvent level — no-op here.
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => break,
+        }
+        match midi_rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(event) => {
+                if let Some(ref mut s) = sender {
+                    dispatch(s, event);
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -360,44 +404,6 @@ mod tests {
 
     // ── MidiCtrlMsg tests ─────────────────────────────────────────────────────
 
-    /// Helper that runs the dual-channel polling loop (mirrors run_midi_out logic
-    /// without the hw-io open_port call) using an injected optional sender.
-    ///
-    /// `open_port_fn` is called when a ChangePort message arrives; it returns the
-    /// new sender (or None to disable MIDI output).  This lets tests inject a
-    /// stub without the hw-io feature.
-    fn run_loop_with_stub<F>(
-        midi_rx: Receiver<MidiEvent>,
-        ctrl_rx: Receiver<MidiCtrlMsg>,
-        mut sender: Option<Box<dyn MidiSender>>,
-        mut open_port_fn: F,
-    ) where
-        F: FnMut(&str) -> Option<Box<dyn MidiSender>>,
-    {
-        use std::sync::mpsc::RecvTimeoutError;
-        use std::sync::mpsc::TryRecvError;
-
-        loop {
-            match ctrl_rx.try_recv() {
-                Ok(MidiCtrlMsg::ChangePort(name)) => {
-                    sender = open_port_fn(&name);
-                }
-                Ok(MidiCtrlMsg::ChangeChannel(_)) => {}
-                Err(TryRecvError::Empty) => {}
-                Err(TryRecvError::Disconnected) => break,
-            }
-            match midi_rx.recv_timeout(Duration::from_millis(50)) {
-                Ok(event) => {
-                    if let Some(ref mut s) = sender {
-                        dispatch(s, event);
-                    }
-                }
-                Err(RecvTimeoutError::Timeout) => continue,
-                Err(RecvTimeoutError::Disconnected) => break,
-            }
-        }
-    }
-
     /// Verify that when ctrl_rx is disconnected the run loop exits cleanly.
     #[test]
     fn ctrl_rx_disconnect_exits_loop() {
@@ -410,7 +416,7 @@ mod tests {
 
         // The thread should finish without hanging or panicking.
         let handle = std::thread::spawn(move || {
-            run_loop_with_stub(midi_rx, ctrl_rx, None, |_| None);
+            run_midi_out_with_open_fn(midi_rx, ctrl_rx, None, |_| None);
         });
 
         handle
@@ -435,7 +441,7 @@ mod tests {
         let flag = Arc::clone(&port_change_received);
 
         let handle = std::thread::spawn(move || {
-            run_loop_with_stub(midi_rx, ctrl_rx, None, |_name| {
+            run_midi_out_with_open_fn(midi_rx, ctrl_rx, None, |_name| {
                 *flag.lock().unwrap() = true;
                 None // no real ALSA hardware in tests
             });
