@@ -131,3 +131,33 @@ The shift triple (13, 7, 17) is a known-valid Xorshift64 triple from Marsaglia 2
 - [x] `cargo test -p engine` passes (30 tests as of reviewer run)
 - [x] `cargo clippy -p engine` passes with no warnings
 - [x] 6 new unit tests cover all acceptance criteria including the 10 000-call statistical check
+
+---
+
+## QA Review (qa agent, 2026-05-02)
+
+Three coverage gaps found and filled (committed to `randomness-a-rng-infra` branch):
+- `test_rng_seed_advances_every_tick_when_paused` — seed advances when playing=true, paused=true
+- `test_rng_seed_advances_every_tick_when_playing` — seed advances on the normal playing path
+- `test_next_rand_produces_distinct_values` — confirms next_rand is not an identity function
+
+Total RNG tests: 9. Full suite: 342 tests, 0 failures.
+
+---
+
+## PR Feedback
+
+PR: https://github.com/whinchman/midi-man-mk3/pull/26
+
+### Comments Requiring Action
+
+_(none)_
+
+### CI Failures
+
+_(none — no CI checks configured on this repository)_
+
+### Questions / Acknowledged
+
+- Branch naming: `feature/randomness-layer/randomness-a-rng-infra` could not be pushed to the remote because `feature/randomness-layer` already exists as a ref. Git cannot create a sub-path ref under an existing ref. Branch was pushed as `randomness-a-rng-infra` (flat name) and the PR was opened from that name against `feature/randomness-layer`.
+  Action: acknowledged
