@@ -37,16 +37,10 @@ uncommitted changes and warn. Sync with remote (pull/push/rebase as needed).
 
 Read `workflow.backend` from `agent.yaml`. Default: `markdown`.
 
-**Dispatch:** board-man is invoked via the prompt-pointer pattern, not as
-a registered subagent_type. Spawn with:
-```
-Agent(prompt="Read ~/.claude/skills/board-man/SKILL.md and follow those instructions exactly. Then: <op> <args>", run_in_background=false)
-```
-
 | Step | `markdown` (default) | `github_project` (delegate to board-man) |
 |------|----------------------|------------------------------------------|
-| Read the plan | Open `<workflow.plans_dir>/<feature-name>.md` | board-man `download-plan <parent-issue#> <feature-slug>` — writes plan to `.workflow/temp/<feature-slug>/plan.md`; read it from there |
-| Create each task | Write `.workflow/tasks/<task-id>.md` with the schema below | For each task: board-man `create-task-issue <parent#> <title> <body> <parallel_group> <repo> <branch>`. Body uses the same markdown schema (Type/Status/Repo/etc.) so coders parse it identically. board-man creates a sub-issue, links it via GraphQL `addSubIssue`, sets Status TODO, sets the Parallel Group field. |
+| Read the plan | Open `<workflow.plans_dir>/<feature-name>.md` | `Task: board-man` with `download-plan <parent-issue#> <feature-slug>` — board-man writes plan to `.workflow/temp/<feature-slug>/plan.md`; read it from there |
+| Create each task | Write `.workflow/tasks/<task-id>.md` with the schema below | For each task: `Task: board-man` with `create-task-issue <parent#> <title> <body> <parallel_group> <repo> <branch>`. Body uses the same markdown schema (Type/Status/Repo/etc.) so coders parse it identically. board-man creates a sub-issue, links it via GraphQL `addSubIssue`, sets Status TODO, sets the Parallel Group field. |
 | Commit | `chore(tasks): create tasks for <feature>` | Skip the git commit — no local files were written |
 
 When this skill says "create task files in `.workflow/tasks/`", in

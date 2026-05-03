@@ -27,12 +27,8 @@ markdown state into board state.
   archive `git mv` operations are staged but not committed by this skill —
   the user reviews and commits.
 - Every `gh` write goes through **board-man**. This skill itself never
-  shells out to `gh project` / `gh issue` / `gh api graphql`. board-man is
-  dispatched via the prompt-pointer pattern (there is no registered
-  `subagent_type` named `board-man`):
-  ```
-  Agent(prompt="Read ~/.claude/skills/board-man/SKILL.md and follow those instructions exactly. Then: <op> <args>", run_in_background=false)
-  ```
+  shells out to `gh project` / `gh issue` / `gh api graphql`. Spawn
+  board-man via `Agent(subagent_type="board-man", prompt="<op> <args>")`.
 - A `200ms` sleep between board-man write calls in Step 4 to keep API
   rate limits comfortable.
 

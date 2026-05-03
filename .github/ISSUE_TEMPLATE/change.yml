@@ -1,0 +1,33 @@
+name: Change
+description: A modification to existing behavior — refactor, performance work, API change, deprecation.
+title: "[CHANGE] "
+labels: ["CHANGE"]
+body:
+  - type: textarea
+    id: current
+    attributes:
+      label: Current behavior
+      description: What does the system do today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposed
+    attributes:
+      label: Proposed change
+      description: What should it do instead, and why?
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: Files, modules, or components touched. Anything explicitly out of scope.
+    validations:
+      required: true
+  - type: textarea
+    id: risks
+    attributes:
+      label: Risks / migration notes
+      description: Backward-incompatible changes, data migrations, deprecation timeline. Optional.
+    validations:
+      required: false

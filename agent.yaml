@@ -9,6 +9,11 @@ git:
   co_author: "will hinchman <will.hinchman@gmail.com>"
 
 workflow:
+  backend: "github_project"
+  github_project:
+    owner: "whinchman"
+    number: 4
+    repo: "whinchman/midi-man-mk3"
   plans_dir: ".workflow/plans"
   reports_dir: ".workflow/reports"
   logs_dir: ".workflow/logs"

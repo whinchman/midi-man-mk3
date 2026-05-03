@@ -1,0 +1,17 @@
+{
+  "project_number": 4,
+  "project_id": "PVT_kwHOAAfjWc4BWjaz",
+  "project_title": "midi-man-mk3 board",
+  "owner": "whinchman",
+  "repo": "whinchman/midi-man-mk3",
+  "status_field_id": "PVTSSF_lAHOAAfjWc4BWjazzhR2paU",
+  "status_options": {
+    "BACKLOG": "617f879f",
+    "READY": "6ba1583b",
+    "TODO": "9512ffe5",
+    "IN-PROGRESS": "3965a5b8",
+    "DONE": "c337a162"
+  },
+  "parallel_group_field_id": "PVTF_lAHOAAfjWc4BWjazzhR2pd0",
+  "generated_at": "2026-05-03T21:38:11Z"
+}

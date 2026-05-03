@@ -113,22 +113,10 @@ Read `workflow.backend` from `agent.yaml` during Step 1 (Orient). Default:
 
 In `github_project` mode, every read or write that this skill describes
 against `.workflow/{BACKLOG,TODO,DONE,BUGS}.md` or `gh pr list`/`gh issue *`
-is replaced with a delegation to the **board-man** agent. **Note:** there is
-no registered `subagent_type` named `board-man` — dispatch with the
-prompt-pointer pattern that the rest of the pipeline uses:
-
-```
-Agent(
-  prompt="Read ~/.claude/skills/board-man/SKILL.md and follow those instructions exactly. Then: <operation> <args>",
-  run_in_background=false
-)
-```
-
-Use `run_in_background=false` for board-man — its result is needed
-synchronously before the calling step can continue.
-
-The board-man API is documented in `~/.claude/skills/board-man/SKILL.md`.
-The canonical replacements:
+is replaced with a delegation to the **board-man** subagent. Spawn it via
+`Agent(subagent_type="board-man", prompt="<operation> <args>")`. The
+board-man API is documented in `~/.claude/skills/board-man/SKILL.md`. The
+canonical replacements:
 
 | Markdown action | board-man equivalent |
 |-----------------|----------------------|

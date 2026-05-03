@@ -5,38 +5,21 @@ description: Board Manager subagent — sole interface to the GitHub Project boa
 
 # board-man Skill
 
-When invoked by another agent (coordinator, architect, manager, coder,
-github-triage, pull-request — when `workflow.backend == github_project`),
-spawn a generic Claude Code subagent via the `Agent` tool with a prompt
-that points at this file. board-man's role is documented here; the agent
-runs the corresponding `gh` operations and returns a JSON object on stdout.
-Errors return `{"error": "<msg>", "exit_code": <n>}` and never raise.
+When invoked, spawn the **board-man** subagent (defined at
+`agents/board-man/CLAUDE.md`) and pass it a single-line operation. board-man
+returns a JSON object on stdout. Errors return
+`{"error": "<msg>", "exit_code": <n>}` and never raise.
 
-This skill is **not user-facing** — humans don't invoke `/board-man`.
+This skill is invoked **only by other agents** (coordinator, architect,
+manager, coder, github-triage, pull-request) when `workflow.backend ==
+github_project` in `agent.yaml`. It is not a user-facing skill.
 
 ## Calling convention
 
-board-man is dispatched via the **prompt-pointer pattern** the rest of the
-framework uses (architect/manager/coder etc.) — there is no registered
-`subagent_type` named `board-man`. Pass it as the prompt itself:
-
 ```
-Agent(
-  prompt="Read ~/.claude/skills/board-man/SKILL.md and follow those instructions exactly.
-
-Then run this operation against the project board configured in agent.yaml.workflow.github_project:
-
-  <operation> <args>
-
-Return the result as JSON on stdout.",
-  run_in_background=false
-)
+Task: board-man
+Prompt: "<operation> <args>"
 ```
-
-Use `run_in_background=false` for board-man calls — they're cheap and
-their result is needed before the calling agent can continue. (Contrast
-with architect/manager/coder which run in background while the coordinator
-returns to conversation.)
 
 Operations are listed below. Arguments are positional; values that contain
 spaces should be JSON-quoted.

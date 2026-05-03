@@ -1,0 +1,37 @@
+name: Feature
+description: A new capability or piece of functionality.
+title: "[FEATURE] "
+labels: ["FEATURE"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: One or two sentences describing what this feature does.
+    validations:
+      required: true
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation
+      description: Why does this matter? What problem does it solve, or what new capability does it enable?
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Bulleted, checkable criteria. The architect will use these as the contract for the plan.
+      placeholder: |
+        - [ ] User can do X
+        - [ ] System produces Y
+        - [ ] Tests cover the happy path and at least one error case
+    validations:
+      required: true
+  - type: textarea
+    id: related
+    attributes:
+      label: Related items
+      description: Links to related issues, PRs, plans, or external context. Optional.
+    validations:
+      required: false

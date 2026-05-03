@@ -40,16 +40,10 @@ also honor the cross-sub-project `code_standards` in the mono-repo parent's
 
 Read `workflow.backend` from `agent.yaml`. Default: `markdown`.
 
-**Dispatch:** board-man is invoked via the prompt-pointer pattern, not as
-a registered subagent_type. Spawn with:
-```
-Agent(prompt="Read ~/.claude/skills/board-man/SKILL.md and follow those instructions exactly. Then: <op> <args>", run_in_background=false)
-```
-
 | Step | `markdown` (default) | `github_project` (delegate to board-man) |
 |------|----------------------|------------------------------------------|
-| Claim a task | Read `.workflow/tasks/<id>.md` with `Type: coder, Status: pending`. Set Status to `in-progress`. | board-man `next-task <repo>` (repo from `agent.yaml.workflow.github_project.repo`). Then board-man `set-status <issue#> IN-PROGRESS`. Body has the same Type/Status/Repo/Branch fields — parse identically. |
-| Mark done | Edit task file: Status → `done`, fill Notes section. | board-man `set-status <issue#> DONE` and board-man `add-comment <issue#> <summary-of-changes>`. Notes stay in the comment body. |
+| Claim a task | Read `.workflow/tasks/<id>.md` with `Type: coder, Status: pending`. Set Status to `in-progress`. | `Task: board-man` with `next-task <repo>` (repo from `agent.yaml.workflow.github_project.repo`). Then `set-status <issue#> IN-PROGRESS`. Body has the same Type/Status/Repo/Branch fields — parse identically. |
+| Mark done | Edit task file: Status → `done`, fill Notes section. | `Task: board-man` with `set-status <issue#> DONE` and `add-comment <issue#> <summary-of-changes>`. Notes stay in the comment body. |
 
 The branch/worktree/test logic in Steps 2–4 is identical in both modes.
 

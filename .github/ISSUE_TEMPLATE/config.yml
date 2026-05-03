@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Project board
+    url: https://github.com/{{OWNER}}/{{REPO}}/projects
+    about: All work is tracked on the project board. Pick a column and a label that matches what you're filing.

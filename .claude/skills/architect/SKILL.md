@@ -37,17 +37,11 @@ uncommitted changes and warn. Sync with remote (pull/push/rebase as needed).
 
 Read `workflow.backend` from `agent.yaml`. Default: `markdown`.
 
-**Dispatch:** board-man is invoked via the prompt-pointer pattern, not as
-a registered subagent_type. Spawn with:
-```
-Agent(prompt="Read ~/.claude/skills/board-man/SKILL.md and follow those instructions exactly. Then: <op> <args>", run_in_background=false)
-```
-
 | Step | `markdown` (default) | `github_project` (delegate to board-man) |
 |------|----------------------|------------------------------------------|
-| Find a backlog item | Read `workflow.backlog_file` (`.workflow/BACKLOG.md`) for next `- [ ]` item | board-man `list-column BACKLOG` — pick the oldest FEATURE/CHANGE/BUG without a `<!-- plan-comment-id -->` marker in its body. The issue title + body replace the markdown line. |
-| Persist the plan | Write `<workflow.plans_dir>/<feature-name>.md` and commit | board-man `post-plan-comment <issue#> <markdown>`. Skip the local plan file write — the comment is the source of truth. board-man also pins the comment ID into the parent body. |
-| Advance status | Update task file (Status `done`) and/or move backlog item | board-man `set-status <issue#> READY` |
+| Find a backlog item | Read `workflow.backlog_file` (`.workflow/BACKLOG.md`) for next `- [ ]` item | `Task: board-man` with `list-column BACKLOG` — pick the oldest FEATURE/CHANGE/BUG without a `<!-- plan-comment-id -->` marker in its body. The issue title + body replace the markdown line. |
+| Persist the plan | Write `<workflow.plans_dir>/<feature-name>.md` and commit | `Task: board-man` with `post-plan-comment <issue#> <markdown>`. Skip the local plan file write — the comment is the source of truth. board-man also pins the comment ID into the parent body. |
+| Advance status | Update task file (Status `done`) and/or move backlog item | `Task: board-man` with `set-status <issue#> READY` |
 
 When this skill says "write the plan to `<workflow.plans_dir>/<feature-name>.md`",
 in `github_project` mode it means "post the same markdown via

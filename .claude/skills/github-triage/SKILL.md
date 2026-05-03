@@ -27,16 +27,10 @@ working directory is the project root.
 
 Read `workflow.backend` from `agent.yaml`. Default: `markdown`.
 
-**Dispatch:** board-man is invoked via the prompt-pointer pattern, not as
-a registered subagent_type. Spawn with:
-```
-Agent(prompt="Read ~/.claude/skills/board-man/SKILL.md and follow those instructions exactly. Then: <op> <args>", run_in_background=false)
-```
-
 | Step | `markdown` (default) | `github_project` (delegate to board-man) |
 |------|----------------------|------------------------------------------|
-| Discover already-tracked GH issues | Grep BACKLOG.md / TODO.md / DONE.md for `[GH #N]` | board-man `list-all-tracked-markers` — returns every `[GH #N]` already on the project board |
-| Add a new untracked issue | Append `- [ ] [GH #<n>] <title> — <summary>` to the matching section in BACKLOG.md | board-man `create-issue <FEATURE\|CHANGE\|BUG> <title> <body>` (body includes the `[GH #N]` marker as a footer) then board-man `set-status <issue#> BACKLOG` |
+| Discover already-tracked GH issues | Grep BACKLOG.md / TODO.md / DONE.md for `[GH #N]` | `Task: board-man` with `list-all-tracked-markers` — returns every `[GH #N]` already on the project board |
+| Add a new untracked issue | Append `- [ ] [GH #<n>] <title> — <summary>` to the matching section in BACKLOG.md | `Task: board-man` with `create-issue <FEATURE\|CHANGE\|BUG> <title> <body>` (body includes the `[GH #N]` marker as a footer) then `set-status <issue#> BACKLOG` |
 
 In `github_project` mode, no markdown files are read or written. The board
 board-man creates is the canonical backlog.

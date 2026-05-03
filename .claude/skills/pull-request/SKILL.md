@@ -24,16 +24,10 @@ working directory is the project root (or the repo path given in your prompt).
 
 Read `workflow.backend` from `agent.yaml`. Default: `markdown`.
 
-**Dispatch:** board-man is invoked via the prompt-pointer pattern, not as
-a registered subagent_type. Spawn with:
-```
-Agent(prompt="Read ~/.claude/skills/board-man/SKILL.md and follow those instructions exactly. Then: <op> <args>", run_in_background=false)
-```
-
 | Step | `markdown` (default) | `github_project` (delegate to board-man) |
 |------|----------------------|------------------------------------------|
-| PR feedback persistence | Write `## PR Feedback` section into the local task file at `.workflow/tasks/<id>.md` | Also call board-man `add-comment <task-issue#> <feedback-block>`. The local task-file write is retained for parity but is no longer the source of truth. |
-| Mark task done after PR resolved | Coordinator handles task-file status update | When all PR comments are resolved AND the merge commit landed: call board-man `set-status <task-issue#> DONE`. If the PR body contained `Closes #<parent>`, board-man auto-advances the parent to DONE. |
+| PR feedback persistence | Write `## PR Feedback` section into the local task file at `.workflow/tasks/<id>.md` | Also call `Task: board-man` with `add-comment <task-issue#> <feedback-block>`. The local task-file write is retained for parity but is no longer the source of truth. |
+| Mark task done after PR resolved | Coordinator handles task-file status update | When all PR comments are resolved AND the merge commit landed: call `board-man set-status <task-issue#> DONE`. If the PR body contained `Closes #<parent>`, board-man auto-advances the parent to DONE. |
 | PR opening itself | `gh pr create --base <base> --head <branch>` (this agent runs it directly — board-man is not involved) | Identical. board-man only owns project-board state, not PR creation. |
 
 ---

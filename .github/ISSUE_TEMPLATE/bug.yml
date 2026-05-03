@@ -1,0 +1,46 @@
+name: Bug
+description: Something is broken or behaves incorrectly.
+title: "[BUG] "
+labels: ["BUG"]
+body:
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      description: Numbered steps to reproduce, starting from a known state.
+      placeholder: |
+        1. Run X with config Y
+        2. Observe Z
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What actually happened. Include error messages, logs, screenshots.
+    validations:
+      required: true
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      options:
+        - blocker — production-down or data-loss
+        - high — frequent, no workaround
+        - medium — workaround exists
+        - low — cosmetic or rare
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, version, branch, anything relevant. Optional.
+    validations:
+      required: false

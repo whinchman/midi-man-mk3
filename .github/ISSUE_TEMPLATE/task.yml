@@ -1,0 +1,38 @@
+name: Task (internal)
+description: A unit of implementation work, normally a sub-issue of a FEATURE/CHANGE/BUG. Created automatically by the manager agent; manual use is rare.
+title: "Task: "
+labels: ["TASK"]
+body:
+  - type: input
+    id: parent
+    attributes:
+      label: Parent issue
+      description: Issue number of the FEATURE/CHANGE/BUG this task implements (e.g. `#42`).
+    validations:
+      required: true
+  - type: input
+    id: parallel_group
+    attributes:
+      label: Parallel Group
+      description: Integer. Tasks in the same group run in parallel; lower groups run first.
+      placeholder: "1"
+    validations:
+      required: true
+  - type: input
+    id: branch
+    attributes:
+      label: Branch
+      description: Feature branch the coder will create.
+      placeholder: "feature/<task-name>"
+    validations:
+      required: true
+  - type: textarea
+    id: body
+    attributes:
+      label: Task body
+      description: |
+        Full task body in the manager's standard format — Type, Status, Repo,
+        Description, Acceptance Criteria, Interface Contracts, Context, Notes.
+        See agents/manager/CLAUDE.md for the schema.
+    validations:
+      required: true
