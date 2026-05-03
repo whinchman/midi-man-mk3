@@ -818,3 +818,127 @@ fn hid_vid_pid_constants_still_exported_after_open_device_removal() {
         "HID_PID must still be 0x000A after open_device removal"
     );
 }
+
+// -----------------------------------------------------------------------
+// translate_in_report — coverage gaps from Task 3.2 QA review.
+// -----------------------------------------------------------------------
+
+/// Negative param_knob_delta must produce PanelParamDelta with the correct
+/// signed value. The existing positive-knob test only exercises the positive
+/// branch; this confirms the i8 sign is preserved end-to-end.
+#[test]
+fn translate_param_knob_delta_negative_emits_correct_signed_delta() {
+    let mut buf = [0u8; 64];
+    buf[26] = (-5i8) as u8; // param_knob_delta = -5
+    let report = InReport::from_bytes(&buf);
+    let cmds = translate_in_report(&report);
+
+    assert_eq!(
+        cmds.len(),
+        1,
+        "expected exactly 1 command for param_knob_delta=-5, got {cmds:?}"
+    );
+    assert!(
+        matches!(cmds[0], InputCommand::PanelParamDelta(-5)),
+        "cmds[0] should be PanelParamDelta(-5); got {:?}",
+        cmds[0]
+    );
+}
+
+/// Regression guard: no command produced by translate_in_report must be one
+/// of the old overlay variants (OpenOverlay, CloseOverlay, ParamSelect,
+/// ParamSelectDelta, ParamValueDelta). These variants still exist in the enum
+/// (used by the keyboard path) so a future edit could accidentally reintroduce
+/// them on the HID path. Exercise a report with all param-button bits that
+/// previously sent overlay commands (bits 0–3, bit 8, bit 10) and assert the
+/// output contains only PanelParamSelect / PanelParamDelta.
+#[test]
+fn translate_no_command_is_old_overlay_variant() {
+    let mut buf = [0u8; 64];
+    // Bits 0–3 (PanelParamSelect 0–3), bit 8 (loop cycle), bit 10 (pause).
+    buf[7] = 0b0000_1111; // param_buttons[0]: bits 0–3
+    buf[8] = 0b0000_0101; // param_buttons[1]: bit 0 (overall bit 8) + bit 2 (bit 10)
+    let report = InReport::from_bytes(&buf);
+    let cmds = translate_in_report(&report);
+
+    // 4 × PanelParamSelect(0..=3) + 2 × (PanelParamSelect + PanelParamDelta) = 8 total.
+    assert_eq!(
+        cmds.len(),
+        8,
+        "expected 8 commands for bits 0-3 + bit8 + bit10, got {cmds:?}"
+    );
+
+    for (i, cmd) in cmds.iter().enumerate() {
+        let is_old_overlay = matches!(
+            cmd,
+            InputCommand::OpenOverlay(_)
+                | InputCommand::CloseOverlay
+                | InputCommand::ParamSelect(_)
+                | InputCommand::ParamSelectDelta(_)
+                | InputCommand::ParamValueDelta(_)
+        );
+        assert!(
+            !is_old_overlay,
+            "cmds[{i}] is a deprecated overlay variant that must not appear in HID output: {cmd:?}"
+        );
+    }
+}
+
+/// Full mixed report: all four HID input types active simultaneously.
+/// Encoder 0 has a positive delta, step button 2 is pressed, param button 1
+/// (Mode) is pressed, and param_knob_delta is negative. The expected command
+/// sequence covers all categories in emission order (encoders → steps → param
+/// buttons → param knob).
+#[test]
+fn translate_full_mixed_report_all_input_types() {
+    let mut buf = [0u8; 64];
+    buf[9] = 1i8 as u8;       // encoder_deltas[0] = +1
+    buf[3] = 0b0000_0100;     // step_buttons low: bit 2 → step 2
+    buf[7] = 0b0000_0010;     // param_buttons[0]: bit 1 → PanelParamSelect(1)
+    buf[26] = (-3i8) as u8;   // param_knob_delta = -3
+    let report = InReport::from_bytes(&buf);
+    let cmds = translate_in_report(&report);
+
+    // Expected sequence (emission order):
+    //   0: StepSelect(0)      — encoder 0 focus
+    //   1: NoteDelta(1)       — encoder 0 delta
+    //   2: StepSelect(2)      — step button 2 press
+    //   3: ToggleStep         — step button 2 press
+    //   4: PanelParamSelect(1)— param button bit 1
+    //   5: PanelParamDelta(-3)— param knob
+    assert_eq!(
+        cmds.len(),
+        6,
+        "expected 6 commands for mixed report, got {cmds:?}"
+    );
+    assert!(
+        matches!(cmds[0], InputCommand::StepSelect(0)),
+        "cmds[0] should be StepSelect(0); got {:?}",
+        cmds[0]
+    );
+    assert!(
+        matches!(cmds[1], InputCommand::NoteDelta(1)),
+        "cmds[1] should be NoteDelta(1); got {:?}",
+        cmds[1]
+    );
+    assert!(
+        matches!(cmds[2], InputCommand::StepSelect(2)),
+        "cmds[2] should be StepSelect(2); got {:?}",
+        cmds[2]
+    );
+    assert!(
+        matches!(cmds[3], InputCommand::ToggleStep),
+        "cmds[3] should be ToggleStep; got {:?}",
+        cmds[3]
+    );
+    assert!(
+        matches!(cmds[4], InputCommand::PanelParamSelect(1)),
+        "cmds[4] should be PanelParamSelect(1); got {:?}",
+        cmds[4]
+    );
+    assert!(
+        matches!(cmds[5], InputCommand::PanelParamDelta(-3)),
+        "cmds[5] should be PanelParamDelta(-3); got {:?}",
+        cmds[5]
+    );
+}
