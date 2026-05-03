@@ -5,6 +5,12 @@ to the default branch.
 
 ---
 
+## fix-repeated-note-retrigger — merged 2026-05-03 (PR #25)
+
+Consecutive steps sharing the same MIDI note now all play. Fixed by tracking `last_note` in `run_clock` and sending an immediate `NoteOff` before the `NoteOn` when the same pitch repeats. Also cleaned up pre-existing clippy warnings in `cli.rs` and `main.rs`.
+
+---
+
 ## key-mode-note-shifting — merged 2026-05-03 (PR #24)
 
 On Key or Mode change via the Regular Overlay, all 16 step midi_note values snap to the nearest in-key note. Equidistant candidates resolve to the lower note.

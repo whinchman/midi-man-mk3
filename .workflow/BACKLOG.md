@@ -15,6 +15,8 @@ New functionality that does not currently exist.
 
 ## Post-MVP / Randomness Layer
 
+Refined — see `.workflow/plans/randomness-layer.md` for full architecture plan.
+
 - [ ] Note Randomness (0-100) — chance each step note modifiers apply
 - [ ] Tempo Randomness (0-100) — roll point (off/step/beat/seq), variance max (1-99), type (random/up/down/breathe/pingpong)
 - [ ] Step Randomness (0-100) — chance each step modifier applies
@@ -23,7 +25,7 @@ New functionality that does not currently exist.
 - [ ] Shift mode: Velocity Modifier (off / 1-100 offset)
 - [ ] Shift mode: Generate Random Sequence
 - [ ] Shift mode: Scale Quantization toggle
-- [ ] NEW - Shift Mode: Key Transposition?
+- [ ] NEW - Shift Mode: Key Transposition? (DEFERRED — see plan §8)
 
 - [x] Physical component research — BOM complete at .workflow/plans/midi-man-mk3-bom.md. All 18 knobs are PEC11R encoders (detent feel preferred). ~$97 Digikey order. MCP23017s ordered x6, encoders x20.
 

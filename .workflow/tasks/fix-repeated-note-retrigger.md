@@ -1,7 +1,7 @@
 # Task: fix-repeated-note-retrigger
 
 **Type:** coder
-**Status:** reviewed
+**Status:** done
 **Feature Branch:** feature/fix-repeated-note-retrigger
 **Branch:** feature/fix-repeated-note-retrigger/fix-repeated-note-retrigger
 **Base Branch:** feature/fix-repeated-note-retrigger
@@ -60,11 +60,11 @@ let mut last_note: Option<(u8, u8)> = None;
 
 ## Acceptance Criteria
 
-- [ ] Two consecutive steps with the same MIDI note both produce audible output
-- [ ] Non-repeated notes are unaffected
-- [ ] Disabled steps do not update `last_note` (no phantom NoteOff)
-- [ ] All existing `cargo test -p engine` tests pass
-- [ ] `clippy` passes with no new warnings
+- [x] Two consecutive steps with the same MIDI note both produce audible output
+- [x] Non-repeated notes are unaffected
+- [x] Disabled steps do not update `last_note` (no phantom NoteOff)
+- [x] All existing `cargo test -p engine` tests pass
+- [x] `clippy` passes with no new warnings
 
 ## Notes
 
@@ -136,3 +136,43 @@ so no further events arrive until the playhead wraps. Dropping `rx` after
 receiving 3 events causes the thread to exit cleanly on the next blocked
 `send`. The test passed reliably on first run (0.50 s). No flakiness risk
 identified.
+
+---
+
+## QA Coverage Review
+
+**Reviewer:** qa agent
+**Date:** 2026-05-02
+**Result:** PASS — no additional tests required
+
+### Coverage Mapping
+
+| Acceptance Criterion | Test(s) |
+|---|---|
+| Two consecutive same-note steps both produce audible output | `test_retrigger_same_note_inserts_note_off`, `test_run_clock_retrigger_via_channel` |
+| Non-repeated notes are unaffected | `test_no_retrigger_for_different_note` |
+| Disabled steps do not update `last_note` | `test_disabled_step_does_not_update_last_note` |
+| All existing tests pass | Full suite: 333 tests, 0 failures |
+| Clippy passes with no new warnings | `cargo clippy -p engine` exits clean |
+
+### Summary
+
+All 4 coder-added tests are present and meaningful. Each acceptance criterion
+has at least one test providing direct behavioural coverage. No gaps identified.
+Full suite (333 tests across all crates) passes on branch
+`feature/fix-repeated-note-retrigger`. Clippy is clean. No new tests needed.
+
+---
+
+## PR Feedback
+
+PR: https://github.com/whinchman/midi-man-mk3/pull/25
+
+### Comments Requiring Action
+(none)
+
+### CI Failures
+(none — no CI checks configured on this repository)
+
+### Questions / Acknowledged
+(none)
