@@ -4,8 +4,9 @@
 #
 # Local developer overrides (gitignored):
 # If your system is missing alsa-lib-devel, create .cargo/config.local.toml
-# with the following content and point Cargo at it via CARGO_CONFIG_TOML
-# or by temporarily editing this file (do not commit those changes):
+# with the following content and activate it via:
+#   cargo build --config .cargo/config.local.toml
+# or temporarily edit this file (do not commit those changes):
 #
 #   # .cargo/config.local.toml  (gitignored)
 #   [env]
