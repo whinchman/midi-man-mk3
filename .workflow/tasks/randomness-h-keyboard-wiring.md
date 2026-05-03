@@ -2,6 +2,7 @@
 
 - **Type**: coder
 - **Status**: done
+- **Review Status**: approved
 - **Repo**: midi-man-mk3
 - **Parallel Group**: 4
 - **Feature Branch**: feature/randomness-layer
@@ -117,3 +118,24 @@ pub fn root_key_to_command(key_code: KeyCodeSimple, shift: bool) -> Option<Input
 - **engine/src/input.rs**: Added `shift_action_key_to_command(key_code: KeyCodeSimple) -> Option<InputCommand>` — pure function mapping `'s'`/`'S'` → `SkipModifierToggle` and `'g'`/`'G'` → `GenerateRandomSequence`; all other keys return `None`. Added 8 unit tests in an inline `#[cfg(test)]` module covering all four key variants, arrow/enter/esc returning `None`, other chars returning `None`, and a sanity check that `overlay_key_to_command` fallthrough still works.
 - **engine/src/ui.rs**: Updated `translate_key` to import and call `shift_action_key_to_command` when `ui.overlay == Some(OverlayMode::Shift)`. The Shift arm tries the action function first; if it returns `None` it falls through to `overlay_key_to_command` so arrow/enter/esc param-navigation is preserved. Regular overlay and no-overlay paths are unchanged.
 - **Test results**: `cargo test -p engine` — 92 unit + all integration tests passed (0 failures). `cargo build -p engine --release` clean. `cargo clippy -p engine` clean (0 warnings).
+
+### Code Review — 2026-05-02
+
+**Reviewer**: code-reviewer agent
+**Verdict**: APPROVE — 0 critical, 0 warning, 0 info
+
+#### Acceptance criteria checklist
+
+- [x] `shift_action_key_to_command` exists in `input.rs` as a pure function (line 104) — takes `KeyCodeSimple`, returns `Option<InputCommand>`, no state or side effects
+- [x] `Char('s')` / `Char('S')` → `SkipModifierToggle`; `Char('g')` / `Char('G')` → `GenerateRandomSequence`; confirmed by 4 positive unit tests
+- [x] Arrow keys and Enter/Esc return `None` from `shift_action_key_to_command` (fall through to `overlay_key_to_command`); confirmed by `shift_action_arrow_keys_return_none` and `shift_action_enter_esc_return_none` tests
+- [x] `Some(_)` wildcard replaced with explicit `Some(OverlayMode::Shift)` + `Some(OverlayMode::Regular)` arms — `OverlayMode` is a 2-variant enum so match is exhaustive; Regular overlay path unchanged
+- [x] Root/no-overlay path unchanged (`None => root_key_to_command(simple, shift)`)
+- [x] 8 inline unit tests + `overlay_key_arrows_still_work` sanity test cover all mapped and unmapped keys
+- [x] `cargo test -p engine`: 92 unit tests + full integration suite — all pass (0 failures)
+- [x] `cargo clippy -p engine`: clean, 0 warnings
+- [x] All new public items (`shift_action_key_to_command`, `InputCommand` new variants) carry doc comments
+
+#### Findings
+
+None. Implementation matches the task spec exactly. No bugs, no security issues, no style violations, no unsafe code.
