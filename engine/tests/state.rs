@@ -566,18 +566,20 @@ fn apply_command_param_select_sets_selected_param() {
 
 #[test]
 fn apply_command_param_select_delta_wraps_at_7() {
+    // Now 8 params (0–7): index 7 + 1 wraps to 0.
     let mut s = SequencerState::default();
-    s.selected_param = 6;
+    s.selected_param = 7;
     s.apply_command(InputCommand::ParamSelectDelta(1));
-    assert_eq!(s.selected_param, 0, "param wraps past 6 to 0");
+    assert_eq!(s.selected_param, 0, "param wraps past 7 to 0");
 }
 
 #[test]
 fn apply_command_param_select_delta_wraps_at_0() {
+    // Now 8 params (0–7): index 0 - 1 wraps to 7.
     let mut s = SequencerState::default();
     s.selected_param = 0;
     s.apply_command(InputCommand::ParamSelectDelta(-1));
-    assert_eq!(s.selected_param, 6, "param wraps below 0 to 6");
+    assert_eq!(s.selected_param, 7, "param wraps below 0 to 7");
 }
 
 #[test]
@@ -629,10 +631,10 @@ fn default_state_has_selected_param_0() {
 
 #[test]
 fn apply_command_param_select_clamps_at_6() {
-    // ParamSelect(n) should clamp n to the valid range 0–6.
+    // ParamSelect(n) should clamp n to the valid range 0–7 (8 params total).
     let mut s = SequencerState::default();
     s.apply_command(InputCommand::ParamSelect(10));
-    assert_eq!(s.selected_param, 6, "ParamSelect(10) should clamp to 6");
+    assert_eq!(s.selected_param, 7, "ParamSelect(10) should clamp to 7");
 }
 
 #[test]

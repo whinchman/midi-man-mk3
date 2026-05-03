@@ -27,6 +27,35 @@ pub enum StepSize {
     ThirtySecond,
 }
 
+impl StepSize {
+    /// Number of StepSize variants.
+    pub const COUNT: usize = 6;
+
+    /// Convert a zero-based index (mod 6) to the corresponding StepSize variant.
+    pub fn from_index(i: usize) -> Self {
+        match i % Self::COUNT {
+            0 => StepSize::Whole,
+            1 => StepSize::Half,
+            2 => StepSize::Quarter,
+            3 => StepSize::Eighth,
+            4 => StepSize::Sixteenth,
+            _ => StepSize::ThirtySecond,
+        }
+    }
+
+    /// Return the zero-based index of this StepSize variant.
+    pub fn to_index(self) -> usize {
+        match self {
+            StepSize::Whole => 0,
+            StepSize::Half => 1,
+            StepSize::Quarter => 2,
+            StepSize::Eighth => 3,
+            StepSize::Sixteenth => 4,
+            StepSize::ThirtySecond => 5,
+        }
+    }
+}
+
 /// Pending parameter edit awaiting confirmation.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PendingEdit {
@@ -225,8 +254,12 @@ impl SequencerState {
             }
             InputCommand::NoteDelta(d) => {
                 let step = self.selected_step;
-                let current_note = self.steps[step].midi_note;
-                let new_note = crate::music_theory::next_note(current_note, self.key, self.mode, d);
+                // Seed from pending note so repeated presses accumulate correctly.
+                let base_note = match self.pending_edit {
+                    PendingEdit::Note { step: ps, midi_note } if ps == step => midi_note,
+                    _ => self.steps[step].midi_note,
+                };
+                let new_note = crate::music_theory::next_note(base_note, self.key, self.mode, d);
                 self.pending_edit = PendingEdit::Note { step, midi_note: new_note };
             }
             InputCommand::Confirm => {
@@ -244,9 +277,9 @@ impl SequencerState {
                         }
                         self.pending_edit = PendingEdit::None;
                     }
-                    PendingEdit::Param { .. } => {
-                        // Param commits are handled by Step 7 (param overlay logic).
-                        // Clear the pending edit after confirmation.
+                    PendingEdit::Param { index, value, .. } => {
+                        // Apply the pending param value to the matching state field.
+                        self.apply_param_value(index, value);
                         self.pending_edit = PendingEdit::None;
                     }
                 }
@@ -274,12 +307,12 @@ impl SequencerState {
                 }
             }
             InputCommand::ParamSelect(n) => {
-                self.selected_param = n.min(6);
+                self.selected_param = n.min(7);
             }
             InputCommand::ParamSelectDelta(d) => {
-                // 7 params (indices 0–6), wrap modulo 7.
+                // 8 params (indices 0–7), wrap modulo 8.
                 let current = self.selected_param as i32;
-                let next = ((current + d as i32).rem_euclid(7)) as u8;
+                let next = ((current + d as i32).rem_euclid(8)) as u8;
                 self.selected_param = next;
             }
             InputCommand::ParamValueDelta(d) => {
@@ -288,15 +321,14 @@ impl SequencerState {
                     None => return, // No overlay open — ignore.
                 };
                 let index = self.selected_param;
+                // Seed from the current committed state value so the pending value
+                // is always in the same unit space as the state field.
                 let current_value = match self.pending_edit {
                     PendingEdit::Param { index: pi, value, .. } if pi == index => value,
-                    _ => 0,
+                    _ => self.committed_param_value(index),
                 };
-                self.pending_edit = PendingEdit::Param {
-                    overlay,
-                    index,
-                    value: current_value + d as i64,
-                };
+                let new_value = self.clamped_param_value(index, current_value + d as i64);
+                self.pending_edit = PendingEdit::Param { overlay, index, value: new_value };
             }
             InputCommand::PlayStop => {
                 if self.playing {
@@ -307,6 +339,135 @@ impl SequencerState {
                 }
             }
         }
+    }
+
+    /// Return the current committed state value for param `index` as an i64
+    /// in the same unit space used by `PendingEdit::Param`.
+    ///
+    /// Enum params use the variant index; numeric params use the raw value.
+    /// Regular overlay indices: 0=Key, 1=Mode, 2=Swing, 3=StepSize,
+    /// 4=loop_in, 5=loop_out, 6=paused, 7=playing.
+    fn committed_param_value(&self, index: u8) -> i64 {
+        match index {
+            0 => self.key.to_index() as i64,
+            1 => self.mode.to_index() as i64,
+            2 => self.swing as i64,
+            3 => self.step_size.to_index() as i64,
+            4 => self.loop_in as i64,
+            5 => self.loop_out as i64,
+            6 => self.paused as i64,
+            7 => self.playing as i64,
+            _ => 0,
+        }
+    }
+
+    /// Clamp or wrap the raw `value` into the valid range for param `index`.
+    fn clamped_param_value(&self, index: u8, value: i64) -> i64 {
+        match index {
+            0 => value.rem_euclid(Key::COUNT as i64),
+            1 => value.rem_euclid(Mode::COUNT as i64),
+            2 => value.clamp(-50, 50),
+            3 => value.rem_euclid(StepSize::COUNT as i64),
+            4 | 5 => value.clamp(0, 15),
+            6 | 7 => value.clamp(0, 1),
+            _ => value,
+        }
+    }
+
+    /// Write the resolved `value` for param `index` back to the matching state field.
+    ///
+    /// Regular overlay indices: 0=Key, 1=Mode, 2=Swing, 3=StepSize,
+    /// 4=loop_in, 5=loop_out, 6=paused, 7=playing.
+    /// BUG-017: setting playing=true (index 7, value 1) also clears paused.
+    fn apply_param_value(&mut self, index: u8, value: i64) {
+        match index {
+            0 => self.key = Key::from_index(value as usize),
+            1 => self.mode = Mode::from_index(value as usize),
+            2 => self.swing = value as i8,
+            3 => self.step_size = StepSize::from_index(value as usize),
+            4 => self.loop_in = value as u8,
+            5 => self.loop_out = value as u8,
+            6 => self.paused = value != 0,
+            7 => {
+                self.playing = value != 0;
+                if self.playing {
+                    self.paused = false;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::input::OverlayMode;
+
+    // ── BUG-014: loop_out edit path ──────────────────────────────────────────
+
+    #[test]
+    fn test_loop_out_edit_path_via_overlay() {
+        let mut state = SequencerState::default();
+        // Simulate a pending param edit for loop_out (index 5) with value 10.
+        state.pending_edit = PendingEdit::Param {
+            overlay: OverlayMode::Regular,
+            index: 5,
+            value: 10,
+        };
+        // Confirm should apply loop_out = 10.
+        state.apply_command(InputCommand::Confirm);
+        assert_eq!(state.loop_out, 10);
+        assert_eq!(state.pending_edit, PendingEdit::None);
+    }
+
+    #[test]
+    fn test_committed_param_value_loop_out() {
+        let mut state = SequencerState::default();
+        state.loop_out = 12;
+        assert_eq!(state.committed_param_value(5), 12);
+    }
+
+    #[test]
+    fn test_param_select_delta_wraps_at_8() {
+        let mut state = SequencerState::default();
+        state.selected_param = 7;
+        state.apply_command(InputCommand::ParamSelectDelta(1));
+        assert_eq!(state.selected_param, 0);
+    }
+
+    // ── BUG-017: overlay confirm playing=true clears paused ─────────────────
+
+    #[test]
+    fn test_confirm_playing_clears_paused() {
+        let mut state = SequencerState::default();
+        state.paused = true;
+        state.playing = false;
+        // Simulate a pending param edit: index 7 (playing), value 1.
+        state.pending_edit = PendingEdit::Param {
+            overlay: OverlayMode::Regular,
+            index: 7,
+            value: 1,
+        };
+        state.apply_command(InputCommand::Confirm);
+        assert!(state.playing, "playing should be true after confirm");
+        assert!(!state.paused, "paused should be cleared when playing is set via overlay");
+    }
+
+    #[test]
+    fn test_confirm_playing_false_does_not_clear_paused() {
+        let mut state = SequencerState::default();
+        state.paused = true;
+        state.playing = true;
+        // Set playing=false via overlay — paused should be left unchanged.
+        state.pending_edit = PendingEdit::Param {
+            overlay: OverlayMode::Regular,
+            index: 7,
+            value: 0,
+        };
+        state.apply_command(InputCommand::Confirm);
+        assert!(!state.playing);
+        assert!(state.paused, "paused should be unchanged when playing is set to false");
     }
 }
 
