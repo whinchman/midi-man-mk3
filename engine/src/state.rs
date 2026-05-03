@@ -683,5 +683,42 @@ mod tests {
         let cloned = state.clone();
         assert_eq!(cloned.rng_seed, state.rng_seed);
     }
+
+    #[test]
+    fn test_rng_seed_advances_every_tick_when_paused() {
+        let mut state = SequencerState::default();
+        state.playing = true;
+        state.paused = true;
+        let seed_before = state.rng_seed;
+        state.tick();
+        assert_ne!(
+            state.rng_seed, seed_before,
+            "rng_seed must advance on tick() even when paused"
+        );
+    }
+
+    #[test]
+    fn test_rng_seed_advances_every_tick_when_playing() {
+        let mut state = SequencerState::default();
+        state.playing = true;
+        state.paused = false;
+        let seed_before = state.rng_seed;
+        state.tick();
+        assert_ne!(
+            state.rng_seed, seed_before,
+            "rng_seed must advance on tick() when playing"
+        );
+    }
+
+    #[test]
+    fn test_next_rand_produces_distinct_values() {
+        // Confirm next_rand is not an identity function and advances state each call.
+        let mut seed = 0x853C_49E6_748F_EA9Bu64;
+        let v1 = next_rand(&mut seed);
+        let v2 = next_rand(&mut seed);
+        let v3 = next_rand(&mut seed);
+        assert_ne!(v1, v2, "consecutive next_rand calls must produce distinct values");
+        assert_ne!(v2, v3, "consecutive next_rand calls must produce distinct values");
+    }
 }
 
