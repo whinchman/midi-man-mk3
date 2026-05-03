@@ -1,7 +1,8 @@
 # Task: Step and Note Randomness in tick()
 
 - **Type**: coder
-- **Status**: pending
+- **Status**: done
+- **Review Status**: approved
 - **Repo**: midi-man-mk3
 - **Parallel Group**: 2
 - **Feature Branch**: feature/randomness-layer
@@ -95,3 +96,73 @@ pub note_rand: u8,   // Default: 0
 
 ## Notes
 
+Implemented on branch `randomness-b-step-note-rand-tick` (worktree at
+`.workflow/worktrees/randomness-b-step-note-rand-tick`), based off
+`feature/randomness-layer` which already contains Stream A.
+
+### Changes
+
+- `engine/src/state.rs`: added `step_rand: u8` and `note_rand: u8` to
+  `SequencerState`; both default to `0`.
+- `tick()`: added probabilistic mute gate using `prob_hit(&mut self.rng_seed,
+  self.step_rand)` after the playing/paused guard and after the playhead
+  advance, before reading step data. Added `// TODO(stream-E)` comment at the
+  note_rand integration point inside the `if step.enabled` block.
+- The task description's gate used `!prob_hit`, which is semantically
+  inverted for a mute-probability field. Implemented without the negation so
+  that `step_rand=100` correctly mutes all steps.
+
+### Test results
+
+`cargo test -p engine`: 36 unit tests pass (4 new: test_step_rand_default_zero,
+test_note_rand_default_zero, test_step_rand_zero_always_fires,
+test_step_rand_hundred_never_fires, test_step_rand_fifty_statistical).
+Full suite (integration + doc tests): all pass. `cargo clippy`: clean.
+`cargo build -p engine --release`: success.
+
+---
+
+## Code Review
+
+**Reviewer:** code-reviewer agent
+**Date:** 2026-05-02
+**Verdict:** APPROVE
+
+### Acceptance Criteria Checklist
+
+- [x] `SequencerState` has `step_rand: u8` and `note_rand: u8` fields — confirmed at lines 151–155
+- [x] Both default to `0` — confirmed in `Default` impl at lines 179–180
+- [x] `step_rand = 0` → all enabled steps always fire — `prob_hit(0)` short-circuits to `false`; test `test_step_rand_zero_always_fires` verifies 1000/1000 fires
+- [x] `step_rand = 100` → no enabled steps fire — `prob_hit(100)` short-circuits to `true`; test `test_step_rand_hundred_never_fires` verifies 0/1000 fires
+- [x] `step_rand = 50` → 40–60% fire — `test_step_rand_fifty_statistical` verifies over 1000 ticks
+- [x] `note_rand` field exists and has a TODO comment at the correct Stream-E insertion point (inside `if step.enabled` block at line 261–262)
+- [x] No heap allocation introduced — all changes use stack values and existing fields
+- [x] `cargo test -p engine` passes — 36 unit tests + full integration suite all pass (verified)
+- [x] `clippy` passes — no warnings (verified)
+- [x] All new public items have doc comments — both fields have single-line doc comments
+
+### Semantic Correctness — step_rand Inversion
+
+The coder correctly identified that the task spec pseudocode (`!prob_hit(...)`) had inverted semantics. The spec simultaneously defined `step_rand` as "fire probability" (in the sample code) and "0 = always fires, 100 = never fires" (in the field doc). These two are contradictory: if `step_rand=100` means "never fires," then it is a *mute* probability, not a fire probability, and the `!` must be dropped.
+
+The implementation drops the `!` and treats `step_rand` as mute probability. The observable behavior is correct: `step_rand=0` → all steps fire, `step_rand=100` → all steps muted. Field-level doc comments, inline comments, and tests are all consistent with this semantics. **The coder's correction is right.**
+
+### Asymmetric Semantics: step_rand vs. note_rand
+
+`step_rand` is a mute probability (0 = never mute). `note_rand` is an apply probability (0 = modifier never applied). These are intentionally opposite, matching the task spec's description for each field. Stream E must call `prob_hit(&mut self.rng_seed, self.note_rand)` to gate modifier application (shown in the TODO comment). This asymmetry is by design and correctly documented.
+
+### Minor Observations (info — no action required)
+
+1. **`step_rand > 0` guard removed (info):** The task spec included `if self.step_rand > 0 && !prob_hit(...)` to short-circuit when randomness is off. The implementation relies on `prob_hit`'s own `chance == 0` early return instead. Functionally equivalent and cleaner.
+
+2. **RNG consumed for disabled steps when step_rand > 0 (info):** The `prob_hit` call at line 255 fires before the `step.enabled` check at line 260. This means an extra RNG value is consumed even for disabled steps when `step_rand > 0`. This is acceptable — it preserves RNG determinism regardless of step enable state and is consistent with Stream A's unconditional seed advance on every tick.
+
+3. **`#[allow(dead_code)]` on `prob_hit` (info):** The `allow(dead_code)` attribute on `prob_hit` was present before this stream. After Stream B it is now used in `tick()`, making the attribute redundant (though harmless). Stream E or a cleanup pass can remove it.
+
+### Findings Summary
+
+- Critical: 0
+- Warning: 0
+- Info: 3 (no action required)
+
+**Overall verdict: APPROVE — implementation is correct, complete, and test-covered. No bugs to file.**
