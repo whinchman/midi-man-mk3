@@ -544,6 +544,21 @@ mod tests {
     }
 
     #[test]
+    fn test_same_mode_no_snap() {
+        let mut state = SequencerState::default(); // Mode::Major
+        state.steps[0].midi_note = 61; // C#4 — out of C major, set directly
+        // Confirm Mode=Major again (no change)
+        state.pending_edit = PendingEdit::Param {
+            overlay: OverlayMode::Regular,
+            index: 1,
+            value: 0, // Mode::Major — same as current
+        };
+        state.apply_command(InputCommand::Confirm);
+        // No-op guard must fire; note must NOT be snapped
+        assert_eq!(state.steps[0].midi_note, 61);
+    }
+
+    #[test]
     fn test_snap_all_16_steps() {
         let mut state = SequencerState::default(); // Key::C, Mode::Major
         for step in state.steps.iter_mut() {
