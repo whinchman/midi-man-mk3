@@ -68,7 +68,9 @@ fn try_set_realtime() {
 /// Returns the current monotonic time as a `libc::timespec`.
 ///
 /// # Safety
-/// Calls `libc::clock_gettime` which is safe to call; we check its return.
+/// Calls `libc::clock_gettime` which is safe to call with a valid timespec pointer.
+/// The return value is not checked; on failure the timespec remains zero-initialized,
+/// which the caller handles gracefully by sleeping until an already-past time.
 fn monotonic_now() -> libc::timespec {
     let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
     // SAFETY: ts is a valid, properly-aligned timespec on the stack.
@@ -81,21 +83,27 @@ fn monotonic_now() -> libc::timespec {
 
 /// Sleeps until the given absolute monotonic time.
 ///
-/// `remaining` is unused (we pass NULL) because we retry on EINTR by looping
-/// in the caller (re-computing absolute times each tick).
+/// Loops on EINTR so that signals do not cause premature wakeup and clock drift.
+/// `TIMER_ABSTIME` guarantees each retry sleeps to the original absolute target,
+/// not a relative remainder, so no drift accumulates across retries.
 ///
 /// # Safety
 /// Calls `libc::clock_nanosleep`; the timespec pointer is valid.
 fn sleep_until(abs_time: &libc::timespec) {
     #[cfg(target_os = "linux")]
     unsafe {
-        // TIMER_ABSTIME = 1
-        libc::clock_nanosleep(
-            libc::CLOCK_MONOTONIC,
-            libc::TIMER_ABSTIME,
-            abs_time as *const _,
-            std::ptr::null_mut(),
-        );
+        loop {
+            let rc = libc::clock_nanosleep(
+                libc::CLOCK_MONOTONIC,
+                libc::TIMER_ABSTIME,
+                abs_time as *const _,
+                std::ptr::null_mut(),
+            );
+            if rc == 0 || rc != libc::EINTR {
+                break;
+            }
+            // EINTR: retry — TIMER_ABSTIME guarantees we sleep to the original target time.
+        }
     }
     // On non-Linux platforms (e.g. macOS dev builds), this is a no-op.
     // Tests that don't call sleep_until directly are unaffected.

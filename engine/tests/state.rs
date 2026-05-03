@@ -439,9 +439,9 @@ fn apply_command_step_select_delta_advances_normally() {
 fn apply_command_note_delta_sets_pending_note_edit() {
     let mut s = SequencerState::default();
     s.selected_step = 2;
-    // default midi_note = 60
+    // default midi_note = 60 (C4), C Major. Scale-degree delta=+1 → D4=62.
     s.apply_command(InputCommand::NoteDelta(1));
-    assert!(matches!(s.pending_edit, PendingEdit::Note { step: 2, midi_note: 61 }));
+    assert!(matches!(s.pending_edit, PendingEdit::Note { step: 2, midi_note: 62 }));
 }
 
 #[test]
@@ -749,9 +749,9 @@ fn apply_command_toggle_step_toggles_selected() {
 fn apply_command_note_delta_creates_pending_edit() {
     let mut s = SequencerState::default();
     s.selected_step = 0;
-    let orig = s.steps[0].midi_note; // 60
+    // default midi_note = 60 (C4), C Major. Scale-degree delta=+2 → E4=64 (C→D→E).
     s.apply_command(InputCommand::NoteDelta(2));
-    assert!(matches!(s.pending_edit, PendingEdit::Note { step: 0, midi_note } if midi_note == orig + 2));
+    assert!(matches!(s.pending_edit, PendingEdit::Note { step: 0, midi_note: 64 }));
 }
 
 #[test]

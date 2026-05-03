@@ -25,7 +25,8 @@ pub enum InputCommand {
     StepSelect(usize),
     /// Move the selected step by a signed delta; wraps modulo 16.
     StepSelectDelta(i8),
-    /// Adjust the MIDI note for the selected step by `delta` semitones.
+    /// Advance the MIDI note for the selected step by `delta` scale degrees
+    /// (using the current key and mode, not raw semitones).
     NoteDelta(i8),
     /// Commit the pending edit to live state; no-op if no edit is pending.
     Confirm,

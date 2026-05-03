@@ -7,12 +7,15 @@
 // Thread wiring order (channel ownership):
 //   1. run_midi_out  -- takes midi_rx, port_name        [hw-io]
 //   2. run_clock     -- takes Arc<state>, midi_tx       [hw-io]
-//   3. run_hid       -- takes cmd_tx clone, Arc<state> clone, ui_notify_tx clone, vid, pid [hw-io]
+//   3. run_hid       -- takes cmd_tx clone, Arc<state> clone, ui_notify_tx clone, vid, pid, shutdown [hw-io]
 //   4. cmd-processor -- takes cmd_rx, Arc<state> clone, ui_notify_tx
 //   5. run_ui        -- takes Arc<state>, ui_notify_rx, cmd_tx [hw-io]
-//   main blocks on ui_thread.join() then joins cmd/clock/midi threads in order
+//   Shutdown order: set hid_shutdown flag → join hid_thread → drop cmd_tx → join cmd_thread
+//   → join clock_thread → join midi_thread
 
 use std::sync::{Arc, RwLock, mpsc};
+#[cfg(feature = "hw-io")]
+use std::sync::atomic::{AtomicBool, Ordering};
 use engine::state::{MidiEvent, SequencerState};
 use engine::input::InputCommand;
 use engine::cli::{CliArgs, parse_args_from_iter};
@@ -75,6 +78,10 @@ fn main() {
             .expect("failed to spawn clock thread")
     };
 
+    // --- Shutdown flag (shared with HID thread to allow clean exit) ---
+    #[cfg(feature = "hw-io")]
+    let hid_shutdown = Arc::new(AtomicBool::new(false));
+
     // --- Thread 3: HID host (hw-io only) ---
     #[cfg(feature = "hw-io")]
     let hid_thread = {
@@ -83,9 +90,10 @@ fn main() {
         let hid_notify = ui_notify_tx.clone();
         let vid = args.hid_vid.unwrap_or(engine::hid::HID_VID);
         let pid = args.hid_pid.unwrap_or(engine::hid::HID_PID);
+        let hid_shutdown_flag = Arc::clone(&hid_shutdown);
         std::thread::Builder::new()
             .name("hid".to_owned())
-            .spawn(move || engine::hid::run_hid(hid_cmd_tx, hid_state, hid_notify, vid, pid))
+            .spawn(move || engine::hid::run_hid(hid_cmd_tx, hid_state, hid_notify, vid, pid, hid_shutdown_flag))
             .expect("failed to spawn hid thread")
     };
 
@@ -144,20 +152,28 @@ fn main() {
     #[cfg(feature = "hw-io")]
     let _ = midi_tx.send(MidiEvent::Stop);
 
-    // Drop all senders so threads detect disconnection and exit cleanly.
-    // Drop cmd_tx first: cmd-processor exits when its receiver sees Disconnected.
-    drop(cmd_tx);
     // Drop midi_tx: clock exits when its send() returns Err (receiver dropped).
     drop(midi_tx);
 
-    // Join threads in dependency order so MidiEvent::Stop is consumed before exit.
-    // cmd_thread first — it holds no dependency on clock/midi threads.
-    let _ = cmd_thread.join();
-
-    // hw-io threads: clock → midi (clock sends to midi; midi must outlive clock).
+    // hw-io threads: signal HID to stop, then join in dependency order.
+    // Join order matters for the cmd_tx deadlock:
+    //   1. Signal HID to stop (set shutdown flag)
+    //   2. Join hid_thread  — guarantees hid_cmd_tx (clone of cmd_tx) is dropped
+    //   3. Drop original cmd_tx  — now ALL cmd_tx senders are gone
+    //   4. Join cmd_thread  — receiver sees Disconnected and exits cleanly
+    //   5. Join clock_thread, then midi_thread
     #[cfg(feature = "hw-io")]
     {
+        hid_shutdown.store(true, Ordering::Relaxed);
         let _ = hid_thread.join();
+    }
+
+    // Now all cmd_tx clones are dropped; cmd-processor exits when its receiver sees Disconnected.
+    drop(cmd_tx);
+    let _ = cmd_thread.join();
+
+    #[cfg(feature = "hw-io")]
+    {
         let _ = clock_thread.join();
         let _ = midi_thread.join();
     }

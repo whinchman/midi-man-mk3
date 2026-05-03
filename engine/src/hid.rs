@@ -279,7 +279,9 @@ pub fn compute_led_bytes(steps_enabled: &[bool; 16]) -> [u8; 2] {
 /// `InputCommand` values sent on `cmd_tx`, writes back an `OutReport` with
 /// the current LED state, and sends on `ui_notify` to wake the UI thread.
 ///
-/// The thread exits cleanly when `cmd_tx` becomes disconnected.
+/// The thread exits cleanly when `shutdown` is set to `true` (checked at the
+/// top of each iteration before the blocking HID read) or when `cmd_tx`
+/// becomes disconnected.
 #[cfg(feature = "hw-io")]
 pub fn run_hid(
     cmd_tx: std::sync::mpsc::SyncSender<InputCommand>,
@@ -287,6 +289,7 @@ pub fn run_hid(
     ui_notify: std::sync::mpsc::SyncSender<()>,
     vid: u16,
     pid: u16,
+    shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     use hidapi::HidApi;
 
@@ -310,6 +313,11 @@ pub fn run_hid(
     let mut buf = [0u8; 64];
 
     loop {
+        // Check shutdown flag before blocking on HID read.
+        if shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+
         // Zero the buffer before each read so stale bytes from a prior
         // short read cannot bleed into the current report's fields.
         buf = [0u8; 64];

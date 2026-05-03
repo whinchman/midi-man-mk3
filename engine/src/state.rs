@@ -223,8 +223,7 @@ impl SequencerState {
             InputCommand::NoteDelta(d) => {
                 let step = self.selected_step;
                 let current_note = self.steps[step].midi_note;
-                // Saturating add so we stay in 0–127.
-                let new_note = (current_note as i16 + d as i16).clamp(0, 127) as u8;
+                let new_note = crate::music_theory::next_note(current_note, self.key, self.mode, d);
                 self.pending_edit = PendingEdit::Note { step, midi_note: new_note };
             }
             InputCommand::Confirm => {
