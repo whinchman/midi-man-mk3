@@ -178,6 +178,47 @@ pub fn note_name(midi_note: u8) -> String {
     }
 }
 
+/// Snap `midi_note` to the nearest note in the scale defined by `key` and `mode`.
+///
+/// Ties resolve to the lower note. Result is always in 0–127.
+pub fn snap_to_key(midi_note: u8, key: Key, mode: Mode) -> u8 {
+    let intervals = SCALE_INTERVALS[mode_index(mode)];
+
+    // Build cumulative semitone offsets within one octave: [0, i0, i0+i1, ...]
+    let mut cum: [i32; 7] = [0; 7];
+    for i in 1..7 {
+        cum[i] = cum[i - 1] + intervals[i - 1] as i32;
+    }
+
+    let note_i32 = midi_note as i32;
+    let mut best_note: i32 = 0;
+    let mut best_dist: i32 = i32::MAX;
+
+    // anchor is the key root in octave 4 (e.g. C4 = 60)
+    let anchor = KEY_ROOT[key_index(key)] as i32;
+    let oct_min = -((anchor + 11) / 12);
+    let oct_max = (127 - anchor) / 12 + 1;
+
+    for oct in oct_min..=oct_max {
+        for &c in cum.iter() {
+            let candidate = anchor + oct * 12 + c;
+            if !(0..=127).contains(&candidate) {
+                continue;
+            }
+            let dist = (note_i32 - candidate).abs();
+            // Strict < so the first (lower) candidate encountered wins ties.
+            // Candidates are iterated low-to-high within each octave,
+            // and octaves are iterated in ascending order.
+            if dist < best_dist {
+                best_dist = dist;
+                best_note = candidate;
+            }
+        }
+    }
+
+    best_note.clamp(0, 127) as u8
+}
+
 /// Advances or retreats within the 7-note scale, wrapping across octaves.
 ///
 /// Finds the closest scale degree to `current` in the given key/mode, then
@@ -231,5 +272,59 @@ pub fn next_note(current: u8, key: Key, mode: Mode, direction: i8) -> u8 {
 
     let midi = root + target_octave * 12 + cum[target_degree_in_oct];
     midi.clamp(0, 127) as u8
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snap_in_key_note_unchanged() {
+        // C major scale: C4=60, D4=62, E4=64, F4=65, G4=67, A4=69, B4=71
+        assert_eq!(snap_to_key(60, Key::C, Mode::Major), 60);
+        assert_eq!(snap_to_key(62, Key::C, Mode::Major), 62);
+        assert_eq!(snap_to_key(71, Key::C, Mode::Major), 71);
+    }
+
+    #[test]
+    fn snap_out_of_key_rounds_to_nearest() {
+        // C# (61) is equidistant from C(60) and D(62) — tie: lower wins → C(60)
+        assert_eq!(snap_to_key(61, Key::C, Mode::Major), 60);
+        // Bb (70) in C major: nearest are A(69) dist=1, B(71) dist=1 — tie: lower wins → A(69)
+        assert_eq!(snap_to_key(70, Key::C, Mode::Major), 69);
+    }
+
+    #[test]
+    fn snap_tie_picks_lower_note() {
+        // F# (66) in C major: F=65 (dist 1), G=67 (dist 1) — lower wins → F(65)
+        assert_eq!(snap_to_key(66, Key::C, Mode::Major), 65);
+    }
+
+    #[test]
+    fn snap_across_octaves() {
+        // C5 = 72 is in C major
+        assert_eq!(snap_to_key(72, Key::C, Mode::Major), 72);
+        // C#5 = 73: C5(72) dist=1, D5(74) dist=1 — tie: lower wins → C5(72)
+        assert_eq!(snap_to_key(73, Key::C, Mode::Major), 72);
+    }
+
+    #[test]
+    fn snap_midi_boundaries() {
+        let _ = snap_to_key(0, Key::C, Mode::Major);
+        let _ = snap_to_key(127, Key::C, Mode::Major);
+    }
+
+    #[test]
+    fn snap_non_c_key() {
+        // Ab/G# (68) in G major: G=67 (dist 1), A=69 (dist 1) — tie: lower wins → G(67)
+        assert_eq!(snap_to_key(68, Key::G, Mode::Major), 67);
+    }
+
+    #[test]
+    fn snap_natural_minor() {
+        // A natural minor: A=69, B=71, C=72, D=74, E=76, F=77, G=79
+        // Bb (70) in A natural minor: A=69 (dist 1), B=71 (dist 1) — tie: lower wins → A(69)
+        assert_eq!(snap_to_key(70, Key::A, Mode::NaturalMinor), 69);
+    }
 }
 
