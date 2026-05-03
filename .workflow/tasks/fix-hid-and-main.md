@@ -1,6 +1,6 @@
 # Task: fix-hid-and-main
 
-- **Status**: pending
+- **Status**: done
 - **Type**: coder
 - **Feature Branch**: fix/known-bugs
 - **Branch**: fix/known-bugs/fix-hid-and-main
@@ -81,3 +81,19 @@ For non-hw-io builds where the clock loop never naturally exits: add a shutdown 
 
 ## Notes
 
+All four bugs were already resolved in prior commits on `fix/known-bugs` before
+this task was dispatched. Verification confirmed each fix is in place:
+
+- **BUG-005**: `engine/tests/hid.rs` line 138 — `in_report_field_offsets_match_wire_spec`
+  uses `std::mem::offset_of!` for all 10 `InReport` fields; no `unsafe` present.
+- **BUG-006**: `engine/src/hid.rs` line 323 — `buf = [0u8; 64]` zeroed at the top of
+  each loop iteration before `device.read_timeout`.
+- **BUG-008**: `run_hid` accepts `vid: u16, pid: u16`; `run_midi_out` accepts
+  `port_name: Option<String>`; `main.rs` forwards `args.hid_vid`, `args.hid_pid`,
+  and `selected_midi_port` to the respective thread spawners.
+- **BUG-009**: Clock thread is only spawned under `#[cfg(feature = "hw-io")]`;
+  `main.rs` explicitly joins `cmd_thread`, `clock_thread`, and `midi_thread` in
+  dependency order after dropping all senders.
+
+Branch: `task/fix-hid-and-main` (worktree off `fix/known-bugs`)
+Test result: `cargo test -p engine` — 249 tests, 0 failures.
