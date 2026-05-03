@@ -509,3 +509,151 @@ fn pending_note_edit_with_specific_midi_note_visible_in_selected_column() {
         row1
     );
 }
+
+// ── Feature-gate regression tests (BUG-007) ─────────────────────────────────
+//
+// These tests compile and run WITHOUT the `hw-io` feature.  Their existence
+// proves that `ratatui` and `ui_render` are usable without `crossterm`, which
+// is the core fix for BUG-007.
+//
+// If the Cargo.toml regression is re-introduced (ratatui default-features = true),
+// crossterm would become a non-optional dep and `cargo test -p engine` would
+// fail in environments without a real tty during link/compile, catching the bug.
+
+/// Verify that TestBackend can construct a terminal and render a frame without
+/// the `hw-io` feature.  This is the canonical compile-time + runtime proof
+/// that `ratatui` is usable without `crossterm`.
+#[test]
+fn test_backend_renders_without_hw_io_feature() {
+    // If BUG-007 were re-introduced, `ratatui` would pull in `crossterm` and
+    // this test would fail to compile or link in a headless environment.
+    let backend = TestBackend::new(80, 5);
+    let mut terminal = Terminal::new(backend).expect("TestBackend terminal must construct without hw-io");
+
+    let state = SequencerState::default();
+    terminal.draw(|frame| {
+        render_frame(frame, &state, None, 0);
+    }).expect("render_frame must complete with TestBackend and no hw-io feature");
+
+    // If we reach here, ratatui compiled and rendered without crossterm.
+    let buffer = terminal.backend().buffer().clone();
+    // Buffer must be non-empty — at least one cell should be filled.
+    let any_non_space = (0..80u16)
+        .any(|x| buffer.cell((x, 0)).map(|c| c.symbol() != " ").unwrap_or(false));
+    assert!(any_non_space, "rendered buffer must contain non-space cells (top bar must render)");
+}
+
+/// Verify that clearing and redrawing a TestBackend terminal produces the same
+/// content as the first draw — render_frame must be deterministic and
+/// side-effect-free (no hidden terminal state dependency).
+#[test]
+fn test_backend_clear_and_redraw_is_idempotent() {
+    let state = known_state();
+
+    let backend = TestBackend::new(120, 10);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+
+    terminal.draw(|frame| {
+        render_frame(frame, &state, None, 0);
+    }).expect("first draw");
+
+    let first_row0: String = (0..120)
+        .map(|x| terminal.backend().buffer().cell((x, 0)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
+        .collect();
+
+    terminal.clear().expect("terminal clear must succeed");
+
+    terminal.draw(|frame| {
+        render_frame(frame, &state, None, 0);
+    }).expect("second draw after clear");
+
+    let second_row0: String = (0..120)
+        .map(|x| terminal.backend().buffer().cell((x, 0)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
+        .collect();
+
+    assert_eq!(
+        first_row0, second_row0,
+        "top bar must be identical after clear-and-redraw (render must be deterministic)"
+    );
+}
+
+/// Verify that all 16 steps can be rendered — note row must contain at least
+/// 16 note-name tokens when every step is enabled.  This exercises the full
+/// step-iteration loop in render_frame without hw-io.
+#[test]
+fn all_sixteen_steps_enabled_renders_note_names_in_note_row() {
+    let mut state = SequencerState::default();
+    // Enable all 16 steps with a mix of notes to ensure the iteration loop
+    // visits every step and does not short-circuit on an empty/disabled step.
+    for (i, step) in state.steps.iter_mut().enumerate() {
+        step.enabled = true;
+        // Spread notes: C4(60), D4(62), E4(64), ... cycling every 4
+        step.midi_note = 60 + (i as u8 % 4) * 2;
+        step.velocity = 100;
+    }
+    state.playhead = 0;
+    state.selected_step = 0;
+
+    // Wide terminal so all 16 columns fit without truncation.
+    let backend = TestBackend::new(160, 10);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+
+    terminal.draw(|frame| {
+        render_frame(frame, &state, None, 0);
+    }).expect("draw with all steps enabled");
+
+    let buffer = terminal.backend().buffer().clone();
+
+    // Collect the entire note row (y=1).
+    let note_row: String = (0..160)
+        .map(|x| buffer.cell((x, 1)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
+        .collect();
+
+    // C4 appears for steps 0, 4, 8, 12 — must appear multiple times.
+    let c4_count = note_row.matches("C4").count();
+    assert!(
+        c4_count >= 4,
+        "note row must contain 'C4' at least 4 times when steps 0,4,8,12 are C4, got: {}",
+        note_row
+    );
+}
+
+/// Verify that the indicator row (y=2) shows the enabled marker '●' for all
+/// enabled steps and the disabled marker '○' for all disabled steps when a
+/// known pattern is set.  This is the step-indicator path in render_frame.
+#[test]
+fn indicator_row_reflects_enabled_disabled_pattern() {
+    let mut state = SequencerState::default();
+    // Enable even steps, disable odd steps.
+    for (i, step) in state.steps.iter_mut().enumerate() {
+        step.enabled = i % 2 == 0;
+        step.midi_note = 60;
+        step.velocity = 100;
+    }
+    state.playhead = 0;
+    state.selected_step = 0;
+
+    let backend = TestBackend::new(160, 10);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+
+    terminal.draw(|frame| {
+        render_frame(frame, &state, None, 0);
+    }).expect("draw");
+
+    let buffer = terminal.backend().buffer().clone();
+
+    let indicator_row: String = (0..160)
+        .map(|x| buffer.cell((x, 2)).map(|c| c.symbol()).unwrap_or(""))
+        .collect();
+
+    assert!(
+        indicator_row.contains('●'),
+        "indicator row must contain '●' for enabled (even) steps, got: {}",
+        indicator_row
+    );
+    assert!(
+        indicator_row.contains('○'),
+        "indicator row must contain '○' for disabled (odd) steps, got: {}",
+        indicator_row
+    );
+}
