@@ -14,3 +14,8 @@ debug = 2
 opt-level = "s"
 lto = true
 codegen-units = 1
+
+# Strip debug symbols from firmware release builds to prevent flash-overflow
+# on RP2040 2 MB flash; engine retains debug = 2 for profiling.
+[profile.release.package.firmware]
+debug = false

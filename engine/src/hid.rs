@@ -127,32 +127,6 @@ impl OutReport {
     }
 }
 
-/// Non-fatal HID device opener.
-///
-/// Returns `Some(device)` when the device is found and opened, or `None` when
-/// it is unavailable.  Errors are logged to stderr so the engine can continue
-/// with keyboard-only input.
-#[cfg(feature = "hw-io")]
-pub fn open_device() -> Option<hidapi::HidDevice> {
-    let api = match hidapi::HidApi::new() {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("warn: hidapi init failed ({e}) — running without HID device");
-            return None;
-        }
-    };
-    match api.open(HID_VID, HID_PID) {
-        Ok(dev) => Some(dev),
-        Err(e) => {
-            eprintln!(
-                "warn: could not open HID device {:04X}:{:04X} ({e}) — running without HID device",
-                HID_VID, HID_PID
-            );
-            None
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Pure translation helpers — no hw-io dependency; fully unit-testable.
 // ---------------------------------------------------------------------------

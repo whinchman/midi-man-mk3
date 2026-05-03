@@ -130,6 +130,9 @@ pub fn choose_midi_port(filter: Option<&str>) -> Option<String> {
     if let Some(f) = filter {
         let f_lower = f.to_lowercase();
         let matched = names.iter().find(|n| n.to_lowercase().contains(&f_lower));
+        if matched.is_none() {
+            eprintln!("[midi] port filter {:?} matched no ports; falling back to port 0", f);
+        }
         return Some(matched.unwrap_or(&names[0]).clone());
     }
 
