@@ -1,7 +1,7 @@
 # Task: Keyboard Wiring for Shift Actions
 
 - **Type**: coder
-- **Status**: pending
+- **Status**: done
 - **Repo**: midi-man-mk3
 - **Parallel Group**: 4
 - **Feature Branch**: feature/randomness-layer
@@ -111,3 +111,9 @@ pub fn root_key_to_command(key_code: KeyCodeSimple, shift: bool) -> Option<Input
 
 ## Notes
 
+### Implementation summary
+
+- **Branch**: `randomness-h-keyboard-wiring` (worktree based off `feature/randomness-layer` + Stream D merged in)
+- **engine/src/input.rs**: Added `shift_action_key_to_command(key_code: KeyCodeSimple) -> Option<InputCommand>` — pure function mapping `'s'`/`'S'` → `SkipModifierToggle` and `'g'`/`'G'` → `GenerateRandomSequence`; all other keys return `None`. Added 8 unit tests in an inline `#[cfg(test)]` module covering all four key variants, arrow/enter/esc returning `None`, other chars returning `None`, and a sanity check that `overlay_key_to_command` fallthrough still works.
+- **engine/src/ui.rs**: Updated `translate_key` to import and call `shift_action_key_to_command` when `ui.overlay == Some(OverlayMode::Shift)`. The Shift arm tries the action function first; if it returns `None` it falls through to `overlay_key_to_command` so arrow/enter/esc param-navigation is preserved. Regular overlay and no-overlay paths are unchanged.
+- **Test results**: `cargo test -p engine` — 92 unit + all integration tests passed (0 failures). `cargo build -p engine --release` clean. `cargo clippy -p engine` clean (0 warnings).
