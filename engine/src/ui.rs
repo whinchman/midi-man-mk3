@@ -180,6 +180,27 @@ pub(crate) fn handle_cli_submit(
     }
 }
 
+// ── Global key dispatch (feature-independent) ────────────────────────────────
+
+/// Map a key to a global `InputCommand` that is active in any focus panel.
+///
+/// Returns `Some(cmd)` for: +/- (BpmDelta), P/p (PlayStop), F1–F4 (SetFocus).
+/// Returns `None` for all other keys.
+#[cfg_attr(not(feature = "hw-io"), allow(dead_code))]
+pub(crate) fn global_key_to_command(key: crate::input::KeyCodeSimple) -> Option<InputCommand> {
+    use crate::input::KeyCodeSimple;
+    match key {
+        KeyCodeSimple::Plus => Some(InputCommand::BpmDelta(1)),
+        KeyCodeSimple::Minus => Some(InputCommand::BpmDelta(-1)),
+        KeyCodeSimple::Char('p') | KeyCodeSimple::Char('P') => Some(InputCommand::PlayStop),
+        KeyCodeSimple::F1 => Some(InputCommand::SetFocus(FocusPanel::Sequencer)),
+        KeyCodeSimple::F2 => Some(InputCommand::SetFocus(FocusPanel::SeqParams)),
+        KeyCodeSimple::F3 => Some(InputCommand::SetFocus(FocusPanel::RandParams)),
+        KeyCodeSimple::F4 => Some(InputCommand::SetFocus(FocusPanel::Cli)),
+        _ => None,
+    }
+}
+
 // ── hw-io–only items (crossterm, terminal, run_ui) ────────────────────────────
 
 #[cfg(feature = "hw-io")]
@@ -273,36 +294,17 @@ fn translate_key(
     let simple = to_simple(event.code);
 
     // ── Global keys (active in any focus) ─────────────────────────────────────
-    match simple {
-        KeyCodeSimple::F1 => {
-            ui.focus = FocusPanel::Sequencer;
-            return;
+    if let Some(cmd) = global_key_to_command(simple) {
+        // SetFocus commands update local ui.focus; other globals are sent on cmd_tx.
+        match cmd {
+            InputCommand::SetFocus(panel) => {
+                ui.focus = panel;
+            }
+            other => {
+                let _ = cmd_tx.send(other);
+            }
         }
-        KeyCodeSimple::F2 => {
-            ui.focus = FocusPanel::SeqParams;
-            return;
-        }
-        KeyCodeSimple::F3 => {
-            ui.focus = FocusPanel::RandParams;
-            return;
-        }
-        KeyCodeSimple::F4 => {
-            ui.focus = FocusPanel::Cli;
-            return;
-        }
-        KeyCodeSimple::Plus => {
-            let _ = cmd_tx.send(InputCommand::BpmDelta(1));
-            return;
-        }
-        KeyCodeSimple::Minus => {
-            let _ = cmd_tx.send(InputCommand::BpmDelta(-1));
-            return;
-        }
-        KeyCodeSimple::Char('p') | KeyCodeSimple::Char('P') => {
-            let _ = cmd_tx.send(InputCommand::PlayStop);
-            return;
-        }
-        _ => {}
+        return;
     }
 
     // ── Focus-specific keys ────────────────────────────────────────────────────
@@ -370,7 +372,7 @@ fn translate_key(
 /// - `state`         — shared sequencer state; read lock is acquired briefly per frame.
 /// - `cmd_tx`        — command channel to the state processor.
 /// - `ui_notify_rx`  — wakeup channel; the clock and HID threads send `()` after each
-///                     state mutation.  A 50 ms timeout fires if no wakeup arrives.
+///   state mutation.  A 50 ms timeout fires if no wakeup arrives.
 /// - `midi_ctrl_tx`  — control channel to the MIDI output thread (port/channel changes).
 ///
 /// # Termination
@@ -603,6 +605,29 @@ mod tests {
         }
 
         assert_eq!(ui.cli_log.len(), CLI_LOG_CAPACITY);
+    }
+
+    // ── global_key_to_command tests ───────────────────────────────────────────
+
+    #[test]
+    fn bpm_plus_key_sends_bpm_delta_from_any_focus() {
+        use crate::input::{FocusPanel, KeyCodeSimple};
+
+        // Plus from Sequencer focus → BpmDelta(+1)
+        let cmd = super::global_key_to_command(KeyCodeSimple::Plus);
+        assert!(matches!(cmd, Some(InputCommand::BpmDelta(1))), "Plus should produce BpmDelta(1)");
+
+        // Minus from RandParams focus → BpmDelta(-1)
+        // (global_key_to_command is focus-independent; we verify the key independently)
+        let cmd = super::global_key_to_command(KeyCodeSimple::Minus);
+        assert!(matches!(cmd, Some(InputCommand::BpmDelta(-1))), "Minus should produce BpmDelta(-1)");
+
+        // F2 key → SetFocus(SeqParams) (from any focus, including Cli)
+        let cmd = super::global_key_to_command(KeyCodeSimple::F2);
+        assert!(
+            matches!(cmd, Some(InputCommand::SetFocus(FocusPanel::SeqParams))),
+            "F2 should produce SetFocus(SeqParams)"
+        );
     }
 
     // ── push_log tests ────────────────────────────────────────────────────────
