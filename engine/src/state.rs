@@ -610,6 +610,11 @@ impl SequencerState {
             InputCommand::MidiDeviceName(name) => {
                 self.midi_device_name = name;
             }
+            // Focus and panel param commands are handled at the UI layer.
+            // state.rs is not the consumer of these variants.
+            InputCommand::SetFocus(_) => {}
+            InputCommand::PanelParamSelect(_) => {}
+            InputCommand::PanelParamDelta(_) => {}
         }
     }
 
@@ -864,7 +869,10 @@ mod tests {
         let mut state = SequencerState::default();
         state.apply_command(InputCommand::SeedSet(0));
 
-        assert_eq!(state.rand_seed, 0, "rand_seed must store the raw seed value");
+        assert_eq!(
+            state.rand_seed, 0,
+            "rand_seed must store the raw seed value"
+        );
         assert_ne!(
             state.rng_seed, 0,
             "rng_seed must be nonzero when seed=0 to avoid xorshift64 zero-fixed-point"
@@ -904,7 +912,10 @@ mod tests {
         assert_eq!(state.tempo_bpm, 20, "BPM already at 20 must not go below");
 
         state.apply_command(InputCommand::BpmDelta(-127));
-        assert_eq!(state.tempo_bpm, 20, "Large negative delta at 20 must clamp to 20");
+        assert_eq!(
+            state.tempo_bpm, 20,
+            "Large negative delta at 20 must clamp to 20"
+        );
     }
 
     #[test]
@@ -915,10 +926,16 @@ mod tests {
 
         // Positive delta at maximum stays at 300.
         state.apply_command(InputCommand::BpmDelta(1));
-        assert_eq!(state.tempo_bpm, 300, "BPM already at 300 must not exceed 300");
+        assert_eq!(
+            state.tempo_bpm, 300,
+            "BPM already at 300 must not exceed 300"
+        );
 
         state.apply_command(InputCommand::BpmDelta(127));
-        assert_eq!(state.tempo_bpm, 300, "Large positive delta at 300 must clamp to 300");
+        assert_eq!(
+            state.tempo_bpm, 300,
+            "Large positive delta at 300 must clamp to 300"
+        );
     }
 
     #[test]
@@ -946,7 +963,10 @@ mod tests {
         // Verify formula: rng_seed = lo | (lo << 32) for a variety of nonzero seeds.
         for &seed in &[1u32, 0xFFFF_FFFFu32, 0x1234_5678u32] {
             state.apply_command(InputCommand::SeedSet(seed));
-            assert_eq!(state.rand_seed, seed, "rand_seed must equal the supplied seed");
+            assert_eq!(
+                state.rand_seed, seed,
+                "rand_seed must equal the supplied seed"
+            );
             let lo = seed as u64;
             let expected = lo | (lo << 32);
             assert_eq!(
