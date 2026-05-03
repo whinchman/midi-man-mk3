@@ -146,6 +146,13 @@ pub struct SequencerState {
     pub midi_channel: u8,
     /// RNG state for all randomness streams; advanced on every tick.
     pub rng_seed: u64,
+    /// Step Randomness (0–100): per-step probability that an enabled step fires.
+    /// 0 = always fires (existing behaviour). 100 = never fires.
+    pub step_rand: u8,
+    /// Note Randomness (0–100): per-step probability that the note modifier is
+    /// applied. Only relevant when `note_modifier != 0`.
+    /// 0 = modifier never applied. 100 = modifier always applied.
+    pub note_rand: u8,
 }
 
 impl Default for SequencerState {
@@ -169,6 +176,8 @@ impl Default for SequencerState {
             selected_param: 0,
             midi_channel: 0,
             rng_seed: 0x853C_49E6_748F_EA9B,
+            step_rand: 0,
+            note_rand: 0,
         }
     }
 }
@@ -241,8 +250,16 @@ impl SequencerState {
             self.playhead = next;
         }
 
+        // Step Randomness: probabilistic mute of the whole step.
+        // step_rand is the mute probability (0 = never mute, 100 = always mute).
+        if prob_hit(&mut self.rng_seed, self.step_rand) {
+            return None;
+        }
+
         let step = &self.steps[self.playhead as usize];
         if step.enabled {
+            // TODO(stream-E): apply note_rand gate here — prob_hit(&mut self.rng_seed, self.note_rand)
+            // determines whether the note modifier is applied.
             Some(MidiEvent::NoteOn {
                 channel: self.midi_channel,
                 note: step.midi_note,
@@ -719,6 +736,83 @@ mod tests {
         let v3 = next_rand(&mut seed);
         assert_ne!(v1, v2, "consecutive next_rand calls must produce distinct values");
         assert_ne!(v2, v3, "consecutive next_rand calls must produce distinct values");
+    }
+
+    // ── Step Randomness (Stream B) ───────────────────────────────────────────
+
+    #[test]
+    fn test_step_rand_default_zero() {
+        let state = SequencerState::default();
+        assert_eq!(state.step_rand, 0, "step_rand must default to 0");
+    }
+
+    #[test]
+    fn test_note_rand_default_zero() {
+        let state = SequencerState::default();
+        assert_eq!(state.note_rand, 0, "note_rand must default to 0");
+    }
+
+    #[test]
+    fn test_step_rand_zero_always_fires() {
+        // step_rand = 0 → all enabled steps always fire (existing behaviour preserved).
+        let mut state = SequencerState::default();
+        state.playing = true;
+        state.paused = false;
+        state.step_rand = 0;
+        // Enable all 16 steps.
+        for step in state.steps.iter_mut() {
+            step.enabled = true;
+        }
+        state.playhead = 15; // will wrap to 0 on first tick
+        let mut fires = 0u32;
+        for _ in 0..1000 {
+            if state.tick().is_some() {
+                fires += 1;
+            }
+        }
+        assert_eq!(fires, 1000, "step_rand=0 must fire on every enabled step (got {fires})");
+    }
+
+    #[test]
+    fn test_step_rand_hundred_never_fires() {
+        // step_rand = 100 → no enabled steps fire (all probabilistically muted).
+        let mut state = SequencerState::default();
+        state.playing = true;
+        state.paused = false;
+        state.step_rand = 100;
+        for step in state.steps.iter_mut() {
+            step.enabled = true;
+        }
+        for _ in 0..1000 {
+            assert!(
+                state.tick().is_none(),
+                "step_rand=100 must never fire"
+            );
+        }
+    }
+
+    #[test]
+    fn test_step_rand_fifty_statistical() {
+        // step_rand = 50 → over 1 000 ticks, between 40% and 60% of enabled steps fire.
+        let mut state = SequencerState::default();
+        state.playing = true;
+        state.paused = false;
+        state.step_rand = 50;
+        for step in state.steps.iter_mut() {
+            step.enabled = true;
+        }
+        let n = 1000u32;
+        let mut fires = 0u32;
+        for _ in 0..n {
+            if state.tick().is_some() {
+                fires += 1;
+            }
+        }
+        let ratio = fires as f64 / n as f64;
+        assert!(
+            ratio >= 0.40 && ratio <= 0.60,
+            "step_rand=50 hit rate {ratio:.4} outside [0.40, 0.60]"
+        );
     }
 }
 
