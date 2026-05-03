@@ -80,6 +80,31 @@ pub fn select_port_idx(port_names: &[&str], filter: Option<&str>) -> Option<usiz
     }
 }
 
+/// Prompt the user to choose a MIDI channel (1–16) before the TUI starts.
+///
+/// Returns a 0-indexed channel byte (0–15) for use in MIDI messages.
+/// Defaults to channel 1 (byte 0) on empty input.
+#[cfg(feature = "hw-io")]
+pub fn choose_midi_channel() -> u8 {
+    print!("MIDI channel [1–16, default 1]: ");
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_ok() {
+        let trimmed = line.trim();
+        if !trimmed.is_empty() {
+            if let Ok(n) = trimmed.parse::<u8>() {
+                if (1..=16).contains(&n) {
+                    return n - 1;
+                }
+            }
+            eprintln!("[midi_out] invalid channel '{trimmed}' — using channel 1");
+        }
+    }
+    0
+}
+
 /// Enumerate available MIDI output ports and return the chosen port name.
 ///
 /// Call this **before** starting the TUI so the prompt has clean access to

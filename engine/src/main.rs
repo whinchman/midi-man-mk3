@@ -34,13 +34,21 @@ fn main() {
         println!("[main] HID PID override: {pid:#06x}");
     }
 
-    // --- MIDI port selection (must happen before TUI takes over stdin/stdout) ---
+    // --- MIDI setup (must happen before TUI takes over stdin/stdout) ---
     #[cfg(feature = "hw-io")]
     let selected_midi_port: Option<String> =
         engine::midi_out::choose_midi_port(args.midi_port.as_deref());
+    #[cfg(feature = "hw-io")]
+    let selected_midi_channel: u8 = engine::midi_out::choose_midi_channel();
 
     // --- Shared state ---
     let state: Arc<RwLock<SequencerState>> = Arc::new(RwLock::new(SequencerState::default()));
+
+    // Apply selected MIDI channel to initial state.
+    #[cfg(feature = "hw-io")]
+    {
+        state.write().expect("state poisoned").midi_channel = selected_midi_channel;
+    }
 
     // --- Channels ---
     // midi: clock -> midi_out  (bounded; clock never blocks waiting for midi_out)

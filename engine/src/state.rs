@@ -113,6 +113,8 @@ pub struct SequencerState {
     pub selected_step: usize,
     /// Currently selected param index (0–6); controlled by ParamSelect/ParamSelectDelta.
     pub selected_param: u8,
+    /// MIDI channel to output on (0–15, where 0 = channel 1 in MIDI spec).
+    pub midi_channel: u8,
 }
 
 impl Default for SequencerState {
@@ -134,6 +136,7 @@ impl Default for SequencerState {
             active_overlay: None,
             selected_step: 0,
             selected_param: 0,
+            midi_channel: 0,
         }
     }
 }
@@ -186,7 +189,7 @@ impl SequencerState {
         let step = &self.steps[self.playhead as usize];
         if step.enabled {
             Some(MidiEvent::NoteOn {
-                channel: 0,
+                channel: self.midi_channel,
                 note: step.midi_note,
                 velocity: step.velocity,
                 duration_nanos: 0,
