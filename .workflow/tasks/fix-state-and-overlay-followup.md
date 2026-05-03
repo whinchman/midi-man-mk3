@@ -115,3 +115,21 @@ All 245 `cargo test -p engine` tests pass.
 ### [INFO] `engine/src/state.rs:143` — `selected_param` doc comment still says `0–6`
 
 The `selected_param` field doc still reads `/// Currently selected param index (0–6); controlled by ParamSelect/ParamSelectDelta.` The valid range is now `0–7` after the 8-param expansion. This is a cosmetic inconsistency only — no behavioral impact. No bug file entry created; can be fixed as a one-liner in a cleanup pass.
+
+---
+
+## PR Feedback
+
+PR: https://github.com/whinchman/midi-man-mk3/pull/18
+
+### Comments Requiring Action
+
+(none)
+
+### CI Failures
+
+(none — no CI configured on this repository)
+
+### Questions / Acknowledged
+
+(none — no reviewer comments at time of collection)

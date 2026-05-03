@@ -198,3 +198,21 @@ callers; the silent fallback (warning) is a user-experience regression relative 
 matching warning already present in `select_port_idx`.
 
 Follow-up task files: none created (warnings are targeted enough for direct inline fixes).
+
+---
+
+## PR Feedback
+
+PR: https://github.com/whinchman/midi-man-mk3/pull/20
+
+### Comments Requiring Action
+
+_(none — no review comments or CI failures at time of collection)_
+
+### CI Failures
+
+_(none — no status checks configured on this repository)_
+
+### Questions / Acknowledged
+
+_(none)_

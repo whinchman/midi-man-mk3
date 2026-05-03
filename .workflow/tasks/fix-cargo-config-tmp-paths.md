@@ -99,3 +99,40 @@ A developer following the comment will search for `CARGO_CONFIG_TOML`, find noth
 - 0 info findings
 
 The primary goal of BUG-003 (removing hardcoded `/tmp` paths from committed config) is fully achieved. All acceptance criteria pass. The warning is a documentation inaccuracy that could confuse developers but does not affect builds or test execution. Approving with the expectation that the comment is updated in a follow-up.
+
+---
+
+## QA Coverage (2026-05-02)
+
+**QA agent branch:** `fix/known-bugs` (commit 7d6fc32)
+**New test file:** `engine/tests/cargo_config.rs`
+**Tests added:** 4
+
+| Test | Acceptance Criterion Covered |
+|------|------------------------------|
+| `cargo_config_no_live_tmp_alsa_pkg` | No live config line references `/tmp/alsa-pkg` |
+| `cargo_config_no_live_tmp_alsa_lib` | No live config line references `/tmp/alsa-lib` |
+| `gitignore_contains_config_local_toml` | `.gitignore` has `.cargo/config.local.toml` entry |
+| `cargo_config_documents_local_override_pattern` | Comment in `.cargo/config.toml` mentions `.cargo/config.local.toml` |
+
+**Full suite result:** `cargo test -p engine` — 253 tests across 9 test files, 0 failures.
+
+Tests read real project files via `CARGO_MANIFEST_DIR`; they will catch any future accidental re-introduction of hardcoded `/tmp` ALSA paths or removal of the `.gitignore` entry.
+
+---
+
+## PR Feedback
+
+PR: https://github.com/whinchman/midi-man-mk3/pull/21
+
+### Comments Requiring Action
+
+(none)
+
+### CI Failures
+
+(none — no CI checks configured on this repository)
+
+### Questions / Acknowledged
+
+(none)

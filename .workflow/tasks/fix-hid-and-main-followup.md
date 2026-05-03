@@ -98,3 +98,29 @@ Info findings (no action required):
 
 Additional finding outside the diff scope (pre-existing, not introduced by this branch):
 - `.workflow/BUGS.md` contains two entries with the ID `BUG-015` (lines 427 and 519). The second one (about `apply_param_value` in `state.rs`) should be renumbered (e.g. BUG-017) to avoid confusion. Not a code defect — no action needed on this branch.
+
+---
+
+### QA Coverage — fix-hid-and-main-followup (2026-05-02)
+
+QA branch: `qa/fix-hid-and-main-followup`
+Worktree: `.workflow/worktrees/qa-fix-hid-and-main-followup`
+Total tests after QA pass: **257** (249 pre-existing + 8 new)
+
+**Tests added:**
+
+- `engine/tests/cargo_config.rs` (new file, 2 tests)
+  - `cargo_config_toml_does_not_reference_cargo_config_toml_env_var` — asserts BUG-013 fix: env var reference gone
+  - `cargo_config_toml_references_config_local_toml_flag` — asserts BUG-013 fix: correct `--config` flag present
+
+- `engine/tests/hid.rs` (1 test added)
+  - `hid_vid_pid_constants_still_exported_after_open_device_removal` — asserts BUG-015 fix: `HID_VID`/`HID_PID` constants remain accessible after dead function removed
+
+- `engine/tests/midi_out.rs` (5 tests added)
+  - `select_port_idx_empty_filter_matches_first_port` — empty string matches all, no fallback
+  - `select_port_idx_filter_matches_multiple_returns_first_match` — first match wins when filter matches multiple
+  - `select_port_idx_uppercase_filter_matches_lowercase_port` — case-insensitive in both directions
+  - `select_port_idx_fallback_with_many_ports_returns_zero` — fallback to 0 regardless of list length
+  - `select_port_idx_unique_match_not_at_zero` — correct index when match is not first port
+
+All 257 tests pass. `cargo test -p engine` green.
