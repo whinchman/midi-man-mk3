@@ -503,6 +503,18 @@ impl SequencerState {
                     self.playing = true;
                 }
             }
+            InputCommand::NoteModifierSet(s) => {
+                self.note_modifier = s;
+            }
+            InputCommand::SkipModifierToggle => {
+                self.skip_modifier = !self.skip_modifier;
+            }
+            InputCommand::VelocityModifierSet(v) => {
+                self.velocity_modifier = v;
+            }
+            InputCommand::GenerateRandomSequence => {
+                self.generate_random_sequence();
+            }
         }
     }
 
@@ -638,6 +650,22 @@ impl SequencerState {
             6 => self.scale_quant = value != 0,
             // 7: reserved — no-op.
             _ => {}
+        }
+    }
+
+    /// Randomise all 16 steps' notes to in-key values within MIDI range 48–84.
+    ///
+    /// Uses `next_rand(&mut self.rng_seed)` for each step. Enabled flags are
+    /// left unchanged — only `midi_note` is updated.
+    /// Generated note range: 48–84 (C3–C6, 3 octaves). The raw random value
+    /// is mapped to this range, then snapped to the current key/mode via
+    /// `music_theory::snap_to_key`.
+    fn generate_random_sequence(&mut self) {
+        for step in self.steps.iter_mut() {
+            let raw = next_rand(&mut self.rng_seed);
+            let note_in_range = (raw % 37) as u8 + 48; // 48..=84
+            step.midi_note =
+                crate::music_theory::snap_to_key(note_in_range, self.key, self.mode);
         }
     }
 
@@ -1362,6 +1390,177 @@ mod tests {
         state.apply_command(InputCommand::ParamValueDelta(50));
         state.apply_command(InputCommand::Confirm);
         assert_eq!(state.pending_edit, PendingEdit::None);
+    }
+
+    // ── Stream D: Shift action commands ─────────────────────────────────────
+
+    #[test]
+    fn test_note_modifier_set_applies_value() {
+        let mut state = SequencerState::default();
+        state.apply_command(InputCommand::NoteModifierSet(5));
+        assert_eq!(state.note_modifier, 5);
+    }
+
+    #[test]
+    fn test_note_modifier_set_clears_with_zero() {
+        let mut state = SequencerState::default();
+        state.note_modifier = 12;
+        state.apply_command(InputCommand::NoteModifierSet(0));
+        assert_eq!(state.note_modifier, 0);
+    }
+
+    #[test]
+    fn test_note_modifier_set_negative_value() {
+        let mut state = SequencerState::default();
+        state.apply_command(InputCommand::NoteModifierSet(-24));
+        assert_eq!(state.note_modifier, -24);
+    }
+
+    #[test]
+    fn test_skip_modifier_toggle_false_to_true() {
+        let mut state = SequencerState::default();
+        assert!(!state.skip_modifier);
+        state.apply_command(InputCommand::SkipModifierToggle);
+        assert!(state.skip_modifier);
+    }
+
+    #[test]
+    fn test_skip_modifier_toggle_true_to_false() {
+        let mut state = SequencerState::default();
+        state.skip_modifier = true;
+        state.apply_command(InputCommand::SkipModifierToggle);
+        assert!(!state.skip_modifier);
+    }
+
+    #[test]
+    fn test_skip_modifier_toggle_round_trip() {
+        let mut state = SequencerState::default();
+        state.apply_command(InputCommand::SkipModifierToggle);
+        state.apply_command(InputCommand::SkipModifierToggle);
+        assert!(!state.skip_modifier, "double toggle should return to false");
+    }
+
+    #[test]
+    fn test_velocity_modifier_set_applies_value() {
+        let mut state = SequencerState::default();
+        state.apply_command(InputCommand::VelocityModifierSet(64));
+        assert_eq!(state.velocity_modifier, 64);
+    }
+
+    #[test]
+    fn test_velocity_modifier_set_clears_with_zero() {
+        let mut state = SequencerState::default();
+        state.velocity_modifier = 50;
+        state.apply_command(InputCommand::VelocityModifierSet(0));
+        assert_eq!(state.velocity_modifier, 0);
+    }
+
+    #[test]
+    fn test_velocity_modifier_set_negative_value() {
+        let mut state = SequencerState::default();
+        state.apply_command(InputCommand::VelocityModifierSet(-127));
+        assert_eq!(state.velocity_modifier, -127);
+    }
+
+    #[test]
+    fn test_generate_random_sequence_updates_all_notes() {
+        let mut state = SequencerState::default();
+        // Set all notes to 60 (C4) first so we can detect changes.
+        for step in state.steps.iter_mut() {
+            step.midi_note = 60;
+        }
+        // Record original enabled flags.
+        let enabled_before: [bool; 16] = core::array::from_fn(|i| state.steps[i].enabled);
+        state.apply_command(InputCommand::GenerateRandomSequence);
+        // All 16 notes must have been set (may or may not differ from 60 —
+        // verify they are in range and in key).
+        for (i, step) in state.steps.iter().enumerate() {
+            assert!(
+                step.midi_note >= 48 && step.midi_note <= 84,
+                "step {i} midi_note {} out of range 48–84",
+                step.midi_note
+            );
+            // Identity check: snapping again must produce the same note.
+            let snapped = crate::music_theory::snap_to_key(step.midi_note, state.key, state.mode);
+            assert_eq!(
+                step.midi_note, snapped,
+                "step {i} note {} is not in key/mode",
+                step.midi_note
+            );
+            // Enabled flag must be unchanged.
+            assert_eq!(
+                step.enabled, enabled_before[i],
+                "step {i} enabled flag changed by GenerateRandomSequence"
+            );
+        }
+    }
+
+    #[test]
+    fn test_generate_random_sequence_enabled_flags_preserved_mixed() {
+        let mut state = SequencerState::default();
+        // Set alternating enabled flags.
+        for (i, step) in state.steps.iter_mut().enumerate() {
+            step.enabled = i % 2 == 0;
+        }
+        let enabled_before: [bool; 16] = core::array::from_fn(|i| state.steps[i].enabled);
+        state.apply_command(InputCommand::GenerateRandomSequence);
+        for (i, step) in state.steps.iter().enumerate() {
+            assert_eq!(
+                step.enabled, enabled_before[i],
+                "step {i} enabled flag changed"
+            );
+        }
+    }
+
+    #[test]
+    fn test_generate_random_sequence_notes_in_range_48_84() {
+        let mut state = SequencerState::default();
+        // Run multiple times to increase confidence.
+        for _ in 0..20 {
+            state.apply_command(InputCommand::GenerateRandomSequence);
+            for (i, step) in state.steps.iter().enumerate() {
+                assert!(
+                    step.midi_note >= 48 && step.midi_note <= 84,
+                    "step {i} note {} out of range 48–84 after repeated GenerateRandomSequence",
+                    step.midi_note
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_generate_random_sequence_notes_in_key() {
+        let mut state = SequencerState::default(); // Key::C, Mode::Major
+        for _ in 0..20 {
+            state.apply_command(InputCommand::GenerateRandomSequence);
+            for (i, step) in state.steps.iter().enumerate() {
+                let snapped =
+                    crate::music_theory::snap_to_key(step.midi_note, state.key, state.mode);
+                assert_eq!(
+                    step.midi_note, snapped,
+                    "step {i} note {} not in key C Major after GenerateRandomSequence",
+                    step.midi_note
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_generate_random_sequence_produces_variety() {
+        // Over 10 calls the 16-step sequence should not always be identical.
+        let mut state = SequencerState::default();
+        state.apply_command(InputCommand::GenerateRandomSequence);
+        let first: [u8; 16] = core::array::from_fn(|i| state.steps[i].midi_note);
+        let mut all_same = true;
+        for _ in 0..9 {
+            state.apply_command(InputCommand::GenerateRandomSequence);
+            let current: [u8; 16] = core::array::from_fn(|i| state.steps[i].midi_note);
+            if current != first {
+                all_same = false;
+                break;
+            }
+        }
+        assert!(!all_same, "GenerateRandomSequence produced identical sequences 10 times in a row");
     }
 }
 
