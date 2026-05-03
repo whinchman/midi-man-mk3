@@ -10,6 +10,86 @@ use crate::music_theory::{Key, Mode};
 // state (e.g. sequencer.rs) continues to compile without modification.
 pub use crate::input::OverlayMode;
 
+/// When the tempo randomness roll fires.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TempoRollPoint {
+    /// Tempo randomness disabled.
+    Off,
+    /// Roll fires on every step.
+    Step,
+    /// Roll fires on every beat (4 steps at 1/16 resolution).
+    Beat,
+    /// Roll fires on every sequence loop.
+    Seq,
+}
+
+impl TempoRollPoint {
+    /// Number of TempoRollPoint variants.
+    pub const COUNT: usize = 4;
+
+    /// Convert a zero-based index (mod 4) to the corresponding TempoRollPoint variant.
+    pub fn from_index(i: usize) -> Self {
+        match i % Self::COUNT {
+            0 => TempoRollPoint::Off,
+            1 => TempoRollPoint::Step,
+            2 => TempoRollPoint::Beat,
+            _ => TempoRollPoint::Seq,
+        }
+    }
+
+    /// Return the zero-based index of this TempoRollPoint variant.
+    pub fn to_index(self) -> usize {
+        match self {
+            TempoRollPoint::Off  => 0,
+            TempoRollPoint::Step => 1,
+            TempoRollPoint::Beat => 2,
+            TempoRollPoint::Seq  => 3,
+        }
+    }
+}
+
+/// Shape of the tempo randomness curve.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TempoRandType {
+    /// Completely random within the variance window.
+    Random,
+    /// Bias toward increasing tempo.
+    Up,
+    /// Bias toward decreasing tempo.
+    Down,
+    /// Slow oscillation between min and max (sine-like).
+    Breathe,
+    /// Bounce back and forth between min and max.
+    PingPong,
+}
+
+impl TempoRandType {
+    /// Number of TempoRandType variants.
+    pub const COUNT: usize = 5;
+
+    /// Convert a zero-based index (mod 5) to the corresponding TempoRandType variant.
+    pub fn from_index(i: usize) -> Self {
+        match i % Self::COUNT {
+            0 => TempoRandType::Random,
+            1 => TempoRandType::Up,
+            2 => TempoRandType::Down,
+            3 => TempoRandType::Breathe,
+            _ => TempoRandType::PingPong,
+        }
+    }
+
+    /// Return the zero-based index of this TempoRandType variant.
+    pub fn to_index(self) -> usize {
+        match self {
+            TempoRandType::Random   => 0,
+            TempoRandType::Up       => 1,
+            TempoRandType::Down     => 2,
+            TempoRandType::Breathe  => 3,
+            TempoRandType::PingPong => 4,
+        }
+    }
+}
+
 /// Step resolution for the sequencer clock.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum StepSize {
@@ -153,6 +233,31 @@ pub struct SequencerState {
     /// applied. Only relevant when `note_modifier != 0`.
     /// 0 = modifier never applied. 100 = modifier always applied.
     pub note_rand: u8,
+
+    // --- Randomness ---
+    /// Probability (0–100) that the tempo randomness roll fires.
+    pub tempo_rand: u8,
+    /// When the tempo randomness roll fires.
+    pub tempo_roll_point: TempoRollPoint,
+    /// Maximum tempo variance as a percentage of the base BPM (1–99).
+    pub tempo_variance_max: u8,
+    /// Shape of the tempo randomness curve.
+    pub tempo_rand_type: TempoRandType,
+    /// When true, outgoing notes are quantised to the current scale.
+    pub scale_quant: bool,
+
+    // --- Shift modifiers ---
+    /// Semitone offset applied to every NoteOn. 0 = off.
+    ///
+    /// ParamValueDelta steps ±1 while `abs(value) ≤ 12`, then ±12 (one octave)
+    /// beyond that. Maximum ±96 (8 octaves).
+    pub note_modifier: i8,
+    /// When true, every step is muted at play time.
+    pub skip_modifier: bool,
+    /// Velocity offset applied to every NoteOn (-127..=127). 0 = off.
+    ///
+    /// Clamped to 0–127 at emit time.
+    pub velocity_modifier: i8,
 }
 
 impl Default for SequencerState {
@@ -178,6 +283,14 @@ impl Default for SequencerState {
             rng_seed: 0x853C_49E6_748F_EA9B,
             step_rand: 0,
             note_rand: 0,
+            tempo_rand: 0,
+            tempo_roll_point: TempoRollPoint::Off,
+            tempo_variance_max: 10,
+            tempo_rand_type: TempoRandType::Random,
+            scale_quant: false,
+            note_modifier: 0,
+            skip_modifier: false,
+            velocity_modifier: 0,
         }
     }
 }
@@ -320,9 +433,12 @@ impl SequencerState {
                         }
                         self.pending_edit = PendingEdit::None;
                     }
-                    PendingEdit::Param { index, value, .. } => {
-                        // BUG-012 fix: apply the pending param value to the state field.
-                        self.apply_param_value(index, value);
+                    PendingEdit::Param { overlay, index, value } => {
+                        // Route to the correct overlay-specific apply method.
+                        match overlay {
+                            OverlayMode::Regular => self.apply_param_value(index, value),
+                            OverlayMode::Shift   => self.shift_apply_param_value(index, value),
+                        }
                         self.pending_edit = PendingEdit::None;
                     }
                 }
@@ -364,13 +480,19 @@ impl SequencerState {
                     None => return, // No overlay open — ignore.
                 };
                 let index = self.selected_param;
-                // BUG-011 fix: seed from the current committed state value so the
-                // pending value is always in the same unit space as the state field.
+                // Seed from the current committed state value so the pending value
+                // is always in the same unit space as the state field.
                 let current_value = match self.pending_edit {
                     PendingEdit::Param { index: pi, value, .. } if pi == index => value,
-                    _ => self.committed_param_value(index),
+                    _ => match overlay {
+                        OverlayMode::Regular => self.committed_param_value(index),
+                        OverlayMode::Shift   => self.shift_committed_param_value(index),
+                    },
                 };
-                let new_value = self.clamped_param_value(index, current_value + d as i64);
+                let new_value = match overlay {
+                    OverlayMode::Regular => self.clamped_param_value(index, current_value + d as i64),
+                    OverlayMode::Shift   => self.shift_clamped_param_value(index, current_value + d as i64),
+                };
                 self.pending_edit = PendingEdit::Param { overlay, index, value: new_value };
             }
             InputCommand::PlayStop => {
@@ -449,6 +571,72 @@ impl SequencerState {
                     self.paused = false;
                 }
             }
+            _ => {}
+        }
+    }
+
+    /// Return the current committed state value for shift param `index` as an i64.
+    ///
+    /// Shift overlay param index map:
+    /// 0=note_rand (Stream B — stub returns 0), 1=tempo_rand, 2=tempo_roll_point,
+    /// 3=tempo_variance_max, 4=tempo_rand_type, 5=step_rand (Stream B — stub returns 0),
+    /// 6=scale_quant, 7=reserved (returns 0).
+    fn shift_committed_param_value(&self, index: u8) -> i64 {
+        match index {
+            // 0: note_rand — owned by Stream B; stub until B merges.
+            0 => 0,
+            1 => self.tempo_rand as i64,
+            2 => self.tempo_roll_point.to_index() as i64,
+            3 => self.tempo_variance_max as i64,
+            4 => self.tempo_rand_type.to_index() as i64,
+            // 5: step_rand — owned by Stream B; stub until B merges.
+            5 => 0,
+            6 => self.scale_quant as i64,
+            // 7: reserved — always 0.
+            _ => 0,
+        }
+    }
+
+    /// Clamp or wrap `value` into the valid range for shift param `index`.
+    ///
+    /// Shift overlay param index map:
+    /// 0=note_rand (0–100), 1=tempo_rand (0–100), 2=tempo_roll_point (wraps),
+    /// 3=tempo_variance_max (1–99), 4=tempo_rand_type (wraps),
+    /// 5=step_rand (0–100), 6=scale_quant (0–1), 7=reserved (no-op).
+    fn shift_clamped_param_value(&self, index: u8, value: i64) -> i64 {
+        match index {
+            // 0: note_rand — owned by Stream B; passthrough stub.
+            0 => value.clamp(0, 100),
+            1 => value.clamp(0, 100),
+            2 => value.rem_euclid(TempoRollPoint::COUNT as i64),
+            3 => value.clamp(1, 99),
+            4 => value.rem_euclid(TempoRandType::COUNT as i64),
+            // 5: step_rand — owned by Stream B; passthrough stub.
+            5 => value.clamp(0, 100),
+            6 => value.clamp(0, 1),
+            // 7: reserved — no-op, return value unchanged.
+            _ => value,
+        }
+    }
+
+    /// Write the resolved `value` for shift param `index` back to the matching state field.
+    ///
+    /// Shift overlay param index map:
+    /// 0=note_rand (Stream B — no-op stub), 1=tempo_rand, 2=tempo_roll_point,
+    /// 3=tempo_variance_max, 4=tempo_rand_type, 5=step_rand (Stream B — no-op stub),
+    /// 6=scale_quant, 7=reserved (no-op).
+    fn shift_apply_param_value(&mut self, index: u8, value: i64) {
+        match index {
+            // 0: note_rand — owned by Stream B; no-op until B merges.
+            0 => {}
+            1 => self.tempo_rand = value as u8,
+            2 => self.tempo_roll_point = TempoRollPoint::from_index(value as usize),
+            3 => self.tempo_variance_max = value as u8,
+            4 => self.tempo_rand_type = TempoRandType::from_index(value as usize),
+            // 5: step_rand — owned by Stream B; no-op until B merges.
+            5 => {}
+            6 => self.scale_quant = value != 0,
+            // 7: reserved — no-op.
             _ => {}
         }
     }
@@ -813,6 +1001,342 @@ mod tests {
             ratio >= 0.40 && ratio <= 0.60,
             "step_rand=50 hit rate {ratio:.4} outside [0.40, 0.60]"
         );
+    }
+
+    // ── TempoRollPoint enum ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_tempo_roll_point_round_trip() {
+        for i in 0..TempoRollPoint::COUNT {
+            let v = TempoRollPoint::from_index(i);
+            assert_eq!(v.to_index(), i, "TempoRollPoint round-trip failed for index {i}");
+        }
+    }
+
+    #[test]
+    fn test_tempo_roll_point_from_index_wraps() {
+        assert_eq!(TempoRollPoint::from_index(0), TempoRollPoint::Off);
+        assert_eq!(TempoRollPoint::from_index(1), TempoRollPoint::Step);
+        assert_eq!(TempoRollPoint::from_index(2), TempoRollPoint::Beat);
+        assert_eq!(TempoRollPoint::from_index(3), TempoRollPoint::Seq);
+        // Wraps at COUNT
+        assert_eq!(TempoRollPoint::from_index(4), TempoRollPoint::Off);
+    }
+
+    #[test]
+    fn test_tempo_roll_point_count() {
+        assert_eq!(TempoRollPoint::COUNT, 4);
+    }
+
+    // ── TempoRandType enum ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_tempo_rand_type_round_trip() {
+        for i in 0..TempoRandType::COUNT {
+            let v = TempoRandType::from_index(i);
+            assert_eq!(v.to_index(), i, "TempoRandType round-trip failed for index {i}");
+        }
+    }
+
+    #[test]
+    fn test_tempo_rand_type_from_index_wraps() {
+        assert_eq!(TempoRandType::from_index(0), TempoRandType::Random);
+        assert_eq!(TempoRandType::from_index(1), TempoRandType::Up);
+        assert_eq!(TempoRandType::from_index(2), TempoRandType::Down);
+        assert_eq!(TempoRandType::from_index(3), TempoRandType::Breathe);
+        assert_eq!(TempoRandType::from_index(4), TempoRandType::PingPong);
+        // Wraps at COUNT
+        assert_eq!(TempoRandType::from_index(5), TempoRandType::Random);
+    }
+
+    #[test]
+    fn test_tempo_rand_type_count() {
+        assert_eq!(TempoRandType::COUNT, 5);
+    }
+
+    // ── SequencerState new field defaults ────────────────────────────────────
+
+    #[test]
+    fn test_new_fields_defaults() {
+        let state = SequencerState::default();
+        assert_eq!(state.tempo_rand, 0);
+        assert_eq!(state.tempo_roll_point, TempoRollPoint::Off);
+        assert_eq!(state.tempo_variance_max, 10);
+        assert_eq!(state.tempo_rand_type, TempoRandType::Random);
+        assert!(!state.scale_quant);
+        assert_eq!(state.note_modifier, 0);
+        assert!(!state.skip_modifier);
+        assert_eq!(state.velocity_modifier, 0);
+    }
+
+    #[test]
+    fn test_sequencer_state_with_new_fields_is_clone() {
+        let mut state = SequencerState::default();
+        state.tempo_rand = 42;
+        state.tempo_roll_point = TempoRollPoint::Beat;
+        state.tempo_rand_type = TempoRandType::PingPong;
+        state.scale_quant = true;
+        state.note_modifier = -12;
+        state.skip_modifier = true;
+        state.velocity_modifier = 10;
+        let cloned = state.clone();
+        assert_eq!(cloned.tempo_rand, 42);
+        assert_eq!(cloned.tempo_roll_point, TempoRollPoint::Beat);
+        assert_eq!(cloned.tempo_rand_type, TempoRandType::PingPong);
+        assert!(cloned.scale_quant);
+        assert_eq!(cloned.note_modifier, -12);
+        assert!(cloned.skip_modifier);
+        assert_eq!(cloned.velocity_modifier, 10);
+    }
+
+    // ── shift_committed_param_value ──────────────────────────────────────────
+
+    #[test]
+    fn test_shift_committed_param_value_defaults() {
+        let state = SequencerState::default();
+        // 0: note_rand stub → 0
+        assert_eq!(state.shift_committed_param_value(0), 0);
+        // 1: tempo_rand = 0
+        assert_eq!(state.shift_committed_param_value(1), 0);
+        // 2: tempo_roll_point = Off → 0
+        assert_eq!(state.shift_committed_param_value(2), 0);
+        // 3: tempo_variance_max = 10
+        assert_eq!(state.shift_committed_param_value(3), 10);
+        // 4: tempo_rand_type = Random → 0
+        assert_eq!(state.shift_committed_param_value(4), 0);
+        // 5: step_rand stub → 0
+        assert_eq!(state.shift_committed_param_value(5), 0);
+        // 6: scale_quant = false → 0
+        assert_eq!(state.shift_committed_param_value(6), 0);
+        // 7: reserved → 0
+        assert_eq!(state.shift_committed_param_value(7), 0);
+    }
+
+    #[test]
+    fn test_shift_committed_param_value_reflects_state() {
+        let mut state = SequencerState::default();
+        state.tempo_rand = 75;
+        state.tempo_roll_point = TempoRollPoint::Beat;
+        state.tempo_variance_max = 50;
+        state.tempo_rand_type = TempoRandType::Breathe;
+        state.scale_quant = true;
+        assert_eq!(state.shift_committed_param_value(1), 75);
+        assert_eq!(state.shift_committed_param_value(2), TempoRollPoint::Beat.to_index() as i64);
+        assert_eq!(state.shift_committed_param_value(3), 50);
+        assert_eq!(state.shift_committed_param_value(4), TempoRandType::Breathe.to_index() as i64);
+        assert_eq!(state.shift_committed_param_value(6), 1);
+    }
+
+    // ── shift_clamped_param_value ────────────────────────────────────────────
+
+    #[test]
+    fn test_shift_clamped_param_value_tempo_rand() {
+        let state = SequencerState::default();
+        assert_eq!(state.shift_clamped_param_value(1, -5), 0);
+        assert_eq!(state.shift_clamped_param_value(1, 0), 0);
+        assert_eq!(state.shift_clamped_param_value(1, 50), 50);
+        assert_eq!(state.shift_clamped_param_value(1, 100), 100);
+        assert_eq!(state.shift_clamped_param_value(1, 150), 100);
+    }
+
+    #[test]
+    fn test_shift_clamped_param_value_tempo_roll_point_wraps() {
+        let state = SequencerState::default();
+        assert_eq!(state.shift_clamped_param_value(2, 0), 0);
+        assert_eq!(state.shift_clamped_param_value(2, 3), 3);
+        // Wraps at 4
+        assert_eq!(state.shift_clamped_param_value(2, 4), 0);
+        assert_eq!(state.shift_clamped_param_value(2, -1), 3);
+    }
+
+    #[test]
+    fn test_shift_clamped_param_value_tempo_variance_max() {
+        let state = SequencerState::default();
+        assert_eq!(state.shift_clamped_param_value(3, 0), 1);
+        assert_eq!(state.shift_clamped_param_value(3, 1), 1);
+        assert_eq!(state.shift_clamped_param_value(3, 50), 50);
+        assert_eq!(state.shift_clamped_param_value(3, 99), 99);
+        assert_eq!(state.shift_clamped_param_value(3, 100), 99);
+    }
+
+    #[test]
+    fn test_shift_clamped_param_value_tempo_rand_type_wraps() {
+        let state = SequencerState::default();
+        assert_eq!(state.shift_clamped_param_value(4, 0), 0);
+        assert_eq!(state.shift_clamped_param_value(4, 4), 4);
+        // Wraps at 5
+        assert_eq!(state.shift_clamped_param_value(4, 5), 0);
+        assert_eq!(state.shift_clamped_param_value(4, -1), 4);
+    }
+
+    #[test]
+    fn test_shift_clamped_param_value_scale_quant() {
+        let state = SequencerState::default();
+        assert_eq!(state.shift_clamped_param_value(6, 0), 0);
+        assert_eq!(state.shift_clamped_param_value(6, 1), 1);
+        assert_eq!(state.shift_clamped_param_value(6, -1), 0);
+        assert_eq!(state.shift_clamped_param_value(6, 2), 1);
+    }
+
+    #[test]
+    fn test_shift_clamped_param_value_reserved_is_passthrough() {
+        let state = SequencerState::default();
+        // Index 7 reserved: value is returned unchanged.
+        assert_eq!(state.shift_clamped_param_value(7, 42), 42);
+        assert_eq!(state.shift_clamped_param_value(7, -99), -99);
+    }
+
+    // ── shift_apply_param_value ──────────────────────────────────────────────
+
+    #[test]
+    fn test_shift_apply_param_value_tempo_rand() {
+        let mut state = SequencerState::default();
+        state.shift_apply_param_value(1, 80);
+        assert_eq!(state.tempo_rand, 80);
+    }
+
+    #[test]
+    fn test_shift_apply_param_value_tempo_roll_point() {
+        let mut state = SequencerState::default();
+        state.shift_apply_param_value(2, TempoRollPoint::Seq.to_index() as i64);
+        assert_eq!(state.tempo_roll_point, TempoRollPoint::Seq);
+    }
+
+    #[test]
+    fn test_shift_apply_param_value_tempo_variance_max() {
+        let mut state = SequencerState::default();
+        state.shift_apply_param_value(3, 33);
+        assert_eq!(state.tempo_variance_max, 33);
+    }
+
+    #[test]
+    fn test_shift_apply_param_value_tempo_rand_type() {
+        let mut state = SequencerState::default();
+        state.shift_apply_param_value(4, TempoRandType::Down.to_index() as i64);
+        assert_eq!(state.tempo_rand_type, TempoRandType::Down);
+    }
+
+    #[test]
+    fn test_shift_apply_param_value_scale_quant() {
+        let mut state = SequencerState::default();
+        state.shift_apply_param_value(6, 1);
+        assert!(state.scale_quant);
+        state.shift_apply_param_value(6, 0);
+        assert!(!state.scale_quant);
+    }
+
+    #[test]
+    fn test_shift_apply_param_value_note_rand_is_noop() {
+        // Index 0: note_rand owned by Stream B — must be a safe no-op here.
+        let mut state = SequencerState::default();
+        // No field should change; just verify it doesn't panic.
+        state.shift_apply_param_value(0, 50);
+    }
+
+    #[test]
+    fn test_shift_apply_param_value_step_rand_is_noop() {
+        // Index 5: step_rand owned by Stream B — must be a safe no-op here.
+        let mut state = SequencerState::default();
+        state.shift_apply_param_value(5, 50);
+    }
+
+    #[test]
+    fn test_shift_apply_param_value_reserved_is_noop() {
+        // Index 7: reserved — must be a safe no-op.
+        let mut state = SequencerState::default();
+        state.shift_apply_param_value(7, 99);
+        // No assertion needed — just verifying it compiles and does not panic.
+    }
+
+    // ── Shift overlay round-trip via apply_command ───────────────────────────
+
+    fn open_shift_overlay(state: &mut SequencerState) {
+        state.apply_command(InputCommand::OpenOverlay(OverlayMode::Shift));
+    }
+
+    #[test]
+    fn test_shift_overlay_round_trip_tempo_rand() {
+        let mut state = SequencerState::default();
+        open_shift_overlay(&mut state);
+        state.selected_param = 1; // tempo_rand
+        state.apply_command(InputCommand::ParamValueDelta(50));
+        state.apply_command(InputCommand::Confirm);
+        assert_eq!(state.tempo_rand, 50);
+    }
+
+    #[test]
+    fn test_shift_overlay_round_trip_tempo_roll_point() {
+        let mut state = SequencerState::default();
+        open_shift_overlay(&mut state);
+        state.selected_param = 2; // tempo_roll_point (Off=0)
+        state.apply_command(InputCommand::ParamValueDelta(2)); // → Beat
+        state.apply_command(InputCommand::Confirm);
+        assert_eq!(state.tempo_roll_point, TempoRollPoint::Beat);
+    }
+
+    #[test]
+    fn test_shift_overlay_round_trip_tempo_variance_max() {
+        let mut state = SequencerState::default();
+        open_shift_overlay(&mut state);
+        state.selected_param = 3; // tempo_variance_max (default 10)
+        state.apply_command(InputCommand::ParamValueDelta(30)); // 10+30=40
+        state.apply_command(InputCommand::Confirm);
+        assert_eq!(state.tempo_variance_max, 40);
+    }
+
+    #[test]
+    fn test_shift_overlay_round_trip_tempo_rand_type() {
+        let mut state = SequencerState::default();
+        open_shift_overlay(&mut state);
+        state.selected_param = 4; // tempo_rand_type (Random=0)
+        state.apply_command(InputCommand::ParamValueDelta(4)); // → PingPong
+        state.apply_command(InputCommand::Confirm);
+        assert_eq!(state.tempo_rand_type, TempoRandType::PingPong);
+    }
+
+    #[test]
+    fn test_shift_overlay_round_trip_scale_quant() {
+        let mut state = SequencerState::default();
+        open_shift_overlay(&mut state);
+        state.selected_param = 6; // scale_quant (false=0)
+        state.apply_command(InputCommand::ParamValueDelta(1)); // → 1
+        state.apply_command(InputCommand::Confirm);
+        assert!(state.scale_quant);
+    }
+
+    #[test]
+    fn test_shift_overlay_reserved_index_is_noop() {
+        let mut state = SequencerState::default();
+        open_shift_overlay(&mut state);
+        state.selected_param = 7; // reserved
+        state.apply_command(InputCommand::ParamValueDelta(1));
+        state.apply_command(InputCommand::Confirm);
+        // State should be otherwise unchanged — just verify no panic.
+        assert_eq!(state.pending_edit, PendingEdit::None);
+    }
+
+    #[test]
+    fn test_shift_overlay_multiple_deltas_accumulate() {
+        // Confirm that repeated ParamValueDelta calls accumulate on pending edit.
+        let mut state = SequencerState::default();
+        open_shift_overlay(&mut state);
+        state.selected_param = 1; // tempo_rand
+        state.apply_command(InputCommand::ParamValueDelta(20));
+        state.apply_command(InputCommand::ParamValueDelta(20));
+        state.apply_command(InputCommand::ParamValueDelta(10));
+        state.apply_command(InputCommand::Confirm);
+        assert_eq!(state.tempo_rand, 50);
+    }
+
+    #[test]
+    fn test_regular_overlay_still_works_after_shift_changes() {
+        // Verify the Regular overlay path is unaffected by the shift dispatch changes.
+        let mut state = SequencerState::default();
+        state.apply_command(InputCommand::OpenOverlay(OverlayMode::Regular));
+        state.selected_param = 2; // swing
+        state.apply_command(InputCommand::ParamValueDelta(10));
+        state.apply_command(InputCommand::Confirm);
+        assert_eq!(state.swing, 10);
     }
 }
 
