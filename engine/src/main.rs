@@ -113,19 +113,14 @@ fn main() {
     let cmd_thread = std::thread::Builder::new()
         .name("cmd-processor".to_owned())
         .spawn(move || {
-            loop {
-                match cmd_rx.recv() {
-                    Ok(cmd) => {
-                        {
-                            let mut s = cmd_state.write()
-                                .expect("cmd-processor: state RwLock poisoned");
-                            s.apply_command(cmd);
-                        }
-                        // Best-effort notify; if UI is gone we continue until cmd_rx closes.
-                        let _ = cmd_notify.try_send(());
-                    }
-                    Err(_) => break,
+            while let Ok(cmd) = cmd_rx.recv() {
+                {
+                    let mut s = cmd_state.write()
+                        .expect("cmd-processor: state RwLock poisoned");
+                    s.apply_command(cmd);
                 }
+                // Best-effort notify; if UI is gone we continue until cmd_rx closes.
+                let _ = cmd_notify.try_send(());
             }
         })
         .expect("failed to spawn cmd-processor thread");

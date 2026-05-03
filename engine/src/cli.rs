@@ -1,7 +1,7 @@
-/// Minimal CLI argument parsing for the engine binary.
-///
-/// Exposed as `pub(crate)` so that integration tests in `engine/tests/` can
-/// exercise the pure parsing logic without needing to spawn the binary.
+//! Minimal CLI argument parsing for the engine binary.
+//!
+//! Exposed as `pub(crate)` so that integration tests in `engine/tests/` can
+//! exercise the pure parsing logic without needing to spawn the binary.
 
 /// Parsed CLI arguments.
 pub struct CliArgs {
