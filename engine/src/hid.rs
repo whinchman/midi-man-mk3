@@ -393,8 +393,8 @@ pub fn run_hid(
 
             // Tempo delta — direct write, clamped to 20–300 BPM.
             if report.tempo_delta != 0 {
-                let new_bpm = (st.tempo_bpm as i32 + report.tempo_delta as i32)
-                    .clamp(20, 300) as u16;
+                let new_bpm =
+                    (st.tempo_bpm as i32 + report.tempo_delta as i32).clamp(20, 300) as u16;
                 st.tempo_bpm = new_bpm;
             }
 
@@ -414,7 +414,10 @@ pub fn run_hid(
         }
 
         // Read active_overlay for translation context.
-        let active_overlay = state.read().expect("hid: state read lock poisoned").active_overlay;
+        let active_overlay = state
+            .read()
+            .expect("hid: state read lock poisoned")
+            .active_overlay;
 
         // --- Translate to InputCommand and send. ---
         let cmds = translate_in_report(&report, active_overlay);

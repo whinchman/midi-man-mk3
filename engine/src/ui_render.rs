@@ -17,8 +17,8 @@ use ratatui::Frame;
 
 use crate::input::OverlayMode;
 use crate::music_theory::note_name;
-use crate::state::{PendingEdit, SequencerState, StepSize, TempoRollPoint, TempoRandType};
 use crate::music_theory::{Key, Mode};
+use crate::state::{PendingEdit, SequencerState, StepSize, TempoRandType, TempoRollPoint};
 
 /// Shift overlay parameter names (index 0–7).
 pub const SHIFT_PARAMS: [&str; 8] = [
@@ -124,11 +124,11 @@ pub fn render_frame(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),  // top bar
-            Constraint::Length(3),  // step rows (note + indicator + playhead marker)
-            Constraint::Length(1),  // info row (swing, loop, status)
+            Constraint::Length(1),              // top bar
+            Constraint::Length(3),              // step rows (note + indicator + playhead marker)
+            Constraint::Length(1),              // info row (swing, loop, status)
             Constraint::Length(overlay_height), // overlay panel
-            Constraint::Min(0),     // remaining space
+            Constraint::Min(0),                 // remaining space
         ])
         .split(area);
 
@@ -141,8 +141,7 @@ pub fn render_frame(
         step_size_label(state.step_size),
         status_label(state.playing, state.paused),
     );
-    let top_bar = Paragraph::new(top_text)
-        .style(Style::default().add_modifier(Modifier::BOLD));
+    let top_bar = Paragraph::new(top_text).style(Style::default().add_modifier(Modifier::BOLD));
     frame.render_widget(top_bar, chunks[0]);
 
     // ── Step rows ─────────────────────────────────────────────────────────────
@@ -199,7 +198,9 @@ fn render_steps(frame: &mut Frame, state: &SequencerState, area: Rect) {
             Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)
         } else if is_selected {
             if pending_in_this_step.is_some() {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::UNDERLINED)
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::UNDERLINED)
             } else {
                 Style::default().add_modifier(Modifier::UNDERLINED)
             }
@@ -263,9 +264,11 @@ fn render_overlay(
         None => {}
         Some(OverlayMode::Shift) => {
             let pending_param_value: Option<(u8, i64)> = match state.pending_edit {
-                PendingEdit::Param { overlay: OverlayMode::Shift, index, value } => {
-                    Some((index, value))
-                }
+                PendingEdit::Param {
+                    overlay: OverlayMode::Shift,
+                    index,
+                    value,
+                } => Some((index, value)),
                 _ => None,
             };
 
@@ -304,8 +307,11 @@ fn render_overlay(
                 Style::default().add_modifier(Modifier::DIM),
             ));
             let param_line = Line::from(spans);
-            let para = Paragraph::new(vec![param_line, action_label])
-                .block(Block::default().title("Shift Overlay (Esc to close)").borders(Borders::ALL));
+            let para = Paragraph::new(vec![param_line, action_label]).block(
+                Block::default()
+                    .title("Shift Overlay (Esc to close)")
+                    .borders(Borders::ALL),
+            );
             frame.render_widget(para, area);
         }
         Some(OverlayMode::Regular) => {
@@ -347,8 +353,11 @@ fn render_overlay(
             }
 
             let line = Line::from(spans);
-            let para = Paragraph::new(line)
-                .block(Block::default().title("Regular Overlay (Esc to close)").borders(Borders::ALL));
+            let para = Paragraph::new(line).block(
+                Block::default()
+                    .title("Regular Overlay (Esc to close)")
+                    .borders(Borders::ALL),
+            );
             frame.render_widget(para, area);
         }
     }
@@ -366,7 +375,13 @@ pub fn shift_param_value_string(state: &SequencerState, index: u8) -> String {
         3 => state.tempo_variance_max.to_string(),
         4 => tempo_rand_type_name(state.tempo_rand_type).to_string(),
         5 => state.step_rand.to_string(),
-        6 => if state.scale_quant { "On".to_string() } else { "Off".to_string() },
+        6 => {
+            if state.scale_quant {
+                "On".to_string()
+            } else {
+                "Off".to_string()
+            }
+        }
         _ => "\u{2014}".to_string(), // em dash for reserved
     }
 }
@@ -381,7 +396,13 @@ pub fn shift_pending_param_value_string(index: u8, v: i64) -> String {
         0 | 1 | 3 | 5 => format!("{}", v),
         2 => tempo_roll_point_name(TempoRollPoint::from_index(v as usize)).to_string(),
         4 => tempo_rand_type_name(TempoRandType::from_index(v as usize)).to_string(),
-        6 => if v != 0 { "On".to_string() } else { "Off".to_string() },
+        6 => {
+            if v != 0 {
+                "On".to_string()
+            } else {
+                "Off".to_string()
+            }
+        }
         _ => "\u{2014}".to_string(), // em dash for reserved
     }
 }
@@ -389,20 +410,20 @@ pub fn shift_pending_param_value_string(index: u8, v: i64) -> String {
 /// Return a human-readable string for a `TempoRollPoint`.
 fn tempo_roll_point_name(trp: TempoRollPoint) -> &'static str {
     match trp {
-        TempoRollPoint::Off  => "Off",
+        TempoRollPoint::Off => "Off",
         TempoRollPoint::Step => "Step",
         TempoRollPoint::Beat => "Beat",
-        TempoRollPoint::Seq  => "Seq",
+        TempoRollPoint::Seq => "Seq",
     }
 }
 
 /// Return a human-readable string for a `TempoRandType`.
 fn tempo_rand_type_name(trt: TempoRandType) -> &'static str {
     match trt {
-        TempoRandType::Random   => "Random",
-        TempoRandType::Up       => "Up",
-        TempoRandType::Down     => "Down",
-        TempoRandType::Breathe  => "Breathe",
+        TempoRandType::Random => "Random",
+        TempoRandType::Up => "Up",
+        TempoRandType::Down => "Down",
+        TempoRandType::Breathe => "Breathe",
         TempoRandType::PingPong => "PingPong",
     }
 }
@@ -419,12 +440,8 @@ fn param_value_string(state: &SequencerState, index: u8) -> String {
         3 => step_size_label(state.step_size).to_string(),
         4 => state.loop_in.to_string(),
         5 => state.loop_out.to_string(),
-        6 => {
-            if state.paused { "on" } else { "off" }.to_string()
-        }
-        7 => {
-            if state.playing { "playing" } else { "stopped" }.to_string()
-        }
+        6 => if state.paused { "on" } else { "off" }.to_string(),
+        7 => if state.playing { "playing" } else { "stopped" }.to_string(),
         _ => "?".to_string(),
     }
 }
@@ -441,8 +458,20 @@ fn pending_param_value_string(index: u8, v: i64) -> String {
         2 => format!("{:+}", v as i8),
         3 => step_size_label(StepSize::from_index(v as usize)).to_string(),
         4 | 5 => format!("{}", v),
-        6 => if v != 0 { "on".to_string() } else { "off".to_string() },
-        7 => if v != 0 { "playing".to_string() } else { "stopped".to_string() },
+        6 => {
+            if v != 0 {
+                "on".to_string()
+            } else {
+                "off".to_string()
+            }
+        }
+        7 => {
+            if v != 0 {
+                "playing".to_string()
+            } else {
+                "stopped".to_string()
+            }
+        }
         _ => "?".to_string(),
     }
 }

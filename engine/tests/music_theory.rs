@@ -1,10 +1,16 @@
-use engine::music_theory::{note_name, notes_in_key, next_note, snap_to_key, SCALE_INTERVALS, Key, Mode};
+use engine::music_theory::{
+    next_note, note_name, notes_in_key, snap_to_key, Key, Mode, SCALE_INTERVALS,
+};
 
 #[test]
 fn all_modes_intervals_sum_to_12() {
     for (i, row) in SCALE_INTERVALS.iter().enumerate() {
         let sum: u8 = row.iter().sum();
-        assert_eq!(sum, 12, "Mode index {} intervals sum to {} (expected 12)", i, sum);
+        assert_eq!(
+            sum, 12,
+            "Mode index {} intervals sum to {} (expected 12)",
+            i, sum
+        );
     }
 }
 
@@ -40,28 +46,42 @@ fn note_name_sharp_accidentals() {
 fn next_note_wraps_degree7_to_degree1_next_octave() {
     // In C Major the 7th degree is B4 = 71. Going up from B4 should give C5 = 72.
     let result = next_note(71, Key::C, Mode::Major, 1);
-    assert_eq!(result, 72, "next_note up from B4 (71) should be C5 (72), got {}", result);
+    assert_eq!(
+        result, 72,
+        "next_note up from B4 (71) should be C5 (72), got {}",
+        result
+    );
 }
 
 #[test]
 fn next_note_wraps_down_from_degree1_to_degree7_previous_octave() {
     // In C Major the 1st degree is C4 = 60. Going down should give B3 = 59.
     let result = next_note(60, Key::C, Mode::Major, -1);
-    assert_eq!(result, 59, "next_note down from C4 (60) should be B3 (59), got {}", result);
+    assert_eq!(
+        result, 59,
+        "next_note down from C4 (60) should be B3 (59), got {}",
+        result
+    );
 }
 
 #[test]
 fn next_note_clamps_at_midi_127() {
     // G9 = 127, stepping up should stay at 127
     let result = next_note(127, Key::G, Mode::Major, 1);
-    assert_eq!(result, 127, "next_note at MIDI 127 stepping up should clamp to 127");
+    assert_eq!(
+        result, 127,
+        "next_note at MIDI 127 stepping up should clamp to 127"
+    );
 }
 
 #[test]
 fn next_note_clamps_at_midi_0() {
     // C-1 = 0, stepping down should stay at 0
     let result = next_note(0, Key::C, Mode::Major, -1);
-    assert_eq!(result, 0, "next_note at MIDI 0 stepping down should clamp to 0");
+    assert_eq!(
+        result, 0,
+        "next_note at MIDI 0 stepping down should clamp to 0"
+    );
 }
 
 #[test]
@@ -249,14 +269,22 @@ fn notes_in_key_a_locrian() {
 fn next_note_direction_neg1_from_root_non_c_key() {
     // G Major root is G4=67. Going down from G4 gives F#4=66 (7th degree of previous octave).
     let result = next_note(67, Key::G, Mode::Major, -1);
-    assert_eq!(result, 66, "next_note down from G4 (67) in G Major should be F#4 (66), got {}", result);
+    assert_eq!(
+        result, 66,
+        "next_note down from G4 (67) in G Major should be F#4 (66), got {}",
+        result
+    );
 }
 
 #[test]
 fn next_note_direction_pos1_near_top_of_range() {
     // Stepping up near MIDI 127 in a key where the next note would exceed 127.
     let result = next_note(126, Key::G, Mode::Major, 1);
-    assert_eq!(result, 127, "next_note up from F#9 (126) in G Major should be G9 (127), got {}", result);
+    assert_eq!(
+        result, 127,
+        "next_note up from F#9 (126) in G Major should be G9 (127), got {}",
+        result
+    );
 }
 
 #[test]
@@ -264,14 +292,22 @@ fn next_note_octave_boundary_wrap_up_d_major() {
     // D Major scale: [62,64,66,67,69,71,73]. 7th degree is C#5=73.
     // Next up should be D5=74.
     let result = next_note(73, Key::D, Mode::Major, 1);
-    assert_eq!(result, 74, "next_note up from C#5 (73) in D Major should be D5 (74), got {}", result);
+    assert_eq!(
+        result, 74,
+        "next_note up from C#5 (73) in D Major should be D5 (74), got {}",
+        result
+    );
 }
 
 #[test]
 fn next_note_octave_boundary_wrap_down_a_natural_minor() {
     // A NaturalMinor: root A4=69. Going down from root gives G3=67.
     let result = next_note(69, Key::A, Mode::NaturalMinor, -1);
-    assert_eq!(result, 67, "next_note down from A4 (69) in A NaturalMinor should be G3 (67), got {}", result);
+    assert_eq!(
+        result, 67,
+        "next_note down from A4 (69) in A NaturalMinor should be G3 (67), got {}",
+        result
+    );
 }
 
 // --- next_note with off-key starting notes ---
@@ -280,14 +316,22 @@ fn next_note_octave_boundary_wrap_down_a_natural_minor() {
 fn next_note_off_key_snaps_up_in_c_major() {
     // C#4 (61) is not in C Major. Snaps to C4(60), then steps direction=+1, giving D4=62.
     let result = next_note(61, Key::C, Mode::Major, 1);
-    assert_eq!(result, 62, "next_note from C#4 (61) up in C Major should snap+step to D4 (62), got {}", result);
+    assert_eq!(
+        result, 62,
+        "next_note from C#4 (61) up in C Major should snap+step to D4 (62), got {}",
+        result
+    );
 }
 
 #[test]
 fn next_note_off_key_snaps_down_in_c_major() {
     // C#4 (61) off-key in C Major: snaps to C4(60), then steps direction=-1, giving B3=59.
     let result = next_note(61, Key::C, Mode::Major, -1);
-    assert_eq!(result, 59, "next_note from C#4 (61) down in C Major should snap+step to B3 (59), got {}", result);
+    assert_eq!(
+        result, 59,
+        "next_note from C#4 (61) down in C Major should snap+step to B3 (59), got {}",
+        result
+    );
 }
 
 #[test]
@@ -295,7 +339,11 @@ fn next_note_off_key_closer_to_upper_degree() {
     // D#4 (63) in C Major: equidistant between D4(62) and E4(64). Tie-breaking picks lower.
     // Direction=+1 gives E4=64.
     let result = next_note(63, Key::C, Mode::Major, 1);
-    assert_eq!(result, 64, "next_note from D#4 (63) up in C Major should give E4 (64), got {}", result);
+    assert_eq!(
+        result, 64,
+        "next_note from D#4 (63) up in C Major should give E4 (64), got {}",
+        result
+    );
 }
 
 #[test]
