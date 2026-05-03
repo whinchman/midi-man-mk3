@@ -241,6 +241,66 @@ pub fn compute_led_bytes(steps_enabled: &[bool; 16]) -> [u8; 2] {
 }
 
 // ---------------------------------------------------------------------------
+// HID file logger — silent on failure.
+// ---------------------------------------------------------------------------
+//
+// The HID thread MUST NOT write to stderr while the TUI owns the terminal —
+// stderr text bleeds through the ratatui alternate screen and corrupts the
+// rendered frame.  Instead, route HID error/info lines to a durable file
+// sink.  Any I/O failure inside the logger is swallowed (never re-raised
+// to stderr); losing a log line is preferable to garbling the TUI.
+
+/// Default path (relative to the current working directory) for the HID log.
+#[cfg(any(feature = "hw-io", test))]
+const HID_LOG_DEFAULT_PATH: &str = ".workflow/logs/hid.log";
+
+/// Override env var; if set and non-empty, takes precedence over the default
+/// and tmp-fallback paths.
+#[cfg(any(feature = "hw-io", test))]
+const HID_LOG_ENV: &str = "MIDIMAN_HID_LOG";
+
+/// Append `msg` (with a trailing newline + ISO-8601-ish UTC timestamp prefix)
+/// to the HID log file.  Never writes to stderr; never panics.  Resolves the
+/// target path in this order:
+///   1. `$MIDIMAN_HID_LOG` if set and non-empty
+///   2. `.workflow/logs/hid.log` (relative to cwd)
+///   3. `<temp_dir>/midi-man-hid.log` as last-resort fallback
+#[cfg(any(feature = "hw-io", test))]
+fn hid_log(msg: &str) {
+    if let Ok(p) = std::env::var(HID_LOG_ENV) {
+        if !p.is_empty() && hid_log_to(std::path::Path::new(&p), msg).is_ok() {
+            return;
+        }
+    }
+    let default = std::path::Path::new(HID_LOG_DEFAULT_PATH);
+    if hid_log_to(default, msg).is_ok() {
+        return;
+    }
+    let mut fallback = std::env::temp_dir();
+    fallback.push("midi-man-hid.log");
+    let _ = hid_log_to(&fallback, msg);
+}
+
+/// Append `msg` to `path`, creating the file (and an existing-but-not-yet-
+/// created log line) if needed.  Returns `Err` if the parent directory does
+/// not exist or the file cannot be opened/written; the caller is expected
+/// to swallow the error.
+#[cfg(any(feature = "hw-io", test))]
+fn hid_log_to(path: &std::path::Path, msg: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    // Best-effort UTC seconds-since-epoch prefix; format errors fall through.
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    writeln!(f, "[{secs}] {msg}")
+}
+
+// ---------------------------------------------------------------------------
 // Hardware I/O — only compiled with the `hw-io` feature.
 // ---------------------------------------------------------------------------
 
@@ -270,7 +330,9 @@ pub fn run_hid(
     let api = match HidApi::new() {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("[hid] hidapi init failed: {e}; HID thread exiting");
+            hid_log(&format!(
+                "[hid] hidapi init failed: {e}; HID thread exiting"
+            ));
             return;
         }
     };
@@ -278,7 +340,9 @@ pub fn run_hid(
     let device = match api.open(vid, pid) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("[hid] device {vid:#06x}:{pid:#06x} not found: {e}; HID thread exiting");
+            hid_log(&format!(
+                "[hid] device {vid:#06x}:{pid:#06x} not found: {e}; HID thread exiting"
+            ));
             return;
         }
     };
@@ -299,7 +363,7 @@ pub fn run_hid(
         let n = match device.read_timeout(&mut buf, 5) {
             Ok(n) => n,
             Err(e) => {
-                eprintln!("[hid] read error: {e}; HID thread exiting");
+                hid_log(&format!("[hid] read error: {e}; HID thread exiting"));
                 return;
             }
         };
@@ -314,7 +378,10 @@ pub fn run_hid(
         // Sequence-number duplicate check.
         if let Some(prev) = last_seq {
             if prev == report.seq {
-                eprintln!("[hid] duplicate sequence number {}: possible stale report", report.seq);
+                hid_log(&format!(
+                    "[hid] duplicate sequence number {}: possible stale report",
+                    report.seq
+                ));
             }
         }
         last_seq = Some(report.seq);
@@ -374,7 +441,7 @@ pub fn run_hid(
             };
             let out_buf = out.to_bytes();
             if let Err(e) = device.write(&out_buf) {
-                eprintln!("[hid] write error: {e}");
+                hid_log(&format!("[hid] write error: {e}"));
             }
         }
 
@@ -383,3 +450,82 @@ pub fn run_hid(
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// Build a unique tempfile path for one test (no tempfile crate).
+    fn unique_tmp(name: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        p.push(format!("midi-man-hid-{name}-{nanos}.log"));
+        p
+    }
+
+    #[test]
+    fn hid_log_to_creates_and_writes_file() {
+        let p = unique_tmp("create");
+        let _ = std::fs::remove_file(&p);
+        hid_log_to(&p, "hello").expect("first write should succeed");
+        let body = std::fs::read_to_string(&p).expect("read tempfile");
+        assert!(body.contains("hello"), "body was: {body:?}");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn hid_log_to_appends_existing_file() {
+        let p = unique_tmp("append");
+        let _ = std::fs::remove_file(&p);
+        hid_log_to(&p, "first").expect("first write");
+        hid_log_to(&p, "second").expect("second write");
+        let body = std::fs::read_to_string(&p).expect("read tempfile");
+        assert!(body.contains("first"));
+        assert!(body.contains("second"));
+        // Two newlines means at least two lines written.
+        assert!(body.matches('\n').count() >= 2, "body was: {body:?}");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn hid_log_to_returns_err_for_missing_directory() {
+        let mut p = std::env::temp_dir();
+        p.push("midi-man-hid-nonexistent-dir-xyzzy");
+        p.push("hid.log");
+        // Parent dir does not exist; OpenOptions(append, create) must fail.
+        let res = hid_log_to(&p, "should not write");
+        assert!(res.is_err(), "expected Err, got Ok writing to {p:?}");
+    }
+
+    #[test]
+    fn hid_log_does_not_panic_when_default_path_missing() {
+        // Default path `.workflow/logs/hid.log` may not exist relative to the
+        // test binary's cwd; the function must still not panic.  We do not
+        // assert on the file system state — only that the call completes.
+        // Use the env-override to a path whose parent does not exist so the
+        // first branch fails and we fall through to the tmp fallback.
+        // SAFETY: tests do not run concurrently for the same env var, but to
+        // avoid races with other tests we use a separate process-unique key
+        // by setting it to a definitely-bad path then unsetting it.
+        let bad = std::env::temp_dir().join("definitely-not-a-dir-xyzzy/hid.log");
+        // Keep this scoped — tests in the same process share env, so we
+        // restore afterwards.
+        let prev = std::env::var(HID_LOG_ENV).ok();
+        // SAFETY: env mutation is guarded; this test is single-threaded.
+        unsafe {
+            std::env::set_var(HID_LOG_ENV, &bad);
+        }
+        hid_log("smoke");
+        // Restore.
+        // SAFETY: see above.
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var(HID_LOG_ENV, v),
+                None => std::env::remove_var(HID_LOG_ENV),
+            }
+        }
+    }
+}
