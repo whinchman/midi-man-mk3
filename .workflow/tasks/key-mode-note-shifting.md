@@ -122,6 +122,8 @@ Implementation complete on branch `key-mode-note-shifting/impl` (worktree at `.w
 
 **Test results:** 17/17 new tests pass; all 250+ existing tests pass. Clippy: no new warnings introduced. Release build: clean.
 
+**QA review (2026-05-02):** Added `test_same_mode_no_snap` (state.rs) to cover the missing half of the no-op guard criterion — same-mode confirm must not snap steps. Total new tests: 18. All 18 pass; full suite 310 tests pass.
+
 ---
 
 ### Code Review — 2026-05-02
@@ -143,7 +145,25 @@ The plan's `test_disabled_steps_are_snapped` contained two sequential `state.pen
 - [x] Mode change snaps all 16 steps — `test_mode_change_snaps_all_steps` passes
 - [x] Tie-break lower wins — `snap_tie_picks_lower_note` + `snap_out_of_key_rounds_to_nearest` pass
 - [x] Disabled steps snapped — `test_disabled_steps_are_snapped` passes
-- [x] No-op guard fires on same key/mode — `test_same_key_no_snap` passes
+- [x] No-op guard fires on same key/mode — `test_same_key_no_snap` + `test_same_mode_no_snap` pass
 - [x] No panics at MIDI boundaries — `snap_midi_boundaries` passes; exhaustive simulation confirms
 - [x] All existing tests pass (250+)
 - [x] No new clippy warnings (3 pre-existing warnings in `cli.rs`/`clock.rs`/`main.rs` are unrelated)
+
+---
+
+## PR Feedback
+
+PR: https://github.com/whinchman/midi-man-mk3/pull/23
+
+### Comments Requiring Action
+
+_(none)_
+
+### CI Failures
+
+_(none — repository has no GitHub Actions CI configured; statusCheckRollup is empty)_
+
+### Questions / Acknowledged
+
+_(none)_
