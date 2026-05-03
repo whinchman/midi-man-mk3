@@ -74,13 +74,24 @@ cargo build -p engine --features hw-io
 cargo run -p engine --features hw-io --release
 ```
 
-### Specifying a MIDI port or custom HID VID/PID
+On startup the engine lists all available ALSA MIDI output ports and prompts you to select one:
 
 ```
-cargo run -p engine --features hw-io --release -- --midi-port "UM-ONE" --hid-vid 0xCAFE --hid-pid 0x4004
+Available MIDI output ports:
+  [0] Midi Through:Midi Through Port-0 14:0
+  [1] UM-ONE:UM-ONE MIDI 1 20:0
+Select port [0]:
 ```
 
-- `--midi-port <name>` — substring match against available ALSA MIDI ports; defaults to the first port found
+Press Enter to accept the default, or type a number and press Enter. If only one port is available it is selected automatically.
+
+### Skip the prompt with a port filter
+
+```
+cargo run -p engine --features hw-io --release -- --midi-port "UM-ONE"
+```
+
+- `--midi-port <name>` — substring match against available ALSA MIDI ports; bypasses the interactive prompt
 - `--hid-vid <hex>` — USB vendor ID of the controller (default `0xCAFE`)
 - `--hid-pid <hex>` — USB product ID of the controller (default `0x4004`)
 
