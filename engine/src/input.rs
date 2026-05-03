@@ -476,10 +476,7 @@ mod tests {
     #[test]
     fn f4_with_shift_still_sets_focus_cli() {
         let cmd = root_key_to_command(KeyCodeSimple::F4, true);
-        assert!(matches!(
-            cmd,
-            Some(InputCommand::SetFocus(FocusPanel::Cli))
-        ));
+        assert!(matches!(cmd, Some(InputCommand::SetFocus(FocusPanel::Cli))));
     }
 
     // ── FocusPanel derives: Clone, Copy, Debug, PartialEq, Eq ────────────────

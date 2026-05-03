@@ -16,7 +16,8 @@ pub mod sequencer;
 /// Sequencer state — the shared truth for all threads.
 pub mod state;
 /// Terminal UI — ratatui render loop with keyboard event handling.
-#[cfg(feature = "hw-io")]
+/// Pure helpers (UiState, handle_cli_submit, push_log) are always compiled.
+/// hw-io–only items (run_ui, TerminalGuard, crossterm glue) are gated inside.
 pub mod ui;
 /// Ratatui render logic — pure rendering, no crossterm dependency.
 pub mod ui_render;
