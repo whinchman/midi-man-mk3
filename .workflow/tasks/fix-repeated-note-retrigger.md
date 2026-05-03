@@ -1,7 +1,7 @@
 # Task: fix-repeated-note-retrigger
 
 **Type:** coder
-**Status:** done
+**Status:** reviewed
 **Feature Branch:** feature/fix-repeated-note-retrigger
 **Branch:** feature/fix-repeated-note-retrigger/fix-repeated-note-retrigger
 **Base Branch:** feature/fix-repeated-note-retrigger
@@ -95,3 +95,44 @@ Implemented on branch `feature/fix-repeated-note-retrigger` (worktree at
 
 **Test results:** 333 tests pass, 0 failures. Clippy clean. Release build
 successful.
+
+---
+
+## Code Review
+
+**Reviewer:** code-reviewer agent
+**Date:** 2026-05-02
+**Verdict:** APPROVE
+
+### Summary
+0 critical, 0 warning, 2 info findings. All acceptance criteria met.
+
+### Findings
+
+#### [INFO] engine/src/clock.rs:127 — redundant cast removal in `add_nanos_signed`
+The diff removes `as i64` casts on `ts.tv_sec` and `ts.tv_nsec`. On 64-bit
+Linux both `libc::time_t` and `libc::c_long` are already `i64`, so the
+removal is correct and not a regression. On 32-bit targets the cast removal
+would introduce a type error that the compiler would catch — not a silent
+behaviour change.
+
+#### [INFO] engine/src/clock.rs — `simulate_tick` helper uses heap allocation (`Vec`)
+The `simulate_tick` test helper allocates a `Vec<MidiEvent>`. This is
+test-only code (inside `#[cfg(test)]`) and does not affect the hot path.
+No production allocation introduced.
+
+### Acceptance Criteria Verification
+
+- [x] `last_note` is only updated inside `if let Some(MidiEvent::NoteOn ...)` — disabled steps return `None` from `tick()`, so the branch is never entered and `last_note` is never mutated. Correct.
+- [x] NoteOff is sent before NoteOn (lines 184–189 send NoteOff, lines 190–199 send NoteOn). Correct order.
+- [x] No heap allocation on the hot path — `last_note` is a stack-allocated `Option<(u8, u8)>`. No `Vec`, `Box`, or `String` added to production code.
+- [x] Four new tests cover all acceptance criteria (retrigger, no-retrigger for different note, disabled step, end-to-end channel smoke test).
+- [x] All 333 existing tests pass. Clippy clean.
+
+### Notes
+The `test_run_clock_retrigger_via_channel` test uses `sync_channel(3)` to
+collect exactly 3 events. After steps 0 and 1 fire, steps 2–15 are disabled
+so no further events arrive until the playhead wraps. Dropping `rx` after
+receiving 3 events causes the thread to exit cleanly on the next blocked
+`send`. The test passed reliably on first run (0.50 s). No flakiness risk
+identified.
