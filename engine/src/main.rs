@@ -27,16 +27,17 @@ fn parse_args() -> CliArgs {
 fn main() {
     let args = parse_args();
 
-    // Log any overrides.
-    if let Some(ref port) = args.midi_port {
-        println!("[main] MIDI port filter: {port}");
-    }
     if let Some(vid) = args.hid_vid {
         println!("[main] HID VID override: {vid:#06x}");
     }
     if let Some(pid) = args.hid_pid {
         println!("[main] HID PID override: {pid:#06x}");
     }
+
+    // --- MIDI port selection (must happen before TUI takes over stdin/stdout) ---
+    #[cfg(feature = "hw-io")]
+    let selected_midi_port: Option<String> =
+        engine::midi_out::choose_midi_port(args.midi_port.as_deref());
 
     // --- Shared state ---
     let state: Arc<RwLock<SequencerState>> = Arc::new(RwLock::new(SequencerState::default()));
@@ -53,7 +54,7 @@ fn main() {
     #[cfg(feature = "hw-io")]
     let midi_thread = {
         let rx = midi_rx;
-        let port_name = args.midi_port.clone();
+        let port_name = selected_midi_port;
         std::thread::Builder::new()
             .name("midi-out".to_owned())
             .spawn(move || engine::midi_out::run_midi_out(rx, port_name))

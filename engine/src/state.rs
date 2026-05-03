@@ -295,6 +295,14 @@ impl SequencerState {
                     value: current_value + d as i64,
                 };
             }
+            InputCommand::PlayStop => {
+                if self.playing {
+                    self.playing = false;
+                    self.paused = false;
+                } else {
+                    self.playing = true;
+                }
+            }
         }
     }
 }

@@ -80,46 +80,71 @@ pub fn select_port_idx(port_names: &[&str], filter: Option<&str>) -> Option<usiz
     }
 }
 
-/// Interactively prompt the user to choose a MIDI port by number.
+/// Enumerate available MIDI output ports and return the chosen port name.
 ///
-/// Prints a numbered list to stdout and reads a line from stdin.
-/// Returns the chosen index, or 0 on invalid input.
+/// Call this **before** starting the TUI so the prompt has clean access to
+/// stdin/stdout. When `filter` is `Some`, does a substring match and returns
+/// immediately without prompting. When `filter` is `None` and only one port
+/// exists, auto-selects it. When `filter` is `None` and multiple ports exist,
+/// prints a numbered list and reads a selection from stdin.
+///
+/// Returns `None` if no ports are available.
 #[cfg(feature = "hw-io")]
-fn prompt_port_selection(port_names: &[String]) -> usize {
+pub fn choose_midi_port(filter: Option<&str>) -> Option<String> {
+    let output = midir::MidiOutput::new("midi-man-mk3").ok()?;
+    let ports = output.ports();
+    if ports.is_empty() {
+        eprintln!("[midi_out] no ALSA MIDI output ports found");
+        return None;
+    }
+
+    let names: Vec<String> = ports.iter()
+        .map(|p| output.port_name(p).unwrap_or_default())
+        .collect();
+
+    if let Some(f) = filter {
+        let f_lower = f.to_lowercase();
+        let matched = names.iter().find(|n| n.to_lowercase().contains(&f_lower));
+        return Some(matched.unwrap_or(&names[0]).clone());
+    }
+
+    if names.len() == 1 {
+        println!("MIDI output: auto-selected \"{}\"", names[0]);
+        return Some(names[0].clone());
+    }
+
     println!("\nAvailable MIDI output ports:");
-    for (i, name) in port_names.iter().enumerate() {
+    for (i, name) in names.iter().enumerate() {
         println!("  [{i}] {name}");
     }
     print!("Select port [0]: ");
-    // Flush so the prompt appears before blocking on input.
     use std::io::Write;
     let _ = std::io::stdout().flush();
 
     let mut line = String::new();
-    if std::io::stdin().read_line(&mut line).is_ok() {
+    let idx = if std::io::stdin().read_line(&mut line).is_ok() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
-            return 0;
-        }
-        if let Ok(n) = trimmed.parse::<usize>() {
-            if n < port_names.len() {
-                return n;
+            0
+        } else if let Ok(n) = trimmed.parse::<usize>() {
+            if n < names.len() { n } else {
+                eprintln!("[midi_out] invalid selection — using port 0");
+                0
             }
+        } else {
+            eprintln!("[midi_out] invalid selection — using port 0");
+            0
         }
-        eprintln!("[midi_out] invalid selection '{trimmed}' — using port 0");
-    }
-    0
+    } else {
+        0
+    };
+
+    Some(names[idx].clone())
 }
 
-/// Open an ALSA MIDI output port.
+/// Open an ALSA MIDI output port by exact or substring name match.
 ///
-/// When `port_name` is `Some(filter)`, searches for a port whose name contains
-/// `filter` (case-insensitive substring match) and opens it without prompting.
-/// When `port_name` is `None` and only one port exists, opens it automatically.
-/// When `port_name` is `None` and multiple ports exist, prompts the user to
-/// select one interactively.
-///
-/// Returns `None` if no ports are available or if opening the chosen port fails.
+/// Returns `None` if no ports are available or the port cannot be opened.
 #[cfg(feature = "hw-io")]
 fn open_port(port_name: Option<&str>) -> Option<Box<dyn MidiSender>> {
     let output = match midir::MidiOutput::new("midi-man-mk3") {
@@ -141,18 +166,8 @@ fn open_port(port_name: Option<&str>) -> Option<Box<dyn MidiSender>> {
         .collect();
     let port_name_refs: Vec<&str> = port_name_strings.iter().map(String::as_str).collect();
 
-    let chosen_idx = if let Some(filter) = port_name {
-        // --midi-port supplied: use substring match, no prompt.
-        select_port_idx(&port_name_refs, Some(filter))
-            .expect("ports is non-empty")
-    } else if ports.len() == 1 {
-        // Only one port — auto-select without prompting.
-        println!("[midi_out] one port found, auto-selecting: {}", port_name_strings[0]);
-        0
-    } else {
-        // Multiple ports and no filter — ask the user.
-        prompt_port_selection(&port_name_strings)
-    };
+    let chosen_idx = select_port_idx(&port_name_refs, port_name)
+        .expect("ports is non-empty");
 
     let port = &ports[chosen_idx];
     let chosen_name = output.port_name(port).unwrap_or_else(|_| "<unknown>".to_owned());

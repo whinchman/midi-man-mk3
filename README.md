@@ -101,6 +101,7 @@ Press **Ctrl-C** to stop cleanly (sends MIDI Stop, closes all notes).
 
 | Key | Action |
 |---|---|
+| p | Play / Stop |
 | Space | Toggle selected step on/off |
 | ← / → | Move step selection |
 | ↑ / ↓ | Shift note up/down by scale degree |

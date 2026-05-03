@@ -88,6 +88,7 @@ fn to_simple(code: KeyCode) -> KeyCodeSimple {
         KeyCode::Up => KeyCodeSimple::Up,
         KeyCode::Down => KeyCodeSimple::Down,
         KeyCode::Char(' ') => KeyCodeSimple::Space,
+        KeyCode::Char(c) => KeyCodeSimple::Char(c),
         KeyCode::Enter => KeyCodeSimple::Enter,
         KeyCode::Esc => KeyCodeSimple::Esc,
         KeyCode::F(1) => KeyCodeSimple::F1,

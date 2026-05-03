@@ -44,6 +44,8 @@ pub enum InputCommand {
     ParamSelectDelta(i8),
     /// Adjust the value of the currently selected param by `delta`.
     ParamValueDelta(i8),
+    /// Toggle playback on/off. Stopping also clears the paused flag.
+    PlayStop,
 }
 
 /// Pure function: translate a root-mode key event into an `InputCommand`.
@@ -64,6 +66,7 @@ pub fn root_key_to_command(
         KeyCodeSimple::Down => Some(InputCommand::NoteDelta(-1)),
         KeyCodeSimple::Space => Some(InputCommand::ToggleStep),
         KeyCodeSimple::Enter => Some(InputCommand::Confirm),
+        KeyCodeSimple::Char('p') | KeyCodeSimple::Char('P') => Some(InputCommand::PlayStop),
         KeyCodeSimple::F1 => Some(InputCommand::OpenOverlay(OverlayMode::Regular)),
         KeyCodeSimple::F2 => Some(InputCommand::OpenOverlay(OverlayMode::Shift)),
         _ => None,
@@ -108,6 +111,8 @@ pub enum KeyCodeSimple {
     F1,
     /// F2.
     F2,
+    /// A printable character key.
+    Char(char),
     /// Any other key (ignored).
     Other,
 }
