@@ -516,12 +516,13 @@ Either:
 
 ---
 
-## BUG-015 — [WARNING] `apply_param_value(6, 1)` sets `playing=true` without clearing `paused`
+## BUG-017 — [WARNING] `apply_param_value(6, 1)` sets `playing=true` without clearing `paused`
 
 - **File:** `engine/src/state.rs`, line 383
 - **Branch:** `fix-state-and-overlay`
 - **Discovered:** 2026-05-02 by code-reviewer agent (fix-state-and-overlay review)
 - **Severity:** warning
+- **Note:** Renumbered from duplicate BUG-015 by code-reviewer agent (fix-hid-and-main-followup review, 2026-05-02)
 
 ### Description
 
