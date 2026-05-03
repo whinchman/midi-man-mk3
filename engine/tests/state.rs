@@ -1,6 +1,9 @@
 use engine::input::InputCommand;
-use engine::state::{MidiEvent, OverlayMode, PendingEdit, SequencerState, StepSize};
-use engine::music_theory::{Key, Mode};
+use engine::state::{
+    next_rand, prob_hit, MidiEvent, OverlayMode, PendingEdit, SequencerState, StepSize,
+    TempoRandType, TempoRollPoint,
+};
+use engine::music_theory::{snap_to_key, Key, Mode};
 
 fn playing_state_all_enabled() -> SequencerState {
     let mut s = SequencerState::default();
@@ -1142,4 +1145,1079 @@ fn param_value_delta_loop_in_seeds_from_committed_loop_in() {
         }
         other => panic!("expected PendingEdit::Param index 4, got {:?}", other),
     }
+}
+
+// ── BUG-014: loop_out edit path ──────────────────────────────────────────────
+
+#[test]
+fn test_loop_out_edit_path_via_overlay() {
+    let mut state = SequencerState::default();
+    state.pending_edit = PendingEdit::Param {
+        overlay: OverlayMode::Regular,
+        index: 5,
+        value: 10,
+    };
+    state.apply_command(InputCommand::Confirm);
+    assert_eq!(state.loop_out, 10);
+    assert_eq!(state.pending_edit, PendingEdit::None);
+}
+
+#[test]
+fn test_committed_param_value_loop_out() {
+    let mut state = SequencerState::default();
+    state.loop_out = 12;
+    assert_eq!(state.committed_param_value(5), 12);
+}
+
+#[test]
+fn test_param_select_delta_wraps_at_8() {
+    let mut state = SequencerState::default();
+    state.selected_param = 7;
+    state.apply_command(InputCommand::ParamSelectDelta(1));
+    assert_eq!(state.selected_param, 0);
+}
+
+// ── BUG-017: overlay confirm playing=true clears paused ─────────────────────
+
+#[test]
+fn test_confirm_playing_clears_paused() {
+    let mut state = SequencerState::default();
+    state.paused = true;
+    state.playing = false;
+    state.pending_edit = PendingEdit::Param {
+        overlay: OverlayMode::Regular,
+        index: 7,
+        value: 1,
+    };
+    state.apply_command(InputCommand::Confirm);
+    assert!(state.playing, "playing should be true after confirm");
+    assert!(!state.paused, "paused should be cleared when playing is set via overlay");
+}
+
+#[test]
+fn test_confirm_playing_false_does_not_clear_paused() {
+    let mut state = SequencerState::default();
+    state.paused = true;
+    state.playing = true;
+    state.pending_edit = PendingEdit::Param {
+        overlay: OverlayMode::Regular,
+        index: 7,
+        value: 0,
+    };
+    state.apply_command(InputCommand::Confirm);
+    assert!(!state.playing);
+    assert!(state.paused, "paused should be unchanged when playing is set to false");
+}
+
+// ── Key/Mode Note Shifting ───────────────────────────────────────────────────
+
+#[test]
+fn test_key_change_snaps_all_steps() {
+    let mut state = SequencerState::default(); // Key::C, Mode::Major
+    state.steps[0].midi_note = 61; // C#4 — not in C major
+    state.steps[1].midi_note = 62; // D4
+    state.pending_edit = PendingEdit::Param {
+        overlay: OverlayMode::Regular,
+        index: 0,
+        value: 1, // Key::Cs
+    };
+    state.apply_command(InputCommand::Confirm);
+    assert_eq!(state.key, engine::music_theory::Key::Cs);
+    // C#4 (61) is the root of C# major → stays 61
+    assert_eq!(state.steps[0].midi_note, 61);
+}
+
+#[test]
+fn test_mode_change_snaps_all_steps() {
+    let mut state = SequencerState::default(); // Key::C, Mode::Major
+    // B4 (71) is in C major. C NaturalMinor scale: C D Eb F G Ab Bb.
+    // Bb=70 (dist=1), C5=72 (dist=1) — tie: lower wins → Bb4=70
+    state.steps[0].midi_note = 71; // B4
+    state.pending_edit = PendingEdit::Param {
+        overlay: OverlayMode::Regular,
+        index: 1,
+        value: 1, // Mode::NaturalMinor
+    };
+    state.apply_command(InputCommand::Confirm);
+    assert_eq!(state.mode, engine::music_theory::Mode::NaturalMinor);
+    assert_eq!(state.steps[0].midi_note, 70); // snapped to Bb4
+}
+
+#[test]
+fn test_same_key_no_snap() {
+    let mut state = SequencerState::default(); // Key::C
+    state.steps[0].midi_note = 61; // C#4 — out of key, set directly
+    state.pending_edit = PendingEdit::Param {
+        overlay: OverlayMode::Regular,
+        index: 0,
+        value: 0, // Key::C — same as current
+    };
+    state.apply_command(InputCommand::Confirm);
+    // No-op guard must fire; note must NOT be snapped
+    assert_eq!(state.steps[0].midi_note, 61);
+}
+
+#[test]
+fn test_same_mode_no_snap() {
+    let mut state = SequencerState::default(); // Mode::Major
+    state.steps[0].midi_note = 61; // C#4 — out of C major, set directly
+    state.pending_edit = PendingEdit::Param {
+        overlay: OverlayMode::Regular,
+        index: 1,
+        value: 0, // Mode::Major — same as current
+    };
+    state.apply_command(InputCommand::Confirm);
+    // No-op guard must fire; note must NOT be snapped
+    assert_eq!(state.steps[0].midi_note, 61);
+}
+
+#[test]
+fn test_snap_all_16_steps() {
+    let mut state = SequencerState::default(); // Key::C, Mode::Major
+    for step in state.steps.iter_mut() {
+        step.midi_note = 61; // C#4 — not in C major
+    }
+    // Change to D major
+    state.pending_edit = PendingEdit::Param {
+        overlay: OverlayMode::Regular,
+        index: 0,
+        value: 2, // Key::D
+    };
+    state.apply_command(InputCommand::Confirm);
+    for step in &state.steps {
+        let expected = snap_to_key(
+            61,
+            engine::music_theory::Key::D,
+            engine::music_theory::Mode::Major,
+        );
+        assert_eq!(step.midi_note, expected);
+    }
+}
+
+#[test]
+fn test_disabled_steps_are_snapped() {
+    let mut state = SequencerState::default(); // Key::C, Mode::Major
+    state.steps[3].enabled = false;
+    state.steps[3].midi_note = 61; // C#4 — not in C major
+    // Change to D major
+    state.pending_edit = PendingEdit::Param {
+        overlay: OverlayMode::Regular,
+        index: 0,
+        value: 2, // Key::D
+    };
+    state.apply_command(InputCommand::Confirm);
+    let expected = snap_to_key(
+        61,
+        engine::music_theory::Key::D,
+        engine::music_theory::Mode::Major,
+    );
+    assert_eq!(state.steps[3].midi_note, expected, "disabled step should still be snapped");
+}
+
+// ── RNG Infrastructure ───────────────────────────────────────────────────────
+
+#[test]
+fn test_prob_hit_zero_always_false() {
+    let mut seed = 0x853C_49E6_748F_EA9Bu64;
+    for _ in 0..1000 {
+        assert!(!prob_hit(&mut seed, 0), "prob_hit(0) must always return false");
+    }
+}
+
+#[test]
+fn test_prob_hit_hundred_always_true() {
+    let mut seed = 0x853C_49E6_748F_EA9Bu64;
+    for _ in 0..1000 {
+        assert!(prob_hit(&mut seed, 100), "prob_hit(100) must always return true");
+    }
+}
+
+#[test]
+fn test_prob_hit_fifty_percent_statistical() {
+    let mut seed = 0x853C_49E6_748F_EA9Bu64;
+    let mut hits: u32 = 0;
+    let n = 10_000u32;
+    for _ in 0..n {
+        if prob_hit(&mut seed, 50) {
+            hits += 1;
+        }
+    }
+    let ratio = hits as f64 / n as f64;
+    assert!(
+        ratio >= 0.45 && ratio <= 0.55,
+        "prob_hit(50) hit rate {ratio:.4} outside [0.45, 0.55]"
+    );
+}
+
+#[test]
+fn test_rng_seed_advances_every_tick_even_when_not_playing() {
+    let mut state = SequencerState::default();
+    assert!(!state.playing, "default state should not be playing");
+    let seed_before = state.rng_seed;
+    state.tick();
+    assert_ne!(state.rng_seed, seed_before, "rng_seed must advance on tick() even when not playing");
+}
+
+#[test]
+fn test_rng_seed_default_value() {
+    let state = SequencerState::default();
+    assert_eq!(state.rng_seed, 0x853C_49E6_748F_EA9B);
+}
+
+#[test]
+fn test_sequencer_state_is_clone() {
+    let state = SequencerState::default();
+    let cloned = state.clone();
+    assert_eq!(cloned.rng_seed, state.rng_seed);
+}
+
+#[test]
+fn test_rng_seed_advances_every_tick_when_paused() {
+    let mut state = SequencerState::default();
+    state.playing = true;
+    state.paused = true;
+    let seed_before = state.rng_seed;
+    state.tick();
+    assert_ne!(
+        state.rng_seed, seed_before,
+        "rng_seed must advance on tick() even when paused"
+    );
+}
+
+#[test]
+fn test_rng_seed_advances_every_tick_when_playing() {
+    let mut state = SequencerState::default();
+    state.playing = true;
+    state.paused = false;
+    let seed_before = state.rng_seed;
+    state.tick();
+    assert_ne!(
+        state.rng_seed, seed_before,
+        "rng_seed must advance on tick() when playing"
+    );
+}
+
+#[test]
+fn test_next_rand_produces_distinct_values() {
+    let mut seed = 0x853C_49E6_748F_EA9Bu64;
+    let v1 = next_rand(&mut seed);
+    let v2 = next_rand(&mut seed);
+    let v3 = next_rand(&mut seed);
+    assert_ne!(v1, v2, "consecutive next_rand calls must produce distinct values");
+    assert_ne!(v2, v3, "consecutive next_rand calls must produce distinct values");
+}
+
+// ── Step Randomness (Stream B) ───────────────────────────────────────────────
+
+#[test]
+fn test_step_rand_default_zero() {
+    let state = SequencerState::default();
+    assert_eq!(state.step_rand, 0, "step_rand must default to 0");
+}
+
+#[test]
+fn test_note_rand_default_zero() {
+    let state = SequencerState::default();
+    assert_eq!(state.note_rand, 0, "note_rand must default to 0");
+}
+
+#[test]
+fn test_step_rand_zero_always_fires() {
+    let mut state = SequencerState::default();
+    state.playing = true;
+    state.paused = false;
+    state.step_rand = 0;
+    for step in state.steps.iter_mut() {
+        step.enabled = true;
+    }
+    state.playhead = 15;
+    let mut fires = 0u32;
+    for _ in 0..1000 {
+        if state.tick().is_some() {
+            fires += 1;
+        }
+    }
+    assert_eq!(fires, 1000, "step_rand=0 must fire on every enabled step (got {fires})");
+}
+
+#[test]
+fn test_step_rand_hundred_never_fires() {
+    let mut state = SequencerState::default();
+    state.playing = true;
+    state.paused = false;
+    state.step_rand = 100;
+    for step in state.steps.iter_mut() {
+        step.enabled = true;
+    }
+    for _ in 0..1000 {
+        assert!(
+            state.tick().is_none(),
+            "step_rand=100 must never fire"
+        );
+    }
+}
+
+#[test]
+fn test_step_rand_fifty_statistical() {
+    let mut state = SequencerState::default();
+    state.playing = true;
+    state.paused = false;
+    state.step_rand = 50;
+    for step in state.steps.iter_mut() {
+        step.enabled = true;
+    }
+    let n = 1000u32;
+    let mut fires = 0u32;
+    for _ in 0..n {
+        if state.tick().is_some() {
+            fires += 1;
+        }
+    }
+    let ratio = fires as f64 / n as f64;
+    assert!(
+        ratio >= 0.40 && ratio <= 0.60,
+        "step_rand=50 hit rate {ratio:.4} outside [0.40, 0.60]"
+    );
+}
+
+// ── Stream E: Modifiers in tick() ───────────────────────────────────────────
+
+/// Helper: build a playing state with a single enabled step at position 0.
+fn playing_state_with_step(midi_note: u8, velocity: u8) -> SequencerState {
+    let mut state = SequencerState::default();
+    state.playing = true;
+    state.paused = false;
+    for s in state.steps.iter_mut() {
+        s.enabled = false;
+    }
+    state.steps[0].enabled = true;
+    state.steps[0].midi_note = midi_note;
+    state.steps[0].velocity = velocity;
+    state.playhead = 15;
+    state
+}
+
+/// Advance state until it emits Some, up to `limit` ticks.
+fn tick_until_some(state: &mut SequencerState, limit: usize) -> Option<MidiEvent> {
+    for _ in 0..limit {
+        let ev = state.tick();
+        if ev.is_some() {
+            return ev;
+        }
+    }
+    None
+}
+
+#[test]
+fn test_skip_modifier_false_steps_fire() {
+    let mut state = playing_state_with_step(60, 80);
+    state.skip_modifier = false;
+    let ev = tick_until_some(&mut state, 32);
+    assert!(ev.is_some(), "skip_modifier=false must not suppress enabled steps");
+}
+
+#[test]
+fn test_skip_modifier_true_returns_none() {
+    let mut state = playing_state_with_step(60, 80);
+    state.skip_modifier = true;
+    for _ in 0..100 {
+        assert!(
+            state.tick().is_none(),
+            "skip_modifier=true must suppress all steps"
+        );
+    }
+}
+
+#[test]
+fn test_note_modifier_zero_is_noop() {
+    let mut state = playing_state_with_step(60, 80);
+    state.note_modifier = 0;
+    state.note_rand = 100;
+    let ev = tick_until_some(&mut state, 32).expect("should fire");
+    if let MidiEvent::NoteOn { note, .. } = ev {
+        assert_eq!(note, 60, "note_modifier=0 must not change the note");
+    } else {
+        panic!("expected NoteOn");
+    }
+}
+
+#[test]
+fn test_note_modifier_positive_adds_semitones() {
+    let mut state = playing_state_with_step(60, 80);
+    state.note_modifier = 7;
+    state.note_rand = 100;
+    let ev = tick_until_some(&mut state, 32).expect("should fire");
+    if let MidiEvent::NoteOn { note, .. } = ev {
+        assert_eq!(note, 67, "note_modifier=7 must add 7 semitones");
+    } else {
+        panic!("expected NoteOn");
+    }
+}
+
+#[test]
+fn test_note_modifier_positive_clamped_to_127() {
+    let mut state = playing_state_with_step(125, 80);
+    state.note_modifier = 7;
+    state.note_rand = 100;
+    let ev = tick_until_some(&mut state, 32).expect("should fire");
+    if let MidiEvent::NoteOn { note, .. } = ev {
+        assert_eq!(note, 127, "note clamped to 127 when modifier pushes it above max");
+    } else {
+        panic!("expected NoteOn");
+    }
+}
+
+#[test]
+fn test_note_modifier_negative_subtracts_semitones() {
+    let mut state = playing_state_with_step(60, 80);
+    state.note_modifier = -12;
+    state.note_rand = 100;
+    let ev = tick_until_some(&mut state, 32).expect("should fire");
+    if let MidiEvent::NoteOn { note, .. } = ev {
+        assert_eq!(note, 48, "note_modifier=-12 must subtract 12 semitones");
+    } else {
+        panic!("expected NoteOn");
+    }
+}
+
+#[test]
+fn test_note_modifier_negative_clamped_to_zero() {
+    let mut state = playing_state_with_step(5, 80);
+    state.note_modifier = -12;
+    state.note_rand = 100;
+    let ev = tick_until_some(&mut state, 32).expect("should fire");
+    if let MidiEvent::NoteOn { note, .. } = ev {
+        assert_eq!(note, 0, "note clamped to 0 when modifier pushes it below 0");
+    } else {
+        panic!("expected NoteOn");
+    }
+}
+
+#[test]
+fn test_note_modifier_with_note_rand_100_always_applied() {
+    let mut state = playing_state_with_step(60, 80);
+    state.note_modifier = 7;
+    state.note_rand = 100;
+    for _ in 0..50 {
+        state.playhead = 15;
+        let ev = state.tick().expect("step 0 must fire when step_rand=0");
+        if let MidiEvent::NoteOn { note, .. } = ev {
+            assert_eq!(note, 67, "note_rand=100 must always apply note_modifier");
+        } else {
+            panic!("expected NoteOn");
+        }
+    }
+}
+
+#[test]
+fn test_note_modifier_with_note_rand_0_never_applied() {
+    let mut state = playing_state_with_step(60, 80);
+    state.note_modifier = 7;
+    state.note_rand = 0;
+    for _ in 0..50 {
+        state.playhead = 15;
+        let ev = state.tick().expect("step 0 must fire when step_rand=0");
+        if let MidiEvent::NoteOn { note, .. } = ev {
+            assert_eq!(note, 60, "note_rand=0 must never apply note_modifier");
+        } else {
+            panic!("expected NoteOn");
+        }
+    }
+}
+
+#[test]
+fn test_scale_quant_false_no_snapping() {
+    let mut state = playing_state_with_step(61, 80); // C#4, not in C major
+    state.scale_quant = false;
+    let ev = tick_until_some(&mut state, 32).expect("should fire");
+    if let MidiEvent::NoteOn { note, .. } = ev {
+        assert_eq!(note, 61, "scale_quant=false must not snap the note");
+    } else {
+        panic!("expected NoteOn");
+    }
+}
+
+#[test]
+fn test_scale_quant_true_snaps_to_key() {
+    let mut state = playing_state_with_step(61, 80); // C#4, not in C major
+    state.scale_quant = true;
+    let ev = tick_until_some(&mut state, 32).expect("should fire");
+    if let MidiEvent::NoteOn { note, .. } = ev {
+        let expected = snap_to_key(61, Key::C, Mode::Major);
+        assert_eq!(note, expected, "scale_quant=true must snap note to key");
+        assert_ne!(note, 61, "snapped note must differ from out-of-key input");
+    } else {
+        panic!("expected NoteOn");
+    }
+}
+
+#[test]
+fn test_scale_quant_applied_after_note_modifier() {
+    let mut state = playing_state_with_step(60, 80);
+    state.note_modifier = 1;
+    state.note_rand = 100;
+    state.scale_quant = true;
+    let ev = tick_until_some(&mut state, 32).expect("should fire");
+    if let MidiEvent::NoteOn { note, .. } = ev {
+        let expected = snap_to_key(61, Key::C, Mode::Major);
+        assert_eq!(note, expected, "scale_quant must be applied after note_modifier");
+    } else {
+        panic!("expected NoteOn");
+    }
+}
+
+#[test]
+fn test_velocity_modifier_zero_unchanged() {
+    let mut state = playing_state_with_step(60, 80);
+    state.velocity_modifier = 0;
+    let ev = tick_until_some(&mut state, 32).expect("should fire");
+    if let MidiEvent::NoteOn { velocity, .. } = ev {
+        assert_eq!(velocity, 80, "velocity_modifier=0 must not change velocity");
+    } else {
+        panic!("expected NoteOn");
+    }
+}
+
+#[test]
+fn test_velocity_modifier_positive_adds() {
+    let mut state = playing_state_with_step(60, 80);
+    state.velocity_modifier = 20;
+    let ev = tick_until_some(&mut state, 32).expect("should fire");
+    if let MidiEvent::NoteOn { velocity, .. } = ev {
+        assert_eq!(velocity, 100, "velocity_modifier=20 must add 20 to velocity");
+    } else {
+        panic!("expected NoteOn");
+    }
+}
+
+#[test]
+fn test_velocity_modifier_positive_clamped_to_127() {
+    let mut state = playing_state_with_step(60, 120);
+    state.velocity_modifier = 20;
+    let ev = tick_until_some(&mut state, 32).expect("should fire");
+    if let MidiEvent::NoteOn { velocity, .. } = ev {
+        assert_eq!(velocity, 127, "velocity clamped to 127 when modifier pushes it above max");
+    } else {
+        panic!("expected NoteOn");
+    }
+}
+
+#[test]
+fn test_velocity_modifier_negative_subtracts() {
+    let mut state = playing_state_with_step(60, 80);
+    state.velocity_modifier = -20;
+    let ev = tick_until_some(&mut state, 32).expect("should fire");
+    if let MidiEvent::NoteOn { velocity, .. } = ev {
+        assert_eq!(velocity, 60, "velocity_modifier=-20 must subtract 20 from velocity");
+    } else {
+        panic!("expected NoteOn");
+    }
+}
+
+#[test]
+fn test_velocity_modifier_negative_clamped_to_zero() {
+    let mut state = playing_state_with_step(60, 10);
+    state.velocity_modifier = -20;
+    let ev = tick_until_some(&mut state, 32).expect("should fire");
+    if let MidiEvent::NoteOn { velocity, .. } = ev {
+        assert_eq!(velocity, 0, "velocity clamped to 0 when modifier pushes it below 0");
+    } else {
+        panic!("expected NoteOn");
+    }
+}
+
+// ── TempoRollPoint enum ──────────────────────────────────────────────────────
+
+#[test]
+fn test_tempo_roll_point_round_trip() {
+    for i in 0..TempoRollPoint::COUNT {
+        let v = TempoRollPoint::from_index(i);
+        assert_eq!(v.to_index(), i, "TempoRollPoint round-trip failed for index {i}");
+    }
+}
+
+#[test]
+fn test_tempo_roll_point_from_index_wraps() {
+    assert_eq!(TempoRollPoint::from_index(0), TempoRollPoint::Off);
+    assert_eq!(TempoRollPoint::from_index(1), TempoRollPoint::Step);
+    assert_eq!(TempoRollPoint::from_index(2), TempoRollPoint::Beat);
+    assert_eq!(TempoRollPoint::from_index(3), TempoRollPoint::Seq);
+    assert_eq!(TempoRollPoint::from_index(4), TempoRollPoint::Off);
+}
+
+#[test]
+fn test_tempo_roll_point_count() {
+    assert_eq!(TempoRollPoint::COUNT, 4);
+}
+
+// ── TempoRandType enum ───────────────────────────────────────────────────────
+
+#[test]
+fn test_tempo_rand_type_round_trip() {
+    for i in 0..TempoRandType::COUNT {
+        let v = TempoRandType::from_index(i);
+        assert_eq!(v.to_index(), i, "TempoRandType round-trip failed for index {i}");
+    }
+}
+
+#[test]
+fn test_tempo_rand_type_from_index_wraps() {
+    assert_eq!(TempoRandType::from_index(0), TempoRandType::Random);
+    assert_eq!(TempoRandType::from_index(1), TempoRandType::Up);
+    assert_eq!(TempoRandType::from_index(2), TempoRandType::Down);
+    assert_eq!(TempoRandType::from_index(3), TempoRandType::Breathe);
+    assert_eq!(TempoRandType::from_index(4), TempoRandType::PingPong);
+    assert_eq!(TempoRandType::from_index(5), TempoRandType::Random);
+}
+
+#[test]
+fn test_tempo_rand_type_count() {
+    assert_eq!(TempoRandType::COUNT, 5);
+}
+
+// ── SequencerState new field defaults ────────────────────────────────────────
+
+#[test]
+fn test_new_fields_defaults() {
+    let state = SequencerState::default();
+    assert_eq!(state.tempo_rand, 0);
+    assert_eq!(state.tempo_roll_point, TempoRollPoint::Off);
+    assert_eq!(state.tempo_variance_max, 10);
+    assert_eq!(state.tempo_rand_type, TempoRandType::Random);
+    assert!(!state.scale_quant);
+    assert_eq!(state.note_modifier, 0);
+    assert!(!state.skip_modifier);
+    assert_eq!(state.velocity_modifier, 0);
+}
+
+#[test]
+fn test_sequencer_state_with_new_fields_is_clone() {
+    let mut state = SequencerState::default();
+    state.tempo_rand = 42;
+    state.tempo_roll_point = TempoRollPoint::Beat;
+    state.tempo_rand_type = TempoRandType::PingPong;
+    state.scale_quant = true;
+    state.note_modifier = -12;
+    state.skip_modifier = true;
+    state.velocity_modifier = 10;
+    let cloned = state.clone();
+    assert_eq!(cloned.tempo_rand, 42);
+    assert_eq!(cloned.tempo_roll_point, TempoRollPoint::Beat);
+    assert_eq!(cloned.tempo_rand_type, TempoRandType::PingPong);
+    assert!(cloned.scale_quant);
+    assert_eq!(cloned.note_modifier, -12);
+    assert!(cloned.skip_modifier);
+    assert_eq!(cloned.velocity_modifier, 10);
+}
+
+// ── shift_committed_param_value ──────────────────────────────────────────────
+
+#[test]
+fn test_shift_committed_param_value_defaults() {
+    let state = SequencerState::default();
+    assert_eq!(state.shift_committed_param_value(0), 0);
+    assert_eq!(state.shift_committed_param_value(1), 0);
+    assert_eq!(state.shift_committed_param_value(2), 0);
+    assert_eq!(state.shift_committed_param_value(3), 10);
+    assert_eq!(state.shift_committed_param_value(4), 0);
+    assert_eq!(state.shift_committed_param_value(5), 0);
+    assert_eq!(state.shift_committed_param_value(6), 0);
+    assert_eq!(state.shift_committed_param_value(7), 0);
+}
+
+#[test]
+fn test_shift_committed_param_value_reflects_state() {
+    let mut state = SequencerState::default();
+    state.tempo_rand = 75;
+    state.tempo_roll_point = TempoRollPoint::Beat;
+    state.tempo_variance_max = 50;
+    state.tempo_rand_type = TempoRandType::Breathe;
+    state.scale_quant = true;
+    assert_eq!(state.shift_committed_param_value(1), 75);
+    assert_eq!(state.shift_committed_param_value(2), TempoRollPoint::Beat.to_index() as i64);
+    assert_eq!(state.shift_committed_param_value(3), 50);
+    assert_eq!(state.shift_committed_param_value(4), TempoRandType::Breathe.to_index() as i64);
+    assert_eq!(state.shift_committed_param_value(6), 1);
+}
+
+// ── shift_clamped_param_value ────────────────────────────────────────────────
+
+#[test]
+fn test_shift_clamped_param_value_tempo_rand() {
+    let state = SequencerState::default();
+    assert_eq!(state.shift_clamped_param_value(1, -5), 0);
+    assert_eq!(state.shift_clamped_param_value(1, 0), 0);
+    assert_eq!(state.shift_clamped_param_value(1, 50), 50);
+    assert_eq!(state.shift_clamped_param_value(1, 100), 100);
+    assert_eq!(state.shift_clamped_param_value(1, 150), 100);
+}
+
+#[test]
+fn test_shift_clamped_param_value_tempo_roll_point_wraps() {
+    let state = SequencerState::default();
+    assert_eq!(state.shift_clamped_param_value(2, 0), 0);
+    assert_eq!(state.shift_clamped_param_value(2, 3), 3);
+    assert_eq!(state.shift_clamped_param_value(2, 4), 0);
+    assert_eq!(state.shift_clamped_param_value(2, -1), 3);
+}
+
+#[test]
+fn test_shift_clamped_param_value_tempo_variance_max() {
+    let state = SequencerState::default();
+    assert_eq!(state.shift_clamped_param_value(3, 0), 1);
+    assert_eq!(state.shift_clamped_param_value(3, 1), 1);
+    assert_eq!(state.shift_clamped_param_value(3, 50), 50);
+    assert_eq!(state.shift_clamped_param_value(3, 99), 99);
+    assert_eq!(state.shift_clamped_param_value(3, 100), 99);
+}
+
+#[test]
+fn test_shift_clamped_param_value_tempo_rand_type_wraps() {
+    let state = SequencerState::default();
+    assert_eq!(state.shift_clamped_param_value(4, 0), 0);
+    assert_eq!(state.shift_clamped_param_value(4, 4), 4);
+    assert_eq!(state.shift_clamped_param_value(4, 5), 0);
+    assert_eq!(state.shift_clamped_param_value(4, -1), 4);
+}
+
+#[test]
+fn test_shift_clamped_param_value_scale_quant() {
+    let state = SequencerState::default();
+    assert_eq!(state.shift_clamped_param_value(6, 0), 0);
+    assert_eq!(state.shift_clamped_param_value(6, 1), 1);
+    assert_eq!(state.shift_clamped_param_value(6, -1), 0);
+    assert_eq!(state.shift_clamped_param_value(6, 2), 1);
+}
+
+#[test]
+fn test_shift_clamped_param_value_reserved_is_passthrough() {
+    let state = SequencerState::default();
+    assert_eq!(state.shift_clamped_param_value(7, 42), 42);
+    assert_eq!(state.shift_clamped_param_value(7, -99), -99);
+}
+
+// ── shift_apply_param_value ──────────────────────────────────────────────────
+
+#[test]
+fn test_shift_apply_param_value_tempo_rand() {
+    let mut state = SequencerState::default();
+    state.shift_apply_param_value(1, 80);
+    assert_eq!(state.tempo_rand, 80);
+}
+
+#[test]
+fn test_shift_apply_param_value_tempo_roll_point() {
+    let mut state = SequencerState::default();
+    state.shift_apply_param_value(2, TempoRollPoint::Seq.to_index() as i64);
+    assert_eq!(state.tempo_roll_point, TempoRollPoint::Seq);
+}
+
+#[test]
+fn test_shift_apply_param_value_tempo_variance_max() {
+    let mut state = SequencerState::default();
+    state.shift_apply_param_value(3, 33);
+    assert_eq!(state.tempo_variance_max, 33);
+}
+
+#[test]
+fn test_shift_apply_param_value_tempo_rand_type() {
+    let mut state = SequencerState::default();
+    state.shift_apply_param_value(4, TempoRandType::Down.to_index() as i64);
+    assert_eq!(state.tempo_rand_type, TempoRandType::Down);
+}
+
+#[test]
+fn test_shift_apply_param_value_scale_quant() {
+    let mut state = SequencerState::default();
+    state.shift_apply_param_value(6, 1);
+    assert!(state.scale_quant);
+    state.shift_apply_param_value(6, 0);
+    assert!(!state.scale_quant);
+}
+
+#[test]
+fn test_shift_apply_param_value_note_rand_is_noop() {
+    let mut state = SequencerState::default();
+    state.shift_apply_param_value(0, 50);
+}
+
+#[test]
+fn test_shift_apply_param_value_step_rand_is_noop() {
+    let mut state = SequencerState::default();
+    state.shift_apply_param_value(5, 50);
+}
+
+#[test]
+fn test_shift_apply_param_value_reserved_is_noop() {
+    let mut state = SequencerState::default();
+    state.shift_apply_param_value(7, 99);
+}
+
+// ── Shift overlay round-trip via apply_command ───────────────────────────────
+
+fn open_shift_overlay(state: &mut SequencerState) {
+    state.apply_command(InputCommand::OpenOverlay(OverlayMode::Shift));
+}
+
+#[test]
+fn test_shift_overlay_round_trip_tempo_rand() {
+    let mut state = SequencerState::default();
+    open_shift_overlay(&mut state);
+    state.selected_param = 1;
+    state.apply_command(InputCommand::ParamValueDelta(50));
+    state.apply_command(InputCommand::Confirm);
+    assert_eq!(state.tempo_rand, 50);
+}
+
+#[test]
+fn test_shift_overlay_round_trip_tempo_roll_point() {
+    let mut state = SequencerState::default();
+    open_shift_overlay(&mut state);
+    state.selected_param = 2;
+    state.apply_command(InputCommand::ParamValueDelta(2));
+    state.apply_command(InputCommand::Confirm);
+    assert_eq!(state.tempo_roll_point, TempoRollPoint::Beat);
+}
+
+#[test]
+fn test_shift_overlay_round_trip_tempo_variance_max() {
+    let mut state = SequencerState::default();
+    open_shift_overlay(&mut state);
+    state.selected_param = 3;
+    state.apply_command(InputCommand::ParamValueDelta(30));
+    state.apply_command(InputCommand::Confirm);
+    assert_eq!(state.tempo_variance_max, 40);
+}
+
+#[test]
+fn test_shift_overlay_round_trip_tempo_rand_type() {
+    let mut state = SequencerState::default();
+    open_shift_overlay(&mut state);
+    state.selected_param = 4;
+    state.apply_command(InputCommand::ParamValueDelta(4));
+    state.apply_command(InputCommand::Confirm);
+    assert_eq!(state.tempo_rand_type, TempoRandType::PingPong);
+}
+
+#[test]
+fn test_shift_overlay_round_trip_scale_quant() {
+    let mut state = SequencerState::default();
+    open_shift_overlay(&mut state);
+    state.selected_param = 6;
+    state.apply_command(InputCommand::ParamValueDelta(1));
+    state.apply_command(InputCommand::Confirm);
+    assert!(state.scale_quant);
+}
+
+#[test]
+fn test_shift_overlay_reserved_index_is_noop() {
+    let mut state = SequencerState::default();
+    open_shift_overlay(&mut state);
+    state.selected_param = 7;
+    state.apply_command(InputCommand::ParamValueDelta(1));
+    state.apply_command(InputCommand::Confirm);
+    assert_eq!(state.pending_edit, PendingEdit::None);
+}
+
+#[test]
+fn test_shift_overlay_multiple_deltas_accumulate() {
+    let mut state = SequencerState::default();
+    open_shift_overlay(&mut state);
+    state.selected_param = 1;
+    state.apply_command(InputCommand::ParamValueDelta(20));
+    state.apply_command(InputCommand::ParamValueDelta(20));
+    state.apply_command(InputCommand::ParamValueDelta(10));
+    state.apply_command(InputCommand::Confirm);
+    assert_eq!(state.tempo_rand, 50);
+}
+
+#[test]
+fn test_regular_overlay_still_works_after_shift_changes() {
+    let mut state = SequencerState::default();
+    state.apply_command(InputCommand::OpenOverlay(OverlayMode::Regular));
+    state.selected_param = 2; // swing
+    state.apply_command(InputCommand::ParamValueDelta(10));
+    state.apply_command(InputCommand::Confirm);
+    assert_eq!(state.swing, 10);
+}
+
+#[test]
+fn test_shift_overlay_round_trip_note_rand_stub_is_noop() {
+    let mut state = SequencerState::default();
+    open_shift_overlay(&mut state);
+    state.selected_param = 0;
+    state.apply_command(InputCommand::ParamValueDelta(50));
+    state.apply_command(InputCommand::Confirm);
+    assert_eq!(state.pending_edit, PendingEdit::None);
+}
+
+#[test]
+fn test_shift_overlay_round_trip_step_rand_stub_is_noop() {
+    let mut state = SequencerState::default();
+    open_shift_overlay(&mut state);
+    state.selected_param = 5;
+    state.apply_command(InputCommand::ParamValueDelta(50));
+    state.apply_command(InputCommand::Confirm);
+    assert_eq!(state.pending_edit, PendingEdit::None);
+}
+
+// ── Stream D: Shift action commands ─────────────────────────────────────────
+
+#[test]
+fn test_note_modifier_set_applies_value() {
+    let mut state = SequencerState::default();
+    state.apply_command(InputCommand::NoteModifierSet(5));
+    assert_eq!(state.note_modifier, 5);
+}
+
+#[test]
+fn test_note_modifier_set_clears_with_zero() {
+    let mut state = SequencerState::default();
+    state.note_modifier = 12;
+    state.apply_command(InputCommand::NoteModifierSet(0));
+    assert_eq!(state.note_modifier, 0);
+}
+
+#[test]
+fn test_note_modifier_set_negative_value() {
+    let mut state = SequencerState::default();
+    state.apply_command(InputCommand::NoteModifierSet(-24));
+    assert_eq!(state.note_modifier, -24);
+}
+
+#[test]
+fn test_skip_modifier_toggle_false_to_true() {
+    let mut state = SequencerState::default();
+    assert!(!state.skip_modifier);
+    state.apply_command(InputCommand::SkipModifierToggle);
+    assert!(state.skip_modifier);
+}
+
+#[test]
+fn test_skip_modifier_toggle_true_to_false() {
+    let mut state = SequencerState::default();
+    state.skip_modifier = true;
+    state.apply_command(InputCommand::SkipModifierToggle);
+    assert!(!state.skip_modifier);
+}
+
+#[test]
+fn test_skip_modifier_toggle_round_trip() {
+    let mut state = SequencerState::default();
+    state.apply_command(InputCommand::SkipModifierToggle);
+    state.apply_command(InputCommand::SkipModifierToggle);
+    assert!(!state.skip_modifier, "double toggle should return to false");
+}
+
+#[test]
+fn test_velocity_modifier_set_applies_value() {
+    let mut state = SequencerState::default();
+    state.apply_command(InputCommand::VelocityModifierSet(64));
+    assert_eq!(state.velocity_modifier, 64);
+}
+
+#[test]
+fn test_velocity_modifier_set_clears_with_zero() {
+    let mut state = SequencerState::default();
+    state.velocity_modifier = 50;
+    state.apply_command(InputCommand::VelocityModifierSet(0));
+    assert_eq!(state.velocity_modifier, 0);
+}
+
+#[test]
+fn test_velocity_modifier_set_negative_value() {
+    let mut state = SequencerState::default();
+    state.apply_command(InputCommand::VelocityModifierSet(-127));
+    assert_eq!(state.velocity_modifier, -127);
+}
+
+#[test]
+fn test_generate_random_sequence_updates_all_notes() {
+    let mut state = SequencerState::default();
+    for step in state.steps.iter_mut() {
+        step.midi_note = 60;
+    }
+    let enabled_before: [bool; 16] = core::array::from_fn(|i| state.steps[i].enabled);
+    state.apply_command(InputCommand::GenerateRandomSequence);
+    for (i, step) in state.steps.iter().enumerate() {
+        assert!(
+            step.midi_note >= 48 && step.midi_note <= 84,
+            "step {i} midi_note {} out of range 48–84",
+            step.midi_note
+        );
+        let snapped = snap_to_key(step.midi_note, state.key, state.mode);
+        assert_eq!(
+            step.midi_note, snapped,
+            "step {i} note {} is not in key/mode",
+            step.midi_note
+        );
+        assert_eq!(
+            step.enabled, enabled_before[i],
+            "step {i} enabled flag changed by GenerateRandomSequence"
+        );
+    }
+}
+
+#[test]
+fn test_generate_random_sequence_enabled_flags_preserved_mixed() {
+    let mut state = SequencerState::default();
+    for (i, step) in state.steps.iter_mut().enumerate() {
+        step.enabled = i % 2 == 0;
+    }
+    let enabled_before: [bool; 16] = core::array::from_fn(|i| state.steps[i].enabled);
+    state.apply_command(InputCommand::GenerateRandomSequence);
+    for (i, step) in state.steps.iter().enumerate() {
+        assert_eq!(
+            step.enabled, enabled_before[i],
+            "step {i} enabled flag changed"
+        );
+    }
+}
+
+#[test]
+fn test_generate_random_sequence_notes_in_range_48_84() {
+    let mut state = SequencerState::default();
+    for _ in 0..20 {
+        state.apply_command(InputCommand::GenerateRandomSequence);
+        for (i, step) in state.steps.iter().enumerate() {
+            assert!(
+                step.midi_note >= 48 && step.midi_note <= 84,
+                "step {i} note {} out of range 48–84 after repeated GenerateRandomSequence",
+                step.midi_note
+            );
+        }
+    }
+}
+
+#[test]
+fn test_generate_random_sequence_notes_in_key() {
+    let mut state = SequencerState::default(); // Key::C, Mode::Major
+    for _ in 0..20 {
+        state.apply_command(InputCommand::GenerateRandomSequence);
+        for (i, step) in state.steps.iter().enumerate() {
+            let snapped = snap_to_key(step.midi_note, state.key, state.mode);
+            assert_eq!(
+                step.midi_note, snapped,
+                "step {i} note {} not in key C Major after GenerateRandomSequence",
+                step.midi_note
+            );
+        }
+    }
+}
+
+#[test]
+fn test_generate_random_sequence_produces_variety() {
+    let mut state = SequencerState::default();
+    state.apply_command(InputCommand::GenerateRandomSequence);
+    let first: [u8; 16] = core::array::from_fn(|i| state.steps[i].midi_note);
+    let mut all_same = true;
+    for _ in 0..9 {
+        state.apply_command(InputCommand::GenerateRandomSequence);
+        let current: [u8; 16] = core::array::from_fn(|i| state.steps[i].midi_note);
+        if current != first {
+            all_same = false;
+            break;
+        }
+    }
+    assert!(!all_same, "GenerateRandomSequence produced identical sequences 10 times in a row");
 }
