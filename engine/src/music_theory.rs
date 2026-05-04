@@ -335,6 +335,11 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_note_name_sharp_s_suffix() {
+        assert_eq!(parse_note_name("Fs3"), Some(54));
+    }
+
+    #[test]
     fn test_parse_note_name_flat() {
         // Bb2: B-flat in octave 2 → chroma 10, (2+1)*12+10 = 46
         assert_eq!(parse_note_name("Bb2"), Some(46));
