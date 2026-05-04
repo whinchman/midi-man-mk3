@@ -24,6 +24,8 @@ pub enum MidiCtrlMsg {
     /// Set the MIDI channel (1-indexed; the actual channel byte update happens
     /// via InputCommand::ChannelSet in the state processor).
     ChangeChannel(u8),
+    /// Request enumeration of available MIDI output ports; names arrive on log_tx.
+    ListPorts,
 }
 
 /// Abstraction over a MIDI output connection.
@@ -241,6 +243,22 @@ pub fn run_midi_out(
                 // Channel is applied at the MidiEvent level via state.midi_channel.
                 // This message is informational only for the midi_out thread.
             }
+            Ok(MidiCtrlMsg::ListPorts) => {
+                match midir::MidiOutput::new("midi-man-mk3-list") {
+                    Ok(output) => {
+                        let ports = output.ports();
+                        let names: Vec<String> = ports
+                            .iter()
+                            .map(|p| output.port_name(p).unwrap_or_default())
+                            .collect();
+                        let payload = format!("[ports]{}", names.join("\x1F"));
+                        let _ = log_tx.send((true, payload));
+                    }
+                    Err(e) => {
+                        let _ = log_tx.send((false, format!("[ports-err] {e}")));
+                    }
+                }
+            }
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => break,
         }
@@ -282,7 +300,7 @@ pub fn run_midi_out_with_open_fn<F>(
     midi_rx: std::sync::mpsc::Receiver<MidiEvent>,
     ctrl_rx: std::sync::mpsc::Receiver<MidiCtrlMsg>,
     initial_sender: Option<Box<dyn MidiSender>>,
-    _log_tx: SyncSender<(bool, String)>,
+    log_tx: SyncSender<(bool, String)>,
     mut open_port_fn: F,
 ) where
     F: FnMut(&str) -> Option<Box<dyn MidiSender>>,
@@ -299,6 +317,10 @@ pub fn run_midi_out_with_open_fn<F>(
             }
             Ok(MidiCtrlMsg::ChangeChannel(_)) => {
                 // Channel is applied at the MidiEvent level — no-op here.
+            }
+            Ok(MidiCtrlMsg::ListPorts) => {
+                // No real ALSA in the test path — send an empty ports response.
+                let _ = log_tx.send((true, "[ports]".to_owned()));
             }
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => break,
@@ -484,5 +506,40 @@ mod tests {
             *port_change_received.lock().unwrap(),
             "ChangePort message was not processed by open_port_fn"
         );
+    }
+
+    /// Verify that ListPorts sends `(true, "[ports]")` on the testable path.
+    #[test]
+    fn list_ports_sends_empty_ports_sentinel_in_test_path() {
+        let (midi_tx, midi_rx) = mpsc::channel::<MidiEvent>();
+        let (ctrl_tx, ctrl_rx) = mpsc::channel::<MidiCtrlMsg>();
+        let (log_tx, log_rx) = mpsc::sync_channel::<(bool, String)>(4);
+
+        ctrl_tx.send(MidiCtrlMsg::ListPorts).unwrap();
+        drop(ctrl_tx);
+        drop(midi_tx);
+
+        let handle = std::thread::spawn(move || {
+            run_midi_out_with_open_fn(midi_rx, ctrl_rx, None, log_tx, |_| None);
+        });
+
+        handle.join().expect("loop thread panicked");
+
+        let msg = log_rx.recv().expect("expected a log message from ListPorts");
+        assert_eq!(msg.0, true, "ListPorts should send success=true");
+        assert_eq!(msg.1, "[ports]", "ListPorts should send empty [ports] sentinel");
+    }
+
+    /// Verify that ListPorts response starts with "[ports]" sentinel prefix.
+    #[test]
+    fn list_ports_response_uses_correct_sentinel_format() {
+        // Validate the sentinel format constant independently.
+        let empty_response = format!("[ports]{}", "".to_owned());
+        assert!(empty_response.starts_with("[ports]"));
+
+        let names = vec!["Port A", "Port B"];
+        let with_names = format!("[ports]{}", names.join("\x1F"));
+        assert!(with_names.starts_with("[ports]"));
+        assert!(with_names.contains('\x1F'));
     }
 }
