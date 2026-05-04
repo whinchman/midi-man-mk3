@@ -125,7 +125,7 @@ pub(crate) fn handle_cli_submit(
         let _ = midi_ctrl_tx.send(MidiCtrlMsg::ChangePort(name.clone()));
         let _ = cmd_tx.send(InputCommand::MidiDeviceName(name.clone()));
         ui.midi_device_name = name.clone();
-        push_log(&mut ui.cli_log, ts, LogTag::Midi, format!("port → {name}"));
+        push_log(&mut ui.cli_log, ts, LogTag::Midi, format!("port → {name} (requesting)"));
     } else if let Some(rest) = line.strip_prefix("channel ") {
         if let Ok(n) = rest.trim().parse::<u8>() {
             if (1..=16).contains(&n) {
@@ -226,7 +226,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
 #[cfg(feature = "hw-io")]
-use crate::input::{panel_key_to_command, KeyCodeSimple};
+use crate::input::{cli_key_to_char, panel_key_to_command, KeyCodeSimple};
 #[cfg(feature = "hw-io")]
 use crate::state::SequencerState;
 #[cfg(feature = "hw-io")]
@@ -294,17 +294,25 @@ fn translate_key(
     let simple = to_simple(event.code);
 
     // ── Global keys (active in any focus) ─────────────────────────────────────
+    // When CLI has focus, only SetFocus variants (F1–F4) pass through global
+    // dispatch. All other global keys (PlayStop, BpmDelta) must fall through to
+    // the FocusPanel::Cli arm so that characters like 'p' are inserted into the
+    // CLI line instead of firing their global actions.
     if let Some(cmd) = global_key_to_command(simple) {
-        // SetFocus commands update local ui.focus; other globals are sent on cmd_tx.
-        match cmd {
-            InputCommand::SetFocus(panel) => {
-                ui.focus = panel;
+        let is_set_focus = matches!(cmd, InputCommand::SetFocus(_));
+        if is_set_focus || ui.focus != FocusPanel::Cli {
+            // SetFocus commands update local ui.focus; other globals are sent on cmd_tx.
+            match cmd {
+                InputCommand::SetFocus(panel) => {
+                    ui.focus = panel;
+                }
+                other => {
+                    let _ = cmd_tx.send(other);
+                }
             }
-            other => {
-                let _ = cmd_tx.send(other);
-            }
+            return;
         }
-        return;
+        // Non-SetFocus global key in CLI mode: fall through to CLI handler below.
     }
 
     // ── Focus-specific keys ────────────────────────────────────────────────────
@@ -334,17 +342,17 @@ fn translate_key(
         FocusPanel::RandParams => match simple {
             KeyCodeSimple::Left => {
                 ui.rand_param_idx = ui.rand_param_idx.saturating_sub(1);
-                let _ = cmd_tx.send(InputCommand::PanelParamSelect(ui.rand_param_idx));
+                let _ = cmd_tx.send(InputCommand::RandParamSelect(ui.rand_param_idx));
             }
             KeyCodeSimple::Right => {
                 ui.rand_param_idx = (ui.rand_param_idx + 1).min(7);
-                let _ = cmd_tx.send(InputCommand::PanelParamSelect(ui.rand_param_idx));
+                let _ = cmd_tx.send(InputCommand::RandParamSelect(ui.rand_param_idx));
             }
             KeyCodeSimple::Up => {
-                let _ = cmd_tx.send(InputCommand::PanelParamDelta(1));
+                let _ = cmd_tx.send(InputCommand::RandParamDelta(1));
             }
             KeyCodeSimple::Down => {
-                let _ = cmd_tx.send(InputCommand::PanelParamDelta(-1));
+                let _ = cmd_tx.send(InputCommand::RandParamDelta(-1));
             }
             _ => {}
         },
@@ -355,10 +363,13 @@ fn translate_key(
             KeyCodeSimple::Backspace => {
                 ui.cli_line.pop();
             }
-            KeyCodeSimple::Char(c) if ui.cli_line.len() < 256 => {
-                ui.cli_line.push(c);
+            key => {
+                if let Some(c) = cli_key_to_char(key) {
+                    if ui.cli_line.len() < 256 {
+                        ui.cli_line.push(c);
+                    }
+                }
             }
-            _ => {}
         },
     }
 }
@@ -803,6 +814,53 @@ mod tests {
         assert_eq!(log.len(), CLI_LOG_CAPACITY);
         assert_eq!(log[0].text, "entry 1");
         assert_eq!(log[log.len() - 1].text, "new entry");
+    }
+
+    // ── BUG-030: CLI focus blocks global PlayStop / BpmDelta for 'p', '+', '-' ─
+    //
+    // global_key_to_command('p') → PlayStop, '+' → BpmDelta(1), '-' → BpmDelta(-1).
+    // These are correct for non-CLI panels. The translate_key guard (BUG-030 fix)
+    // prevents these commands from being sent when FocusPanel::Cli is active;
+    // they fall through to cli_key_to_char instead so the characters are inserted
+    // into the CLI line.
+    //
+    // global_key_to_command itself is focus-independent and is tested directly.
+    // The cli_key_to_char helper (always-compiled, no hw-io gate) is tested in
+    // input.rs with six dedicated unit tests.
+
+    #[test]
+    fn global_key_p_maps_to_play_stop_outside_cli_focus() {
+        // Verify global_key_to_command('p') produces PlayStop as expected.
+        // In non-CLI focus this fires PlayStop; in CLI focus translate_key guards it.
+        use crate::input::KeyCodeSimple;
+        let cmd = super::global_key_to_command(KeyCodeSimple::Char('p'));
+        assert!(
+            matches!(cmd, Some(InputCommand::PlayStop)),
+            "'p' must map to PlayStop in global_key_to_command"
+        );
+        let cmd_upper = super::global_key_to_command(KeyCodeSimple::Char('P'));
+        assert!(
+            matches!(cmd_upper, Some(InputCommand::PlayStop)),
+            "'P' must map to PlayStop in global_key_to_command"
+        );
+    }
+
+    #[test]
+    fn cli_submit_port_log_entry_says_requesting() {
+        // BUG-033: verify the port success log message contains "(requesting)"
+        // so the fire-and-forget nature is explicit.
+        let (cmd_tx, _cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
+        let mut ui = UiState::new();
+        ui.cli_line = "port MyDevice".into();
+
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+
+        assert_eq!(ui.cli_log.len(), 1);
+        assert!(
+            ui.cli_log[0].text.contains("(requesting)"),
+            "port log entry must contain '(requesting)', got: {:?}",
+            ui.cli_log[0].text
+        );
     }
 
     #[test]

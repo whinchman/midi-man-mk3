@@ -275,6 +275,8 @@ pub struct SequencerState {
     pub rand_seed: u32,
     /// Name of the connected MIDI output port (for title bar display).
     pub midi_device_name: String,
+    /// Index of the currently highlighted random parameter (0–7, F3 panel).
+    pub selected_rand_param: u8,
 }
 
 impl Default for SequencerState {
@@ -310,6 +312,7 @@ impl Default for SequencerState {
             velocity_modifier: 0,
             rand_seed: 0x853C_49E6,
             midi_device_name: String::new(),
+            selected_rand_param: 0,
         }
     }
 }
@@ -610,11 +613,31 @@ impl SequencerState {
             InputCommand::MidiDeviceName(name) => {
                 self.midi_device_name = name;
             }
-            // Focus and panel param commands are handled at the UI layer.
-            // state.rs is not the consumer of these variants.
+            // SetFocus is handled at the UI layer; state doesn't track focus.
             InputCommand::SetFocus(_) => {}
-            InputCommand::PanelParamSelect(_) => {}
-            InputCommand::PanelParamDelta(_) => {}
+            // PanelParamSelect: jump to an absolute param index (clamped to 0–7).
+            InputCommand::PanelParamSelect(n) => {
+                self.selected_param = n.min(7);
+            }
+            // PanelParamDelta: adjust selected param value immediately (no pending edit).
+            // Maps to the F2 (SEQ PARAMS) regular-param map. The hardware param knob
+            // also emits this variant since it has no panel context.
+            InputCommand::PanelParamDelta(d) => {
+                let current = self.committed_param_value(self.selected_param);
+                let new_val = self.clamped_param_value(self.selected_param, current + d as i64);
+                self.apply_param_value(self.selected_param, new_val);
+            }
+            // RandParamSelect: jump to an absolute rand-param index (clamped to 0–7).
+            InputCommand::RandParamSelect(n) => {
+                self.selected_rand_param = n.min(7);
+            }
+            // RandParamDelta: adjust selected rand-param value via shift param map.
+            InputCommand::RandParamDelta(d) => {
+                let current = self.shift_committed_param_value(self.selected_rand_param);
+                let new_val =
+                    self.shift_clamped_param_value(self.selected_rand_param, current + d as i64);
+                self.shift_apply_param_value(self.selected_rand_param, new_val);
+            }
         }
     }
 
@@ -1003,6 +1026,113 @@ mod tests {
         assert_eq!(
             state.midi_device_name, "",
             "MidiDeviceName with empty string must clear the stored name"
+        );
+    }
+
+    // ── BUG-031: PanelParamSelect and PanelParamDelta ────────────────────────
+
+    #[test]
+    fn panel_param_select_sets_selected_param() {
+        let mut state = SequencerState::default();
+        state.apply_command(InputCommand::PanelParamSelect(3));
+        assert_eq!(state.selected_param, 3, "PanelParamSelect(3) should set selected_param to 3");
+    }
+
+    #[test]
+    fn panel_param_select_clamps_to_7() {
+        let mut state = SequencerState::default();
+        state.apply_command(InputCommand::PanelParamSelect(255));
+        assert_eq!(
+            state.selected_param, 7,
+            "PanelParamSelect(255) should clamp selected_param to 7"
+        );
+    }
+
+    #[test]
+    fn panel_param_delta_adjusts_swing() {
+        // Param index 2 = swing (-50..=50).
+        let mut state = SequencerState::default();
+        state.swing = 10;
+        // Select param index 2 (Swing).
+        state.apply_command(InputCommand::PanelParamSelect(2));
+        // Apply a delta of +5.
+        state.apply_command(InputCommand::PanelParamDelta(5));
+        assert_eq!(
+            state.swing, 15,
+            "PanelParamDelta(5) with Swing selected should increase swing by 5"
+        );
+    }
+
+    #[test]
+    fn panel_param_delta_clamps_at_boundary() {
+        // Swing at max (50) + delta(10) must stay at 50.
+        let mut state = SequencerState::default();
+        state.swing = 50;
+        state.apply_command(InputCommand::PanelParamSelect(2));
+        state.apply_command(InputCommand::PanelParamDelta(10));
+        assert_eq!(
+            state.swing, 50,
+            "PanelParamDelta(10) when swing is already at 50 should clamp to 50"
+        );
+    }
+
+    // ── RandParamSelect and RandParamDelta (Finding C) ───────────────────────
+
+    #[test]
+    fn rand_param_select_sets_selected_rand_param() {
+        let mut state = SequencerState::default();
+        state.apply_command(InputCommand::RandParamSelect(2));
+        assert_eq!(
+            state.selected_rand_param, 2,
+            "RandParamSelect(2) should set selected_rand_param to 2"
+        );
+    }
+
+    #[test]
+    fn rand_param_select_clamps_to_7() {
+        let mut state = SequencerState::default();
+        state.apply_command(InputCommand::RandParamSelect(255));
+        assert_eq!(
+            state.selected_rand_param, 7,
+            "RandParamSelect(255) should clamp selected_rand_param to 7"
+        );
+    }
+
+    #[test]
+    fn rand_param_delta_adjusts_tempo_rand() {
+        // Shift param index 1 = tempo_rand (0–100).
+        let mut state = SequencerState::default();
+        state.tempo_rand = 10;
+        state.apply_command(InputCommand::RandParamSelect(1));
+        state.apply_command(InputCommand::RandParamDelta(3));
+        assert_eq!(
+            state.tempo_rand, 13,
+            "RandParamDelta(3) with tempo_rand=10 should produce tempo_rand=13"
+        );
+    }
+
+    #[test]
+    fn rand_param_delta_does_not_touch_regular_params() {
+        // Adjusting a rand param must not affect regular params (key, swing, etc.).
+        let mut state = SequencerState::default();
+        let original_key = state.key;
+        let original_swing = state.swing;
+        state.apply_command(InputCommand::RandParamSelect(1));
+        state.apply_command(InputCommand::RandParamDelta(1));
+        assert_eq!(state.key, original_key, "RandParamDelta must not change key");
+        assert_eq!(state.swing, original_swing, "RandParamDelta must not change swing");
+    }
+
+    #[test]
+    fn panel_param_delta_does_not_touch_rand_params() {
+        // Adjusting a regular param (index 2 = swing) must not affect rand params.
+        let mut state = SequencerState::default();
+        let original_tempo_rand = state.tempo_rand;
+        state.apply_command(InputCommand::PanelParamSelect(2));
+        state.apply_command(InputCommand::PanelParamDelta(1));
+        assert_eq!(
+            state.tempo_rand, original_tempo_rand,
+            "PanelParamDelta must not change tempo_rand"
         );
     }
 }
