@@ -322,11 +322,11 @@ fn translate_key(
             // new highlighted step immediately.  ui.selected_step must stay in
             // sync with SequencerState.selected_step (updated via cmd_tx below).
             KeyCodeSimple::Left => {
-                ui.selected_step = ui.selected_step.saturating_sub(1);
+                ui.selected_step = (ui.selected_step + 15) % 16;
                 let _ = cmd_tx.send(InputCommand::StepSelectDelta(-1));
             }
             KeyCodeSimple::Right => {
-                ui.selected_step = (ui.selected_step + 1).min(15);
+                ui.selected_step = (ui.selected_step + 1) % 16;
                 let _ = cmd_tx.send(InputCommand::StepSelectDelta(1));
             }
             key => {

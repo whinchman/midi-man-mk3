@@ -508,7 +508,7 @@ fn apply_command_step_select_delta_advances_normally() {
 }
 
 #[test]
-fn apply_command_note_delta_sets_pending_note_edit() {
+fn note_delta_applies_immediately_writes_to_step_note() {
     // BUG-035: NoteDelta now applies immediately; no PendingEdit::Note is created.
     let mut s = SequencerState::default();
     s.selected_step = 2;
@@ -910,7 +910,7 @@ fn apply_command_toggle_step_toggles_selected() {
 }
 
 #[test]
-fn apply_command_note_delta_creates_pending_edit() {
+fn note_delta_applies_immediately_to_step_midi_note() {
     // BUG-035: NoteDelta now applies immediately; the step note is written directly.
     let mut s = SequencerState::default();
     s.selected_step = 0;
@@ -1284,7 +1284,7 @@ fn tick_velocity_preserved_after_velocity_edit_committed() {
 // ── BUG-010: additional NoteDelta accumulation edge cases ─────────────────────
 
 #[test]
-fn note_delta_down_from_pending_not_committed_base() {
+fn note_delta_repeated_uses_committed_note_as_base() {
     // BUG-035: NoteDelta applies immediately. Each subsequent delta uses the
     // already-committed note as the base, so +1 then -1 returns to the start.
     let mut s = SequencerState::default();
