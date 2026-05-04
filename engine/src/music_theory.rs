@@ -176,6 +176,49 @@ pub fn note_name(midi_note: u8) -> String {
     }
 }
 
+/// Parse a note name string (e.g. "C4", "F#3", "Bb5", "A-1") into a MIDI note number.
+pub fn parse_note_name(s: &str) -> Option<u8> {
+    let bytes = s.as_bytes();
+    if bytes.is_empty() {
+        return None;
+    }
+    // Step 1: peel leading letter (A–G, case-insensitive) → chroma
+    let chroma: i32 = match bytes[0].to_ascii_uppercase() {
+        b'C' => 0,
+        b'D' => 2,
+        b'E' => 4,
+        b'F' => 5,
+        b'G' => 7,
+        b'A' => 9,
+        b'B' => 11,
+        _ => return None,
+    };
+    let mut pos = 1usize;
+    // Step 2: peel optional accidental
+    let accidental: i32 = if pos < bytes.len() {
+        match bytes[pos] {
+            b'#' | b's' => { pos += 1; 1 }
+            b'b' => { pos += 1; -1 }
+            _ => 0,
+        }
+    } else {
+        0
+    };
+    // Step 3: parse remaining as i8 octave (must have at least one char)
+    if pos >= bytes.len() {
+        return None;
+    }
+    let octave_str = core::str::from_utf8(&bytes[pos..]).ok()?;
+    let octave: i32 = octave_str.parse::<i8>().ok()? as i32;
+    // Step 4: compute MIDI note
+    let midi = (octave + 1) * 12 + chroma + accidental;
+    if (0..=127).contains(&midi) {
+        Some(midi as u8)
+    } else {
+        None
+    }
+}
+
 /// Snap `midi_note` to the nearest note in the scale defined by `key` and `mode`.
 ///
 /// Ties resolve to the lower note. Result is always in 0–127.
@@ -270,4 +313,70 @@ pub fn next_note(current: u8, key: Key, mode: Mode, direction: i8) -> u8 {
 
     let midi = root + target_octave * 12 + cum[target_degree_in_oct];
     midi.clamp(0, 127) as u8
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_note_name;
+
+    #[test]
+    fn test_parse_note_name_c4() {
+        assert_eq!(parse_note_name("C4"), Some(60));
+    }
+
+    #[test]
+    fn test_parse_note_name_lowercase() {
+        assert_eq!(parse_note_name("c4"), Some(60));
+    }
+
+    #[test]
+    fn test_parse_note_name_sharp() {
+        assert_eq!(parse_note_name("F#3"), Some(54));
+    }
+
+    #[test]
+    fn test_parse_note_name_sharp_s_suffix() {
+        assert_eq!(parse_note_name("Fs3"), Some(54));
+    }
+
+    #[test]
+    fn test_parse_note_name_flat() {
+        // Bb2: B-flat in octave 2 → chroma 10, (2+1)*12+10 = 46
+        assert_eq!(parse_note_name("Bb2"), Some(46));
+    }
+
+    #[test]
+    fn test_parse_note_name_negative_octave() {
+        assert_eq!(parse_note_name("A-1"), Some(9));
+    }
+
+    #[test]
+    fn test_parse_note_name_g9() {
+        assert_eq!(parse_note_name("G9"), Some(127));
+    }
+
+    #[test]
+    fn test_parse_note_name_c_minus1() {
+        assert_eq!(parse_note_name("C-1"), Some(0));
+    }
+
+    #[test]
+    fn test_parse_note_name_out_of_range() {
+        assert_eq!(parse_note_name("G#9"), None);
+    }
+
+    #[test]
+    fn test_parse_note_name_empty() {
+        assert_eq!(parse_note_name(""), None);
+    }
+
+    #[test]
+    fn test_parse_note_name_invalid_letter() {
+        assert_eq!(parse_note_name("X4"), None);
+    }
+
+    #[test]
+    fn test_parse_note_name_missing_octave() {
+        assert_eq!(parse_note_name("C"), None);
+    }
 }
