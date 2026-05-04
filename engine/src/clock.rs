@@ -398,7 +398,9 @@ pub fn run_clock(state: Arc<RwLock<SequencerState>>, midi_tx: SyncSender<MidiEve
                     channel,
                     note,
                     velocity,
-                    duration_nanos: period,
+                    // 90% gate: NoteOff fires before the next tick to avoid
+                    // racing with consecutive steps at the period boundary.
+                    duration_nanos: period / 10 * 9,
                 };
                 if midi_tx.send(event).is_err() {
                     // Receiver dropped — exit cleanly.
