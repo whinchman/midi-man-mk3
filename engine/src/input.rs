@@ -90,6 +90,12 @@ pub enum InputCommand {
     RandParamSelect(u8),
     /// F3 (RandParams panel): adjust selected rand-param by signed delta.
     RandParamDelta(i8),
+    /// Randomise all 16 step notes (in-key) and velocities using rng_seed.
+    RandAll,
+    /// Randomise all 16 step velocities only using rng_seed.
+    RandVelocities,
+    /// Set the note and velocity for a specific step (step must be < 16).
+    NoteSet { step: usize, midi_note: u8, velocity: u8 },
 }
 
 /// Pure function: translate a root-mode key event into an `InputCommand`.

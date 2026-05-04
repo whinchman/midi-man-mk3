@@ -638,6 +638,21 @@ impl SequencerState {
                     self.shift_clamped_param_value(self.selected_rand_param, current + d as i64);
                 self.shift_apply_param_value(self.selected_rand_param, new_val);
             }
+            // RandAll: randomise notes in-key then randomise velocities.
+            InputCommand::RandAll => {
+                self.randomise_all();
+            }
+            // RandVelocities: randomise velocities only; notes unchanged.
+            InputCommand::RandVelocities => {
+                self.randomise_velocities();
+            }
+            // NoteSet: set note and velocity for a specific step (no-op if out of range).
+            InputCommand::NoteSet { step, midi_note, velocity } => {
+                if step < 16 {
+                    self.steps[step].midi_note = midi_note;
+                    self.steps[step].velocity = velocity;
+                }
+            }
         }
     }
 
@@ -789,6 +804,26 @@ impl SequencerState {
             let note_in_range = (raw % 37) as u8 + 48; // 48..=84
             step.midi_note = crate::music_theory::snap_to_key(note_in_range, self.key, self.mode);
         }
+    }
+
+    /// Randomise all 16 step velocities to a value in 40..=127 using `rng_seed`.
+    ///
+    /// Notes and enabled flags are left unchanged.
+    /// Velocity formula: `(raw % 88) as u8 + 40`.
+    fn randomise_velocities(&mut self) {
+        for step in self.steps.iter_mut() {
+            let raw = next_rand(&mut self.rng_seed);
+            step.velocity = (raw % 88) as u8 + 40;
+        }
+    }
+
+    /// Randomise all 16 step notes in-key then randomise all velocities.
+    ///
+    /// Calls `generate_random_sequence()` first (notes), then `randomise_velocities()`
+    /// so both operations share the same `rng_seed` chain.
+    fn randomise_all(&mut self) {
+        self.generate_random_sequence();
+        self.randomise_velocities();
     }
 
     /// Re-snap all 16 step notes to the nearest note in the current key and mode.
@@ -1176,5 +1211,102 @@ mod tests {
             state.steps[1].midi_note, step1_note,
             "NoteDelta must only modify the selected step, not other steps"
         );
+    }
+
+    // ── RandAll ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn rand_all_sets_notes_in_range_and_velocities_in_range() {
+        let mut state = SequencerState::default();
+        let seed_before = state.rng_seed;
+        state.apply_command(InputCommand::RandAll);
+
+        // rng_seed must have advanced
+        assert_ne!(state.rng_seed, seed_before, "RandAll must advance rng_seed");
+
+        for (i, step) in state.steps.iter().enumerate() {
+            assert!(
+                (48..=84).contains(&step.midi_note),
+                "step {i} midi_note {} out of 48..=84",
+                step.midi_note
+            );
+            assert!(
+                (40..=127).contains(&step.velocity),
+                "step {i} velocity {} out of 40..=127",
+                step.velocity
+            );
+        }
+    }
+
+    // ── RandVelocities ───────────────────────────────────────────────────────
+
+    #[test]
+    fn rand_velocities_changes_velocities_only() {
+        let mut state = SequencerState::default();
+        // Record original notes
+        let original_notes: [u8; 16] = core::array::from_fn(|i| state.steps[i].midi_note);
+
+        state.apply_command(InputCommand::RandVelocities);
+
+        // Notes must be unchanged
+        for (i, step) in state.steps.iter().enumerate() {
+            assert_eq!(
+                step.midi_note, original_notes[i],
+                "RandVelocities must not change step {i} midi_note"
+            );
+            assert!(
+                (40..=127).contains(&step.velocity),
+                "step {i} velocity {} out of 40..=127",
+                step.velocity
+            );
+        }
+    }
+
+    // ── NoteSet ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn note_set_step_3_sets_correct_fields() {
+        let mut state = SequencerState::default();
+        state.apply_command(InputCommand::NoteSet { step: 3, midi_note: 72, velocity: 100 });
+
+        assert_eq!(state.steps[3].midi_note, 72, "NoteSet must write midi_note to step 3");
+        assert_eq!(state.steps[3].velocity, 100, "NoteSet must write velocity to step 3");
+
+        // Other steps must be unchanged
+        for i in 0..16 {
+            if i == 3 {
+                continue;
+            }
+            assert_eq!(
+                state.steps[i].midi_note,
+                StepData::default().midi_note,
+                "NoteSet must not alter step {i} midi_note"
+            );
+            assert_eq!(
+                state.steps[i].velocity,
+                StepData::default().velocity,
+                "NoteSet must not alter step {i} velocity"
+            );
+        }
+    }
+
+    #[test]
+    fn note_set_out_of_range_is_noop() {
+        let mut state = SequencerState::default();
+        let original: [StepData; 16] = state.steps;
+
+        // step = 16 is out of range — must be a no-op (no panic)
+        state.apply_command(InputCommand::NoteSet { step: 16, midi_note: 99, velocity: 99 });
+
+        for i in 0..16 {
+            assert_eq!(
+                state.steps[i].midi_note, original[i].midi_note,
+                "NoteSet(step=16) must not modify step {i} midi_note"
+            );
+            assert_eq!(
+                state.steps[i].velocity, original[i].velocity,
+                "NoteSet(step=16) must not modify step {i} velocity"
+            );
+        }
     }
 }
