@@ -281,6 +281,35 @@ fn handle_cli_note_set(
     );
 }
 
+// ── MIDI log sentinel parsing ─────────────────────────────────────────────────
+
+/// Parse a `[ports]` or `[ports-err]` sentinel from the MIDI output thread.
+///
+/// Returns `Some(entries)` when `(ok, msg)` is a recognised port-listing sentinel,
+/// where each entry is a `(LogTag, String)` pair ready to push into the CLI log.
+/// Returns `None` for any non-sentinel message so the caller handles it normally.
+///
+/// Sentinel contracts:
+/// - `(true,  "[ports]<name1>\x1f<name2>…")` — one `LogTag::Info` per port name.
+/// - `(true,  "[ports]")` with empty payload  — single `LogTag::Info` "no MIDI ports available".
+/// - `(false, "[ports-err] <msg>")` or any `ok=false` msg — single `LogTag::Err` with the full message.
+/// - Anything else                             — `None`.
+#[cfg_attr(not(feature = "hw-io"), allow(dead_code))]
+pub(crate) fn parse_ports_sentinel(ok: bool, msg: &str) -> Option<Vec<(LogTag, String)>> {
+    if ok {
+        let payload = msg.strip_prefix("[ports]")?;
+        if payload.is_empty() {
+            Some(vec![(LogTag::Info, "no MIDI ports available".into())])
+        } else {
+            Some(payload.split('\x1f').map(|name| (LogTag::Info, name.to_string())).collect())
+        }
+    } else if msg.starts_with("[ports-err]") {
+        Some(vec![(LogTag::Err, msg.to_string())])
+    } else {
+        None
+    }
+}
+
 // ── Global key dispatch (feature-independent) ────────────────────────────────
 
 /// Map a key to a global `InputCommand` that is active in any focus panel.
@@ -544,20 +573,14 @@ pub fn run_ui(
         //   (false, "[ports-err] ...")        → LogTag::Err (falls through to default)
         while let Ok((ok, msg)) = midi_log_rx.try_recv() {
             let ts = ui.start_time.elapsed().as_millis() as u64;
-            if ok {
-                if let Some(payload) = msg.strip_prefix("[ports]") {
-                    if payload.is_empty() {
-                        push_log(&mut ui.cli_log, ts, crate::ui_render::LogTag::Info, "no MIDI ports available".into());
-                    } else {
-                        for name in payload.split('\x1f') {
-                            push_log(&mut ui.cli_log, ts, crate::ui_render::LogTag::Info, name.to_string());
-                        }
-                    }
-                    continue;
+            if let Some(entries) = parse_ports_sentinel(ok, &msg) {
+                for (tag, text) in entries {
+                    push_log(&mut ui.cli_log, ts, tag, text);
                 }
+            } else {
+                let tag = if ok { crate::ui_render::LogTag::Midi } else { crate::ui_render::LogTag::Err };
+                push_log(&mut ui.cli_log, ts, tag, msg);
             }
-            let tag = if ok { crate::ui_render::LogTag::Midi } else { crate::ui_render::LogTag::Err };
-            push_log(&mut ui.cli_log, ts, tag, msg);
         }
 
         // ── Render ───────────────────────────────────────────────────────────
@@ -1122,6 +1145,50 @@ mod tests {
         for entry in &ui.cli_log {
             assert!(matches!(entry.tag, LogTag::Info));
         }
+    }
+
+    // ── parse_ports_sentinel tests ────────────────────────────────────────────
+
+    #[test]
+    fn parse_ports_sentinel_multi_port_list() {
+        let result = parse_ports_sentinel(true, "[ports]Port A\x1fPort B");
+        assert_eq!(
+            result,
+            Some(vec![
+                (LogTag::Info, "Port A".to_string()),
+                (LogTag::Info, "Port B".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn parse_ports_sentinel_empty_port_list() {
+        let result = parse_ports_sentinel(true, "[ports]");
+        assert_eq!(
+            result,
+            Some(vec![(LogTag::Info, "no MIDI ports available".to_string())])
+        );
+    }
+
+    #[test]
+    fn parse_ports_sentinel_error_path() {
+        let result = parse_ports_sentinel(false, "[ports-err] boom");
+        assert_eq!(
+            result,
+            Some(vec![(LogTag::Err, "[ports-err] boom".to_string())])
+        );
+    }
+
+    #[test]
+    fn parse_ports_sentinel_non_sentinel_ok_returns_none() {
+        let result = parse_ports_sentinel(true, "normal log message");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn parse_ports_sentinel_non_sentinel_err_returns_none() {
+        let result = parse_ports_sentinel(false, "some error");
+        assert_eq!(result, None);
     }
 
     // ── handle_cli_note_set tests ─────────────────────────────────────────────
