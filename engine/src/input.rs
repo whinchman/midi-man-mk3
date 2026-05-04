@@ -83,7 +83,13 @@ pub enum InputCommand {
     /// Select a parameter by absolute index within the focused panel.
     PanelParamSelect(u8),
     /// Adjust the selected parameter by a signed delta within the focused panel.
+    /// Applies to the F2 (SEQ PARAMS / regular) panel only.
+    /// The hardware param knob also emits this variant (no panel context available in HID).
     PanelParamDelta(i8),
+    /// F3 (RandParams panel): select rand-param by absolute index (0–7).
+    RandParamSelect(u8),
+    /// F3 (RandParams panel): adjust selected rand-param by signed delta.
+    RandParamDelta(i8),
 }
 
 /// Pure function: translate a root-mode key event into an `InputCommand`.
@@ -166,6 +172,21 @@ pub fn panel_key_to_command(key: KeyCodeSimple, focus: FocusPanel) -> Option<Inp
             _ => None,
         },
         FocusPanel::Cli => None,
+    }
+}
+
+/// Returns the char that a key inserts into the CLI line, if any.
+///
+/// Used by `translate_key` (hw-io) and unit tests (no feature gate).
+/// Maps `Char(c)` → `Some(c)`, `Space` → `Some(' ')`, `Plus` → `Some('+')`,
+/// `Minus` → `Some('-')`, and all other variants → `None`.
+pub fn cli_key_to_char(key: KeyCodeSimple) -> Option<char> {
+    match key {
+        KeyCodeSimple::Char(c) => Some(c),
+        KeyCodeSimple::Space => Some(' '),
+        KeyCodeSimple::Plus => Some('+'),
+        KeyCodeSimple::Minus => Some('-'),
+        _ => None,
     }
 }
 
@@ -564,5 +585,37 @@ mod tests {
     fn panel_param_delta_min_i8_roundtrip() {
         let cmd = InputCommand::PanelParamDelta(i8::MIN);
         assert!(matches!(cmd.clone(), InputCommand::PanelParamDelta(-128)));
+    }
+
+    // ── cli_key_to_char ───────────────────────────────────────────────────────
+
+    #[test]
+    fn cli_key_to_char_returns_char_for_lowercase_p() {
+        assert_eq!(cli_key_to_char(KeyCodeSimple::Char('p')), Some('p'));
+    }
+
+    #[test]
+    fn cli_key_to_char_returns_space_for_space() {
+        assert_eq!(cli_key_to_char(KeyCodeSimple::Space), Some(' '));
+    }
+
+    #[test]
+    fn cli_key_to_char_returns_plus() {
+        assert_eq!(cli_key_to_char(KeyCodeSimple::Plus), Some('+'));
+    }
+
+    #[test]
+    fn cli_key_to_char_returns_minus() {
+        assert_eq!(cli_key_to_char(KeyCodeSimple::Minus), Some('-'));
+    }
+
+    #[test]
+    fn cli_key_to_char_returns_none_for_enter() {
+        assert_eq!(cli_key_to_char(KeyCodeSimple::Enter), None);
+    }
+
+    #[test]
+    fn cli_key_to_char_returns_none_for_up() {
+        assert_eq!(cli_key_to_char(KeyCodeSimple::Up), None);
     }
 }

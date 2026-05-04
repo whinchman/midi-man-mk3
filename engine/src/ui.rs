@@ -226,7 +226,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
 #[cfg(feature = "hw-io")]
-use crate::input::{panel_key_to_command, KeyCodeSimple};
+use crate::input::{cli_key_to_char, panel_key_to_command, KeyCodeSimple};
 #[cfg(feature = "hw-io")]
 use crate::state::SequencerState;
 #[cfg(feature = "hw-io")]
@@ -342,17 +342,17 @@ fn translate_key(
         FocusPanel::RandParams => match simple {
             KeyCodeSimple::Left => {
                 ui.rand_param_idx = ui.rand_param_idx.saturating_sub(1);
-                let _ = cmd_tx.send(InputCommand::PanelParamSelect(ui.rand_param_idx));
+                let _ = cmd_tx.send(InputCommand::RandParamSelect(ui.rand_param_idx));
             }
             KeyCodeSimple::Right => {
                 ui.rand_param_idx = (ui.rand_param_idx + 1).min(7);
-                let _ = cmd_tx.send(InputCommand::PanelParamSelect(ui.rand_param_idx));
+                let _ = cmd_tx.send(InputCommand::RandParamSelect(ui.rand_param_idx));
             }
             KeyCodeSimple::Up => {
-                let _ = cmd_tx.send(InputCommand::PanelParamDelta(1));
+                let _ = cmd_tx.send(InputCommand::RandParamDelta(1));
             }
             KeyCodeSimple::Down => {
-                let _ = cmd_tx.send(InputCommand::PanelParamDelta(-1));
+                let _ = cmd_tx.send(InputCommand::RandParamDelta(-1));
             }
             _ => {}
         },
@@ -363,10 +363,13 @@ fn translate_key(
             KeyCodeSimple::Backspace => {
                 ui.cli_line.pop();
             }
-            KeyCodeSimple::Char(c) if ui.cli_line.len() < 256 => {
-                ui.cli_line.push(c);
+            key => {
+                if let Some(c) = cli_key_to_char(key) {
+                    if ui.cli_line.len() < 256 {
+                        ui.cli_line.push(c);
+                    }
+                }
             }
-            _ => {}
         },
     }
 }
@@ -813,17 +816,17 @@ mod tests {
         assert_eq!(log[log.len() - 1].text, "new entry");
     }
 
-    // ── BUG-030: CLI focus blocks global PlayStop for 'p' ────────────────────
+    // ── BUG-030: CLI focus blocks global PlayStop / BpmDelta for 'p', '+', '-' ─
     //
-    // global_key_to_command('p') returns Some(PlayStop) — that is correct and
-    // intentional for non-CLI panels. The translate_key guard (BUG-030 fix)
-    // prevents this command from being sent when FocusPanel::Cli is active,
-    // allowing 'p' to fall through to the CLI character-insertion arm instead.
+    // global_key_to_command('p') → PlayStop, '+' → BpmDelta(1), '-' → BpmDelta(-1).
+    // These are correct for non-CLI panels. The translate_key guard (BUG-030 fix)
+    // prevents these commands from being sent when FocusPanel::Cli is active;
+    // they fall through to cli_key_to_char instead so the characters are inserted
+    // into the CLI line.
     //
-    // This test documents that global_key_to_command itself still maps 'p' to
-    // PlayStop; the guarding behaviour is tested via handle_cli_submit below
-    // where we show that submitting "port ..." in CLI mode still works normally
-    // (i.e. the CLI arm is reachable).
+    // global_key_to_command itself is focus-independent and is tested directly.
+    // The cli_key_to_char helper (always-compiled, no hw-io gate) is tested in
+    // input.rs with six dedicated unit tests.
 
     #[test]
     fn global_key_p_maps_to_play_stop_outside_cli_focus() {

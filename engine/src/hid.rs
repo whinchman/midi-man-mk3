@@ -201,6 +201,8 @@ pub fn translate_in_report(report: &InReport) -> Vec<InputCommand> {
     // (The playing flag toggle is a direct write, not expressible as InputCommand yet.)
 
     // --- Param knob delta.
+    // The hardware param knob has no panel context, so it always emits PanelParamDelta
+    // which maps to the F2 (SEQ PARAMS / regular) param map in apply_command.
     if report.param_knob_delta != 0 {
         cmds.push(InputCommand::PanelParamDelta(report.param_knob_delta));
     }
