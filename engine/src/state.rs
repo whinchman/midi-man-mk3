@@ -1309,4 +1309,116 @@ mod tests {
             );
         }
     }
+
+    // ── RNG seed chain interaction ───────────────────────────────────────────
+
+    /// RandVelocities must advance rng_seed — it calls next_rand 16 times.
+    #[test]
+    fn rand_velocities_advances_rng_seed() {
+        let mut state = SequencerState::default();
+        let seed_before = state.rng_seed;
+        state.apply_command(InputCommand::RandVelocities);
+        assert_ne!(
+            state.rng_seed, seed_before,
+            "RandVelocities must advance rng_seed"
+        );
+    }
+
+    /// RandAll followed by RandVelocities must produce different velocities than
+    /// RandVelocities alone, because the seed position differs after RandAll
+    /// consumed 32 next_rand calls (16 for notes + 16 for velocities).
+    #[test]
+    fn rand_all_then_rand_velocities_differs_from_rand_velocities_alone() {
+        // Scenario A: RandVelocities only
+        let mut state_a = SequencerState::default();
+        state_a.apply_command(InputCommand::RandVelocities);
+        let velocities_a: [u8; 16] = core::array::from_fn(|i| state_a.steps[i].velocity);
+
+        // Scenario B: RandAll then RandVelocities — seed chain is further advanced
+        let mut state_b = SequencerState::default();
+        state_b.apply_command(InputCommand::RandAll);
+        state_b.apply_command(InputCommand::RandVelocities);
+        let velocities_b: [u8; 16] = core::array::from_fn(|i| state_b.steps[i].velocity);
+
+        assert_ne!(
+            velocities_a, velocities_b,
+            "RandAll advances rng_seed by 32 calls so the subsequent \
+             RandVelocities seed position must differ"
+        );
+    }
+
+    /// RandAll consumes the seed chain in order: notes first, then velocities.
+    /// Verify by replicating the expected seed advancement manually: after
+    /// RandAll the seed must equal the state obtained by calling next_rand 32
+    /// times on the initial seed (16 note calls + 16 velocity calls).
+    #[test]
+    fn rand_all_seed_chain_order_notes_then_velocities() {
+        let mut state = SequencerState::default();
+        let mut expected_seed = state.rng_seed;
+
+        // Advance expected_seed by 32 steps (matches generate_random_sequence + randomise_velocities)
+        for _ in 0..32 {
+            next_rand(&mut expected_seed);
+        }
+
+        state.apply_command(InputCommand::RandAll);
+
+        assert_eq!(
+            state.rng_seed, expected_seed,
+            "After RandAll, rng_seed must equal seed advanced by exactly 32 next_rand calls"
+        );
+    }
+
+    /// Velocity range boundary check: formula (raw % 88) as u8 + 40 must always
+    /// produce a value in 40..=127. This is an arithmetic property; verify it
+    /// holds across the extremes of the modulus: 0 and 87.
+    #[test]
+    fn velocity_formula_bounds_are_40_to_127() {
+        // min: 0 % 88 = 0  → 0 + 40 = 40
+        let min_vel = (0u64 % 88) as u8 + 40;
+        // max: 87 % 88 = 87 → 87 + 40 = 127
+        let max_vel = (87u64 % 88) as u8 + 40;
+        assert_eq!(min_vel, 40, "velocity formula minimum must be 40");
+        assert_eq!(max_vel, 127, "velocity formula maximum must be 127");
+        assert!((40..=127).contains(&min_vel));
+        assert!((40..=127).contains(&max_vel));
+    }
+
+    /// NoteSet with step = usize::MAX must be a no-op (no panic).
+    #[test]
+    fn note_set_usize_max_is_noop() {
+        let mut state = SequencerState::default();
+        let original: [StepData; 16] = state.steps;
+
+        state.apply_command(InputCommand::NoteSet {
+            step: usize::MAX,
+            midi_note: 60,
+            velocity: 80,
+        });
+
+        for i in 0..16 {
+            assert_eq!(
+                state.steps[i].midi_note, original[i].midi_note,
+                "NoteSet(step=usize::MAX) must not modify step {i} midi_note"
+            );
+            assert_eq!(
+                state.steps[i].velocity, original[i].velocity,
+                "NoteSet(step=usize::MAX) must not modify step {i} velocity"
+            );
+        }
+    }
+
+    /// NoteSet at step 0 and step 15 (boundary steps) must write correctly.
+    #[test]
+    fn note_set_boundary_steps_0_and_15() {
+        let mut state = SequencerState::default();
+
+        state.apply_command(InputCommand::NoteSet { step: 0, midi_note: 48, velocity: 40 });
+        assert_eq!(state.steps[0].midi_note, 48, "NoteSet step 0 must set midi_note");
+        assert_eq!(state.steps[0].velocity, 40, "NoteSet step 0 must set velocity");
+
+        state.apply_command(InputCommand::NoteSet { step: 15, midi_note: 84, velocity: 127 });
+        assert_eq!(state.steps[15].midi_note, 84, "NoteSet step 15 must set midi_note");
+        assert_eq!(state.steps[15].velocity, 127, "NoteSet step 15 must set velocity");
+    }
 }
