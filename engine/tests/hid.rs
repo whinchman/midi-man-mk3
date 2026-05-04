@@ -1,5 +1,5 @@
-use engine::hid::{compute_led_bytes, translate_in_report, InReport, OutReport, HID_VID, HID_PID};
-use engine::input::{InputCommand, OverlayMode};
+use engine::hid::{compute_led_bytes, translate_in_report, InReport, OutReport, HID_PID, HID_VID};
+use engine::input::InputCommand;
 
 /// Build a raw 64-byte buffer with distinct non-zero values in every field
 /// so that a round-trip test can verify no field is silently aliased or
@@ -15,13 +15,13 @@ fn synthetic_in_buf() -> [u8; 64] {
     buf[6] = 0b0000_1111; // step_enable_state high
     buf[7] = 0xCC; // param_buttons low
     buf[8] = 0x0D; // param_buttons high nibble
-    // encoder_deltas: bytes 9-24, use distinct signed values
+                   // encoder_deltas: bytes 9-24, use distinct signed values
     for i in 0..16usize {
         buf[9 + i] = (i as i8).wrapping_add(1).wrapping_mul(-1) as u8;
     }
     buf[25] = 0xF2_u8; // tempo_delta = -14 as i8
     buf[26] = 0x05; // param_knob_delta = +5
-    // reserved: bytes 27-63, fill with a pattern
+                    // reserved: bytes 27-63, fill with a pattern
     for i in 0..37usize {
         buf[27 + i] = (i as u8).wrapping_add(0x10);
     }
@@ -43,7 +43,10 @@ fn in_report_round_trip_nonzero() {
     // Verify all encoder deltas were decoded correctly.
     for i in 0..16usize {
         let expected = (i as i8).wrapping_add(1).wrapping_mul(-1);
-        assert_eq!(report.encoder_deltas[i], expected, "encoder_deltas[{i}] mismatch");
+        assert_eq!(
+            report.encoder_deltas[i], expected,
+            "encoder_deltas[{i}] mismatch"
+        );
     }
 
     assert_eq!(report.tempo_delta, 0xF2_u8 as i8); // -14
@@ -51,7 +54,11 @@ fn in_report_round_trip_nonzero() {
 
     // Verify reserved bytes survived intact.
     for i in 0..37usize {
-        assert_eq!(report.reserved[i], (i as u8).wrapping_add(0x10), "reserved[{i}] mismatch");
+        assert_eq!(
+            report.reserved[i],
+            (i as u8).wrapping_add(0x10),
+            "reserved[{i}] mismatch"
+        );
     }
 }
 
@@ -120,14 +127,20 @@ fn hid_vid_pid_constants() {
 
 #[test]
 fn in_report_size_is_64_bytes() {
-    assert_eq!(std::mem::size_of::<InReport>(), 64,
-        "InReport must be exactly 64 bytes to match the HID wire format");
+    assert_eq!(
+        std::mem::size_of::<InReport>(),
+        64,
+        "InReport must be exactly 64 bytes to match the HID wire format"
+    );
 }
 
 #[test]
 fn out_report_size_is_64_bytes() {
-    assert_eq!(std::mem::size_of::<OutReport>(), 64,
-        "OutReport must be exactly 64 bytes to match the HID wire format");
+    assert_eq!(
+        std::mem::size_of::<OutReport>(),
+        64,
+        "OutReport must be exactly 64 bytes to match the HID wire format"
+    );
 }
 
 // -----------------------------------------------------------------------
@@ -136,16 +149,56 @@ fn out_report_size_is_64_bytes() {
 
 #[test]
 fn in_report_field_offsets_match_wire_spec() {
-    assert_eq!(std::mem::offset_of!(InReport, report_id), 0, "report_id must be at byte 0");
-    assert_eq!(std::mem::offset_of!(InReport, seq), 1, "seq must be at byte 1");
-    assert_eq!(std::mem::offset_of!(InReport, flags), 2, "flags must be at byte 2");
-    assert_eq!(std::mem::offset_of!(InReport, step_buttons), 3, "step_buttons must start at byte 3");
-    assert_eq!(std::mem::offset_of!(InReport, step_enable_state), 5, "step_enable_state must start at byte 5");
-    assert_eq!(std::mem::offset_of!(InReport, param_buttons), 7, "param_buttons must start at byte 7");
-    assert_eq!(std::mem::offset_of!(InReport, encoder_deltas), 9, "encoder_deltas must start at byte 9");
-    assert_eq!(std::mem::offset_of!(InReport, tempo_delta), 25, "tempo_delta must be at byte 25");
-    assert_eq!(std::mem::offset_of!(InReport, param_knob_delta), 26, "param_knob_delta must be at byte 26");
-    assert_eq!(std::mem::offset_of!(InReport, reserved), 27, "reserved must start at byte 27");
+    assert_eq!(
+        std::mem::offset_of!(InReport, report_id),
+        0,
+        "report_id must be at byte 0"
+    );
+    assert_eq!(
+        std::mem::offset_of!(InReport, seq),
+        1,
+        "seq must be at byte 1"
+    );
+    assert_eq!(
+        std::mem::offset_of!(InReport, flags),
+        2,
+        "flags must be at byte 2"
+    );
+    assert_eq!(
+        std::mem::offset_of!(InReport, step_buttons),
+        3,
+        "step_buttons must start at byte 3"
+    );
+    assert_eq!(
+        std::mem::offset_of!(InReport, step_enable_state),
+        5,
+        "step_enable_state must start at byte 5"
+    );
+    assert_eq!(
+        std::mem::offset_of!(InReport, param_buttons),
+        7,
+        "param_buttons must start at byte 7"
+    );
+    assert_eq!(
+        std::mem::offset_of!(InReport, encoder_deltas),
+        9,
+        "encoder_deltas must start at byte 9"
+    );
+    assert_eq!(
+        std::mem::offset_of!(InReport, tempo_delta),
+        25,
+        "tempo_delta must be at byte 25"
+    );
+    assert_eq!(
+        std::mem::offset_of!(InReport, param_knob_delta),
+        26,
+        "param_knob_delta must be at byte 26"
+    );
+    assert_eq!(
+        std::mem::offset_of!(InReport, reserved),
+        27,
+        "reserved must start at byte 27"
+    );
 }
 
 #[test]
@@ -174,17 +227,17 @@ fn out_report_field_offsets_match_wire_spec() {
 #[test]
 fn from_bytes_boundary_u8_max_in_all_u8_fields() {
     let mut buf = [0u8; 64];
-    buf[0] = u8::MAX;   // report_id
-    buf[1] = u8::MAX;   // seq
-    buf[2] = u8::MAX;   // flags
-    buf[3] = u8::MAX;   // step_buttons[0]
-    buf[4] = u8::MAX;   // step_buttons[1]
-    buf[5] = u8::MAX;   // step_enable_state[0]
-    buf[6] = u8::MAX;   // step_enable_state[1]
-    buf[7] = u8::MAX;   // param_buttons[0]
-    buf[8] = u8::MAX;   // param_buttons[1]
-    // leave encoder_deltas as 0
-    // leave tempo_delta/param_knob_delta as 0
+    buf[0] = u8::MAX; // report_id
+    buf[1] = u8::MAX; // seq
+    buf[2] = u8::MAX; // flags
+    buf[3] = u8::MAX; // step_buttons[0]
+    buf[4] = u8::MAX; // step_buttons[1]
+    buf[5] = u8::MAX; // step_enable_state[0]
+    buf[6] = u8::MAX; // step_enable_state[1]
+    buf[7] = u8::MAX; // param_buttons[0]
+    buf[8] = u8::MAX; // param_buttons[1]
+                      // leave encoder_deltas as 0
+                      // leave tempo_delta/param_knob_delta as 0
     for i in 27..64usize {
         buf[i] = u8::MAX; // reserved
     }
@@ -214,13 +267,22 @@ fn from_bytes_i8_min_sign_extends_correctly() {
 
     let r = InReport::from_bytes(&buf);
     for i in 0..16usize {
-        assert_eq!(r.encoder_deltas[i], i8::MIN,
-            "encoder_deltas[{i}] should be i8::MIN (-128) when byte is 0x80");
+        assert_eq!(
+            r.encoder_deltas[i],
+            i8::MIN,
+            "encoder_deltas[{i}] should be i8::MIN (-128) when byte is 0x80"
+        );
     }
-    assert_eq!(r.tempo_delta, i8::MIN,
-        "tempo_delta should be i8::MIN (-128) when byte is 0x80");
-    assert_eq!(r.param_knob_delta, i8::MIN,
-        "param_knob_delta should be i8::MIN (-128) when byte is 0x80");
+    assert_eq!(
+        r.tempo_delta,
+        i8::MIN,
+        "tempo_delta should be i8::MIN (-128) when byte is 0x80"
+    );
+    assert_eq!(
+        r.param_knob_delta,
+        i8::MIN,
+        "param_knob_delta should be i8::MIN (-128) when byte is 0x80"
+    );
 }
 
 #[test]
@@ -235,13 +297,22 @@ fn from_bytes_i8_max_sign_extends_correctly() {
 
     let r = InReport::from_bytes(&buf);
     for i in 0..16usize {
-        assert_eq!(r.encoder_deltas[i], i8::MAX,
-            "encoder_deltas[{i}] should be i8::MAX (127) when byte is 0x7F");
+        assert_eq!(
+            r.encoder_deltas[i],
+            i8::MAX,
+            "encoder_deltas[{i}] should be i8::MAX (127) when byte is 0x7F"
+        );
     }
-    assert_eq!(r.tempo_delta, i8::MAX,
-        "tempo_delta should be i8::MAX (127) when byte is 0x7F");
-    assert_eq!(r.param_knob_delta, i8::MAX,
-        "param_knob_delta should be i8::MAX (127) when byte is 0x7F");
+    assert_eq!(
+        r.tempo_delta,
+        i8::MAX,
+        "tempo_delta should be i8::MAX (127) when byte is 0x7F"
+    );
+    assert_eq!(
+        r.param_knob_delta,
+        i8::MAX,
+        "param_knob_delta should be i8::MAX (127) when byte is 0x7F"
+    );
 }
 
 #[test]
@@ -262,11 +333,19 @@ fn from_bytes_each_encoder_delta_index_independently() {
         let r = InReport::from_bytes(&buf);
         for j in 0..16usize {
             if j == idx {
-                assert_eq!(r.encoder_deltas[j], i8::MIN,
-                    "encoder_deltas[{j}] should be i8::MIN when buf[{}]=0x80", 9 + idx);
+                assert_eq!(
+                    r.encoder_deltas[j],
+                    i8::MIN,
+                    "encoder_deltas[{j}] should be i8::MIN when buf[{}]=0x80",
+                    9 + idx
+                );
             } else {
-                assert_eq!(r.encoder_deltas[j], 0i8,
-                    "encoder_deltas[{j}] should be 0 when only buf[{}] is set", 9 + idx);
+                assert_eq!(
+                    r.encoder_deltas[j],
+                    0i8,
+                    "encoder_deltas[{j}] should be 0 when only buf[{}] is set",
+                    9 + idx
+                );
             }
         }
     }
@@ -285,11 +364,20 @@ fn out_report_to_bytes_all_led_bits_set() {
         reserved: [0u8; 60],
     };
     let buf = report.to_bytes();
-    assert_eq!(buf[2], 0xFF, "led_state[0] all-ones must encode to 0xFF at byte 2");
-    assert_eq!(buf[3], 0xFF, "led_state[1] all-ones must encode to 0xFF at byte 3");
+    assert_eq!(
+        buf[2], 0xFF,
+        "led_state[0] all-ones must encode to 0xFF at byte 2"
+    );
+    assert_eq!(
+        buf[3], 0xFF,
+        "led_state[1] all-ones must encode to 0xFF at byte 3"
+    );
     // Verify reserved tail is untouched.
     for i in 4..64usize {
-        assert_eq!(buf[i], 0x00, "reserved byte {i} must be 0 when led bits are all set");
+        assert_eq!(
+            buf[i], 0x00,
+            "reserved byte {i} must be 0 when led bits are all set"
+        );
     }
 }
 
@@ -302,8 +390,14 @@ fn out_report_to_bytes_no_led_bits_set() {
         reserved: [0u8; 60],
     };
     let buf = report.to_bytes();
-    assert_eq!(buf[2], 0x00, "led_state[0] all-zeros must encode to 0x00 at byte 2");
-    assert_eq!(buf[3], 0x00, "led_state[1] all-zeros must encode to 0x00 at byte 3");
+    assert_eq!(
+        buf[2], 0x00,
+        "led_state[0] all-zeros must encode to 0x00 at byte 2"
+    );
+    assert_eq!(
+        buf[3], 0x00,
+        "led_state[1] all-zeros must encode to 0x00 at byte 3"
+    );
 }
 
 #[test]
@@ -316,8 +410,14 @@ fn out_report_to_bytes_alternating_led_bits() {
         reserved: [0u8; 60],
     };
     let buf = report.to_bytes();
-    assert_eq!(buf[2], 0b1010_1010, "led_state[0] alternating pattern must be preserved");
-    assert_eq!(buf[3], 0b0101_0101, "led_state[1] alternating pattern must be preserved");
+    assert_eq!(
+        buf[2], 0b1010_1010,
+        "led_state[0] alternating pattern must be preserved"
+    );
+    assert_eq!(
+        buf[3], 0b0101_0101,
+        "led_state[1] alternating pattern must be preserved"
+    );
 }
 
 // -----------------------------------------------------------------------
@@ -334,7 +434,7 @@ fn translate_encoder_delta_step0_emits_step_select_and_note_delta() {
     let mut buf = [0u8; 64];
     buf[9] = 3i8 as u8; // encoder_deltas[0] = +3
     let report = InReport::from_bytes(&buf);
-    let cmds = translate_in_report(&report, None);
+    let cmds = translate_in_report(&report);
 
     // Should see StepSelect(0) then NoteDelta(3).
     let mut iter = cmds.iter();
@@ -347,7 +447,7 @@ fn translate_encoder_delta_negative_emits_correct_delta() {
     let mut buf = [0u8; 64];
     buf[9 + 5] = (-2i8) as u8; // encoder_deltas[5] = -2
     let report = InReport::from_bytes(&buf);
-    let cmds = translate_in_report(&report, None);
+    let cmds = translate_in_report(&report);
 
     assert!(matches!(cmds[0], InputCommand::StepSelect(5)));
     assert!(matches!(cmds[1], InputCommand::NoteDelta(-2)));
@@ -356,9 +456,12 @@ fn translate_encoder_delta_negative_emits_correct_delta() {
 #[test]
 fn translate_zero_encoder_deltas_produces_no_encoder_commands() {
     let report = zero_report();
-    let cmds = translate_in_report(&report, None);
+    let cmds = translate_in_report(&report);
     // With all-zero input, no commands should be produced.
-    assert!(cmds.is_empty(), "expected no commands for zeroed report, got {cmds:?}");
+    assert!(
+        cmds.is_empty(),
+        "expected no commands for zeroed report, got {cmds:?}"
+    );
 }
 
 #[test]
@@ -366,7 +469,7 @@ fn translate_step_button_bit3_emits_step_select_and_toggle() {
     let mut buf = [0u8; 64];
     buf[3] = 0b0000_1000; // step_buttons low: bit 3 set → step 3
     let report = InReport::from_bytes(&buf);
-    let cmds = translate_in_report(&report, None);
+    let cmds = translate_in_report(&report);
 
     assert_eq!(cmds.len(), 2, "expected StepSelect + ToggleStep");
     assert!(matches!(cmds[0], InputCommand::StepSelect(3)));
@@ -379,7 +482,7 @@ fn translate_step_button_high_byte_bit_emits_correct_step_index() {
     let mut buf = [0u8; 64];
     buf[4] = 0b0000_0010; // bit 9 overall
     let report = InReport::from_bytes(&buf);
-    let cmds = translate_in_report(&report, None);
+    let cmds = translate_in_report(&report);
 
     assert_eq!(cmds.len(), 2);
     assert!(matches!(cmds[0], InputCommand::StepSelect(9)));
@@ -387,26 +490,26 @@ fn translate_step_button_high_byte_bit_emits_correct_step_index() {
 }
 
 #[test]
-fn translate_param_button_bit0_opens_overlay_and_selects_param0() {
+fn translate_param_button_bit0_selects_panel_param0() {
+    // Hardware overlay open is dropped; bit 0 now emits only PanelParamSelect(0).
     let mut buf = [0u8; 64];
     buf[7] = 0b0000_0001; // param_buttons[0] bit 0 = Key
     let report = InReport::from_bytes(&buf);
-    let cmds = translate_in_report(&report, None);
+    let cmds = translate_in_report(&report);
 
-    assert_eq!(cmds.len(), 2);
-    assert!(matches!(cmds[0], InputCommand::OpenOverlay(OverlayMode::Regular)));
-    assert!(matches!(cmds[1], InputCommand::ParamSelect(0)));
+    assert_eq!(cmds.len(), 1, "expected only PanelParamSelect(0), got {cmds:?}");
+    assert!(matches!(cmds[0], InputCommand::PanelParamSelect(0)));
 }
 
 #[test]
-fn translate_param_button_bit1_selects_param1() {
+fn translate_param_button_bit1_selects_panel_param1() {
     let mut buf = [0u8; 64];
     buf[7] = 0b0000_0010; // bit 1 = Mode
     let report = InReport::from_bytes(&buf);
-    let cmds = translate_in_report(&report, None);
+    let cmds = translate_in_report(&report);
 
     assert_eq!(cmds.len(), 1);
-    assert!(matches!(cmds[0], InputCommand::ParamSelect(1)));
+    assert!(matches!(cmds[0], InputCommand::PanelParamSelect(1)));
 }
 
 #[test]
@@ -415,11 +518,11 @@ fn translate_param_button_bit8_emits_loop_param_cycle() {
     let mut buf = [0u8; 64];
     buf[8] = 0b0000_0001; // param_buttons high byte bit 0 = overall bit 8
     let report = InReport::from_bytes(&buf);
-    let cmds = translate_in_report(&report, None);
+    let cmds = translate_in_report(&report);
 
     assert_eq!(cmds.len(), 2);
-    assert!(matches!(cmds[0], InputCommand::ParamSelect(4)));
-    assert!(matches!(cmds[1], InputCommand::ParamValueDelta(1)));
+    assert!(matches!(cmds[0], InputCommand::PanelParamSelect(4)));
+    assert!(matches!(cmds[1], InputCommand::PanelParamDelta(1)));
 }
 
 #[test]
@@ -428,11 +531,11 @@ fn translate_param_button_bit10_emits_pause_param_cycle() {
     let mut buf = [0u8; 64];
     buf[8] = 0b0000_0100;
     let report = InReport::from_bytes(&buf);
-    let cmds = translate_in_report(&report, None);
+    let cmds = translate_in_report(&report);
 
     assert_eq!(cmds.len(), 2);
-    assert!(matches!(cmds[0], InputCommand::ParamSelect(5)));
-    assert!(matches!(cmds[1], InputCommand::ParamValueDelta(1)));
+    assert!(matches!(cmds[0], InputCommand::PanelParamSelect(5)));
+    assert!(matches!(cmds[1], InputCommand::PanelParamDelta(1)));
 }
 
 #[test]
@@ -441,39 +544,42 @@ fn translate_param_button_bit11_emits_no_input_command() {
     let mut buf = [0u8; 64];
     buf[8] = 0b0000_1000;
     let report = InReport::from_bytes(&buf);
-    let cmds = translate_in_report(&report, None);
+    let cmds = translate_in_report(&report);
     // bit11 alone should produce no InputCommand entries.
-    assert!(cmds.is_empty(), "stop/start should not emit InputCommand, got {cmds:?}");
+    assert!(
+        cmds.is_empty(),
+        "stop/start should not emit InputCommand, got {cmds:?}"
+    );
 }
 
 #[test]
-fn translate_param_knob_delta_emits_param_value_delta() {
+fn translate_param_knob_delta_emits_panel_param_delta() {
     let mut buf = [0u8; 64];
     buf[26] = 7i8 as u8; // param_knob_delta = +7
     let report = InReport::from_bytes(&buf);
-    let cmds = translate_in_report(&report, None);
+    let cmds = translate_in_report(&report);
 
     assert_eq!(cmds.len(), 1);
-    assert!(matches!(cmds[0], InputCommand::ParamValueDelta(7)));
+    assert!(matches!(cmds[0], InputCommand::PanelParamDelta(7)));
 }
 
 #[test]
 fn translate_synthetic_full_report_encoder_step_param() {
     // Encoder delta on step 0, step button 3 press, param button 1 press.
     let mut buf = [0u8; 64];
-    buf[9] = 1i8 as u8;    // encoder_deltas[0] = +1
-    buf[3] = 0b0000_1000;  // step_buttons bit 3 = step 3
-    buf[7] = 0b0000_0010;  // param_buttons bit 1 = Mode
+    buf[9] = 1i8 as u8; // encoder_deltas[0] = +1
+    buf[3] = 0b0000_1000; // step_buttons bit 3 = step 3
+    buf[7] = 0b0000_0010; // param_buttons bit 1 = Mode
     let report = InReport::from_bytes(&buf);
-    let cmds = translate_in_report(&report, None);
+    let cmds = translate_in_report(&report);
 
-    // Expected: StepSelect(0), NoteDelta(1), StepSelect(3), ToggleStep, ParamSelect(1).
+    // Expected: StepSelect(0), NoteDelta(1), StepSelect(3), ToggleStep, PanelParamSelect(1).
     assert_eq!(cmds.len(), 5, "expected 5 commands, got {cmds:?}");
     assert!(matches!(cmds[0], InputCommand::StepSelect(0)));
     assert!(matches!(cmds[1], InputCommand::NoteDelta(1)));
     assert!(matches!(cmds[2], InputCommand::StepSelect(3)));
     assert!(matches!(cmds[3], InputCommand::ToggleStep));
-    assert!(matches!(cmds[4], InputCommand::ParamSelect(1)));
+    assert!(matches!(cmds[4], InputCommand::PanelParamSelect(1)));
 }
 
 #[test]
@@ -481,21 +587,43 @@ fn translate_multiple_simultaneous_encoder_deltas_all_produce_commands() {
     // Encoders 0, 7, and 15 all have non-zero deltas simultaneously.
     // Each must produce a StepSelect + NoteDelta pair in index order.
     let mut buf = [0u8; 64];
-    buf[9 + 0]  = 5i8 as u8;   // encoder_deltas[0]  = +5
-    buf[9 + 7]  = (-3i8) as u8; // encoder_deltas[7]  = -3
-    buf[9 + 15] = 1i8 as u8;   // encoder_deltas[15] = +1
+    buf[9 + 0] = 5i8 as u8; // encoder_deltas[0]  = +5
+    buf[9 + 7] = (-3i8) as u8; // encoder_deltas[7]  = -3
+    buf[9 + 15] = 1i8 as u8; // encoder_deltas[15] = +1
     let report = InReport::from_bytes(&buf);
-    let cmds = translate_in_report(&report, None);
+    let cmds = translate_in_report(&report);
 
     // Expect exactly 6 commands: (StepSelect(0), NoteDelta(5)),
     // (StepSelect(7), NoteDelta(-3)), (StepSelect(15), NoteDelta(1)).
-    assert_eq!(cmds.len(), 6, "expected 6 commands for 3 encoder deltas, got {cmds:?}");
-    assert!(matches!(cmds[0], InputCommand::StepSelect(0)),  "cmds[0] should be StepSelect(0)");
-    assert!(matches!(cmds[1], InputCommand::NoteDelta(5)),   "cmds[1] should be NoteDelta(5)");
-    assert!(matches!(cmds[2], InputCommand::StepSelect(7)),  "cmds[2] should be StepSelect(7)");
-    assert!(matches!(cmds[3], InputCommand::NoteDelta(-3)),  "cmds[3] should be NoteDelta(-3)");
-    assert!(matches!(cmds[4], InputCommand::StepSelect(15)), "cmds[4] should be StepSelect(15)");
-    assert!(matches!(cmds[5], InputCommand::NoteDelta(1)),   "cmds[5] should be NoteDelta(1)");
+    assert_eq!(
+        cmds.len(),
+        6,
+        "expected 6 commands for 3 encoder deltas, got {cmds:?}"
+    );
+    assert!(
+        matches!(cmds[0], InputCommand::StepSelect(0)),
+        "cmds[0] should be StepSelect(0)"
+    );
+    assert!(
+        matches!(cmds[1], InputCommand::NoteDelta(5)),
+        "cmds[1] should be NoteDelta(5)"
+    );
+    assert!(
+        matches!(cmds[2], InputCommand::StepSelect(7)),
+        "cmds[2] should be StepSelect(7)"
+    );
+    assert!(
+        matches!(cmds[3], InputCommand::NoteDelta(-3)),
+        "cmds[3] should be NoteDelta(-3)"
+    );
+    assert!(
+        matches!(cmds[4], InputCommand::StepSelect(15)),
+        "cmds[4] should be StepSelect(15)"
+    );
+    assert!(
+        matches!(cmds[5], InputCommand::NoteDelta(1)),
+        "cmds[5] should be NoteDelta(1)"
+    );
 }
 
 // -----------------------------------------------------------------------
@@ -573,8 +701,11 @@ fn compute_led_bytes_only_step7_sets_lo_bit7() {
 fn translate_all_zero_report_emits_no_commands() {
     // An InReport where every field is zero must produce an empty command list.
     let report = InReport::from_bytes(&[0u8; 64]);
-    let cmds = translate_in_report(&report, None);
-    assert!(cmds.is_empty(), "all-zero InReport must emit no InputCommands, got {cmds:?}");
+    let cmds = translate_in_report(&report);
+    assert!(
+        cmds.is_empty(),
+        "all-zero InReport must emit no InputCommands, got {cmds:?}"
+    );
 }
 
 #[test]
@@ -585,17 +716,25 @@ fn translate_all_16_step_buttons_set_emits_32_commands() {
     buf[3] = 0xFF; // step_buttons low byte: steps 0–7
     buf[4] = 0xFF; // step_buttons high byte: steps 8–15
     let report = InReport::from_bytes(&buf);
-    let cmds = translate_in_report(&report, None);
+    let cmds = translate_in_report(&report);
 
-    assert_eq!(cmds.len(), 32, "expected 32 commands (16 × StepSelect+ToggleStep), got {cmds:?}");
+    assert_eq!(
+        cmds.len(),
+        32,
+        "expected 32 commands (16 × StepSelect+ToggleStep), got {cmds:?}"
+    );
     for i in 0..16usize {
         assert!(
             matches!(cmds[i * 2], InputCommand::StepSelect(s) if s == i),
-            "cmds[{}] should be StepSelect({i}), got {:?}", i * 2, cmds[i * 2]
+            "cmds[{}] should be StepSelect({i}), got {:?}",
+            i * 2,
+            cmds[i * 2]
         );
         assert!(
             matches!(cmds[i * 2 + 1], InputCommand::ToggleStep),
-            "cmds[{}] should be ToggleStep, got {:?}", i * 2 + 1, cmds[i * 2 + 1]
+            "cmds[{}] should be ToggleStep, got {:?}",
+            i * 2 + 1,
+            cmds[i * 2 + 1]
         );
     }
 }
@@ -606,36 +745,54 @@ fn translate_param_buttons_bits_0_1_2_3_all_set_emits_correct_commands() {
     let mut buf = [0u8; 64];
     buf[7] = 0b0000_1111; // bits 0, 1, 2, 3 set
     let report = InReport::from_bytes(&buf);
-    let cmds = translate_in_report(&report, None);
+    let cmds = translate_in_report(&report);
 
-    // Expected order: OpenOverlay(Regular), ParamSelect(0), ParamSelect(1),
-    // ParamSelect(2), ParamSelect(3) — 5 total.
-    assert_eq!(cmds.len(), 5, "expected 5 commands for bits 0–3, got {cmds:?}");
-    assert!(matches!(cmds[0], InputCommand::OpenOverlay(OverlayMode::Regular)),
-        "cmds[0] should be OpenOverlay(Regular)");
-    assert!(matches!(cmds[1], InputCommand::ParamSelect(0)),
-        "cmds[1] should be ParamSelect(0)");
-    assert!(matches!(cmds[2], InputCommand::ParamSelect(1)),
-        "cmds[2] should be ParamSelect(1)");
-    assert!(matches!(cmds[3], InputCommand::ParamSelect(2)),
-        "cmds[3] should be ParamSelect(2)");
-    assert!(matches!(cmds[4], InputCommand::ParamSelect(3)),
-        "cmds[4] should be ParamSelect(3)");
+    // Expected order: PanelParamSelect(0), PanelParamSelect(1),
+    // PanelParamSelect(2), PanelParamSelect(3) — 4 total.
+    // Hardware overlay open/close is dropped in this refactor.
+    assert_eq!(
+        cmds.len(),
+        4,
+        "expected 4 commands for bits 0–3, got {cmds:?}"
+    );
+    assert!(
+        matches!(cmds[0], InputCommand::PanelParamSelect(0)),
+        "cmds[0] should be PanelParamSelect(0)"
+    );
+    assert!(
+        matches!(cmds[1], InputCommand::PanelParamSelect(1)),
+        "cmds[1] should be PanelParamSelect(1)"
+    );
+    assert!(
+        matches!(cmds[2], InputCommand::PanelParamSelect(2)),
+        "cmds[2] should be PanelParamSelect(2)"
+    );
+    assert!(
+        matches!(cmds[3], InputCommand::PanelParamSelect(3)),
+        "cmds[3] should be PanelParamSelect(3)"
+    );
 }
 
 #[test]
-fn translate_encoder_delta_with_active_overlay_emits_note_delta_not_param_value_delta() {
-    // Documents current behaviour: overlay-aware routing is deferred.
+fn translate_encoder_delta_emits_note_delta() {
+    // Encoder deltas always produce StepSelect + NoteDelta regardless of context.
+    // Panel-focus-aware routing is handled by the UI layer, not the HID thread.
     let mut buf = [0u8; 64];
     buf[9 + 3] = 2i8 as u8; // encoder_deltas[3] = +2
     let report = InReport::from_bytes(&buf);
-    let cmds = translate_in_report(&report, Some(OverlayMode::Regular));
+    let cmds = translate_in_report(&report);
 
     assert_eq!(cmds.len(), 2, "expected exactly 2 commands, got {cmds:?}");
-    assert!(matches!(cmds[0], InputCommand::StepSelect(3)),
-        "cmds[0] should be StepSelect(3) regardless of overlay; got {:?}", cmds[0]);
-    assert!(matches!(cmds[1], InputCommand::NoteDelta(2)),
-        "cmds[1] should be NoteDelta(2) — overlay-aware routing is deferred; got {:?}", cmds[1]);
+    assert!(
+        matches!(cmds[0], InputCommand::StepSelect(3)),
+        "cmds[0] should be StepSelect(3); got {:?}",
+        cmds[0]
+    );
+    assert!(
+        matches!(cmds[1], InputCommand::NoteDelta(2)),
+        "cmds[1] should be NoteDelta(2); got {:?}",
+        cmds[1]
+    );
 }
 
 // -----------------------------------------------------------------------
@@ -652,6 +809,136 @@ fn translate_encoder_delta_with_active_overlay_emits_note_delta_not_param_value_
 #[test]
 fn hid_vid_pid_constants_still_exported_after_open_device_removal() {
     // HID_VID and HID_PID must remain accessible — they are used by run_hid callers.
-    assert_eq!(HID_VID, 0x2E8A, "HID_VID must still be 0x2E8A after open_device removal");
-    assert_eq!(HID_PID, 0x000A, "HID_PID must still be 0x000A after open_device removal");
+    assert_eq!(
+        HID_VID, 0x2E8A,
+        "HID_VID must still be 0x2E8A after open_device removal"
+    );
+    assert_eq!(
+        HID_PID, 0x000A,
+        "HID_PID must still be 0x000A after open_device removal"
+    );
+}
+
+// -----------------------------------------------------------------------
+// translate_in_report — coverage gaps from Task 3.2 QA review.
+// -----------------------------------------------------------------------
+
+/// Negative param_knob_delta must produce PanelParamDelta with the correct
+/// signed value. The existing positive-knob test only exercises the positive
+/// branch; this confirms the i8 sign is preserved end-to-end.
+#[test]
+fn translate_param_knob_delta_negative_emits_correct_signed_delta() {
+    let mut buf = [0u8; 64];
+    buf[26] = (-5i8) as u8; // param_knob_delta = -5
+    let report = InReport::from_bytes(&buf);
+    let cmds = translate_in_report(&report);
+
+    assert_eq!(
+        cmds.len(),
+        1,
+        "expected exactly 1 command for param_knob_delta=-5, got {cmds:?}"
+    );
+    assert!(
+        matches!(cmds[0], InputCommand::PanelParamDelta(-5)),
+        "cmds[0] should be PanelParamDelta(-5); got {:?}",
+        cmds[0]
+    );
+}
+
+/// Regression guard: no command produced by translate_in_report must be one
+/// of the old overlay variants (OpenOverlay, CloseOverlay, ParamSelect,
+/// ParamSelectDelta, ParamValueDelta). These variants still exist in the enum
+/// (used by the keyboard path) so a future edit could accidentally reintroduce
+/// them on the HID path. Exercise a report with all param-button bits that
+/// previously sent overlay commands (bits 0–3, bit 8, bit 10) and assert the
+/// output contains only PanelParamSelect / PanelParamDelta.
+#[test]
+fn translate_no_command_is_old_overlay_variant() {
+    let mut buf = [0u8; 64];
+    // Bits 0–3 (PanelParamSelect 0–3), bit 8 (loop cycle), bit 10 (pause).
+    buf[7] = 0b0000_1111; // param_buttons[0]: bits 0–3
+    buf[8] = 0b0000_0101; // param_buttons[1]: bit 0 (overall bit 8) + bit 2 (bit 10)
+    let report = InReport::from_bytes(&buf);
+    let cmds = translate_in_report(&report);
+
+    // 4 × PanelParamSelect(0..=3) + 2 × (PanelParamSelect + PanelParamDelta) = 8 total.
+    assert_eq!(
+        cmds.len(),
+        8,
+        "expected 8 commands for bits 0-3 + bit8 + bit10, got {cmds:?}"
+    );
+
+    for (i, cmd) in cmds.iter().enumerate() {
+        let is_old_overlay = matches!(
+            cmd,
+            InputCommand::OpenOverlay(_)
+                | InputCommand::CloseOverlay
+                | InputCommand::ParamSelect(_)
+                | InputCommand::ParamSelectDelta(_)
+                | InputCommand::ParamValueDelta(_)
+        );
+        assert!(
+            !is_old_overlay,
+            "cmds[{i}] is a deprecated overlay variant that must not appear in HID output: {cmd:?}"
+        );
+    }
+}
+
+/// Full mixed report: all four HID input types active simultaneously.
+/// Encoder 0 has a positive delta, step button 2 is pressed, param button 1
+/// (Mode) is pressed, and param_knob_delta is negative. The expected command
+/// sequence covers all categories in emission order (encoders → steps → param
+/// buttons → param knob).
+#[test]
+fn translate_full_mixed_report_all_input_types() {
+    let mut buf = [0u8; 64];
+    buf[9] = 1i8 as u8;       // encoder_deltas[0] = +1
+    buf[3] = 0b0000_0100;     // step_buttons low: bit 2 → step 2
+    buf[7] = 0b0000_0010;     // param_buttons[0]: bit 1 → PanelParamSelect(1)
+    buf[26] = (-3i8) as u8;   // param_knob_delta = -3
+    let report = InReport::from_bytes(&buf);
+    let cmds = translate_in_report(&report);
+
+    // Expected sequence (emission order):
+    //   0: StepSelect(0)      — encoder 0 focus
+    //   1: NoteDelta(1)       — encoder 0 delta
+    //   2: StepSelect(2)      — step button 2 press
+    //   3: ToggleStep         — step button 2 press
+    //   4: PanelParamSelect(1)— param button bit 1
+    //   5: PanelParamDelta(-3)— param knob
+    assert_eq!(
+        cmds.len(),
+        6,
+        "expected 6 commands for mixed report, got {cmds:?}"
+    );
+    assert!(
+        matches!(cmds[0], InputCommand::StepSelect(0)),
+        "cmds[0] should be StepSelect(0); got {:?}",
+        cmds[0]
+    );
+    assert!(
+        matches!(cmds[1], InputCommand::NoteDelta(1)),
+        "cmds[1] should be NoteDelta(1); got {:?}",
+        cmds[1]
+    );
+    assert!(
+        matches!(cmds[2], InputCommand::StepSelect(2)),
+        "cmds[2] should be StepSelect(2); got {:?}",
+        cmds[2]
+    );
+    assert!(
+        matches!(cmds[3], InputCommand::ToggleStep),
+        "cmds[3] should be ToggleStep; got {:?}",
+        cmds[3]
+    );
+    assert!(
+        matches!(cmds[4], InputCommand::PanelParamSelect(1)),
+        "cmds[4] should be PanelParamSelect(1); got {:?}",
+        cmds[4]
+    );
+    assert!(
+        matches!(cmds[5], InputCommand::PanelParamDelta(-3)),
+        "cmds[5] should be PanelParamDelta(-3); got {:?}",
+        cmds[5]
+    );
 }

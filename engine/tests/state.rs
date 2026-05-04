@@ -1,9 +1,9 @@
 use engine::input::InputCommand;
+use engine::music_theory::{snap_to_key, Key, Mode};
 use engine::state::{
     next_rand, prob_hit, MidiEvent, OverlayMode, PendingEdit, SequencerState, StepSize,
     TempoRandType, TempoRollPoint,
 };
-use engine::music_theory::{snap_to_key, Key, Mode};
 
 fn playing_state_all_enabled() -> SequencerState {
     let mut s = SequencerState::default();
@@ -23,8 +23,16 @@ fn tick_16_times_cycles_playhead() {
     // Tick advances THEN reads, so first tick moves 0→1.
     for expected in 1u8..=15 {
         let evt = s.tick();
-        assert!(evt.is_some(), "tick should return Some at step {}", expected);
-        assert_eq!(s.playhead, expected, "playhead should be {} after tick", expected);
+        assert!(
+            evt.is_some(),
+            "tick should return Some at step {}",
+            expected
+        );
+        assert_eq!(
+            s.playhead, expected,
+            "playhead should be {} after tick",
+            expected
+        );
     }
     // 16th tick: 15→0
     let evt = s.tick();
@@ -63,7 +71,10 @@ fn tick_loop_wraps_at_loop_out() {
 
     // Next tick must wrap back to loop_in=3
     s.tick();
-    assert_eq!(s.playhead, 3, "playhead should wrap to loop_in=3 after loop_out");
+    assert_eq!(
+        s.playhead, 3,
+        "playhead should wrap to loop_in=3 after loop_out"
+    );
 }
 
 #[test]
@@ -139,9 +150,15 @@ fn toggle_step_enables_then_disables() {
     let mut s = SequencerState::default();
     assert!(!s.steps[5].enabled);
     s.toggle_step(5);
-    assert!(s.steps[5].enabled, "step should be enabled after first toggle");
+    assert!(
+        s.steps[5].enabled,
+        "step should be enabled after first toggle"
+    );
     s.toggle_step(5);
-    assert!(!s.steps[5].enabled, "step should be disabled after second toggle");
+    assert!(
+        !s.steps[5].enabled,
+        "step should be disabled after second toggle"
+    );
 }
 
 #[test]
@@ -175,7 +192,10 @@ fn apply_encoder_delta_out_of_range_is_noop() {
     let mut s = SequencerState::default();
     let before = s.steps[0].midi_note;
     s.apply_encoder_delta(16, 1);
-    assert_eq!(s.steps[0].midi_note, before, "out-of-range step must not change note");
+    assert_eq!(
+        s.steps[0].midi_note, before,
+        "out-of-range step must not change note"
+    );
 }
 
 // --- Default values ---
@@ -216,7 +236,10 @@ fn tick_all_16_steps_enabled_visits_every_step() {
         assert!(visited[i], "step {} was never visited", i);
     }
     // After exactly 16 ticks, playhead must be back at 0.
-    assert_eq!(s.playhead, 0, "playhead should wrap back to 0 after 16 ticks");
+    assert_eq!(
+        s.playhead, 0,
+        "playhead should wrap back to 0 after 16 ticks"
+    );
 }
 
 // --- tick: loop boundary edge cases ---
@@ -236,7 +259,10 @@ fn tick_loop_full_range_loop_in0_loop_out15() {
     }
     assert_eq!(s.playhead, 15);
     s.tick();
-    assert_eq!(s.playhead, 0, "full-range loop should wrap to 0 after step 15");
+    assert_eq!(
+        s.playhead, 0,
+        "full-range loop should wrap to 0 after step 15"
+    );
 }
 
 #[test]
@@ -250,7 +276,11 @@ fn tick_loop_single_step_loop_in7_loop_out7() {
     // Every tick must stay at step 7.
     for i in 0..10 {
         s.tick();
-        assert_eq!(s.playhead, 7, "single-step loop should stay at 7 (tick {})", i);
+        assert_eq!(
+            s.playhead, 7,
+            "single-step loop should stay at 7 (tick {})",
+            i
+        );
     }
 }
 
@@ -277,7 +307,10 @@ fn tick_loop_inverted_loop_in3_loop_out2() {
     // Behavior is stable across multiple ticks.
     for _ in 0..5 {
         s.tick();
-        assert_eq!(s.playhead, 3, "inverted loop should remain stuck at loop_in=3");
+        assert_eq!(
+            s.playhead, 3,
+            "inverted loop should remain stuck at loop_in=3"
+        );
     }
 }
 
@@ -288,7 +321,10 @@ fn apply_encoder_delta_zero_is_noop() {
     let mut s = SequencerState::default();
     let before = s.steps[0].midi_note;
     s.apply_encoder_delta(0, 0);
-    assert_eq!(s.steps[0].midi_note, before, "delta=0 must not change the note");
+    assert_eq!(
+        s.steps[0].midi_note, before,
+        "delta=0 must not change the note"
+    );
 }
 
 #[test]
@@ -297,7 +333,10 @@ fn apply_encoder_delta_large_positive_wraps_octave() {
     // C4=60 in C Major. 7 scale degrees = 1 octave.
     // Delta=7 should land on C5=72.
     s.apply_encoder_delta(0, 7);
-    assert_eq!(s.steps[0].midi_note, 72, "delta=7 in C Major should be C5=72");
+    assert_eq!(
+        s.steps[0].midi_note, 72,
+        "delta=7 in C Major should be C5=72"
+    );
 }
 
 #[test]
@@ -305,9 +344,12 @@ fn apply_encoder_delta_large_negative_clamps_at_zero() {
     let mut s = SequencerState::default();
     // Start at C4=60. Shift note down to a very low value first.
     s.steps[0].midi_note = 2; // near bottom
-    // A very large negative delta should clamp at 0, not underflow.
+                              // A very large negative delta should clamp at 0, not underflow.
     s.apply_encoder_delta(0, -100);
-    assert_eq!(s.steps[0].midi_note, 0, "large negative delta should clamp at MIDI 0");
+    assert_eq!(
+        s.steps[0].midi_note, 0,
+        "large negative delta should clamp at MIDI 0"
+    );
 }
 
 // --- toggle_step: double-toggle identity ---
@@ -332,16 +374,28 @@ fn default_state_all_fields_match_spec() {
     assert_eq!(s.tempo_bpm, 120, "default tempo_bpm should be 120");
     assert_eq!(s.swing, 0, "default swing should be 0");
     assert!(matches!(s.key, Key::C), "default key should be C");
-    assert!(matches!(s.mode, Mode::Major), "default mode should be Major");
-    assert!(matches!(s.step_size, StepSize::Sixteenth), "default step_size should be Sixteenth");
+    assert!(
+        matches!(s.mode, Mode::Major),
+        "default mode should be Major"
+    );
+    assert!(
+        matches!(s.step_size, StepSize::Sixteenth),
+        "default step_size should be Sixteenth"
+    );
     assert_eq!(s.loop_in, 0, "default loop_in should be 0");
     assert_eq!(s.loop_out, 15, "default loop_out should be 15");
     assert!(!s.loop_active, "default loop_active should be false");
     assert_eq!(s.playhead, 0, "default playhead should be 0");
     assert!(!s.playing, "default playing should be false");
     assert!(!s.paused, "default paused should be false");
-    assert!(matches!(s.pending_edit, PendingEdit::None), "default pending_edit should be None");
-    assert!(s.active_overlay.is_none(), "default active_overlay should be None");
+    assert!(
+        matches!(s.pending_edit, PendingEdit::None),
+        "default pending_edit should be None"
+    );
+    assert!(
+        s.active_overlay.is_none(),
+        "default active_overlay should be None"
+    );
     assert_eq!(s.selected_step, 0, "default selected_step should be 0");
     assert_eq!(s.selected_param, 0, "default selected_param should be 0");
     for (i, step) in s.steps.iter().enumerate() {
@@ -360,8 +414,8 @@ fn tick_note_on_has_correct_fields() {
     s.steps[1].velocity = 80;
 
     s.tick(); // move to step 1
-    // step 1 is enabled with note 72 and velocity 80
-    // (playhead was at 0, so first tick moves to 1)
+              // step 1 is enabled with note 72 and velocity 80
+              // (playhead was at 0, so first tick moves to 1)
     let evt = {
         // Reset and re-tick cleanly
         s.playhead = 0;
@@ -369,7 +423,12 @@ fn tick_note_on_has_correct_fields() {
     };
     assert_eq!(
         evt,
-        Some(MidiEvent::NoteOn { channel: 0, note: 72, velocity: 80, duration_nanos: 0 })
+        Some(MidiEvent::NoteOn {
+            channel: 0,
+            note: 72,
+            velocity: 80,
+            duration_nanos: 0
+        })
     );
 }
 
@@ -392,7 +451,10 @@ fn apply_command_step_select_clamps_to_15() {
 #[test]
 fn apply_command_step_select_clears_pending_note_edit() {
     let mut s = SequencerState::default();
-    s.pending_edit = PendingEdit::Note { step: 0, midi_note: 64 };
+    s.pending_edit = PendingEdit::Note {
+        step: 0,
+        midi_note: 64,
+    };
     s.apply_command(InputCommand::StepSelect(3));
     assert!(matches!(s.pending_edit, PendingEdit::None));
 }
@@ -400,7 +462,10 @@ fn apply_command_step_select_clears_pending_note_edit() {
 #[test]
 fn apply_command_step_select_clears_pending_velocity_edit() {
     let mut s = SequencerState::default();
-    s.pending_edit = PendingEdit::Velocity { step: 0, velocity: 80 };
+    s.pending_edit = PendingEdit::Velocity {
+        step: 0,
+        velocity: 80,
+    };
     s.apply_command(InputCommand::StepSelect(3));
     assert!(matches!(s.pending_edit, PendingEdit::None));
 }
@@ -409,7 +474,11 @@ fn apply_command_step_select_clears_pending_velocity_edit() {
 fn apply_command_step_select_does_not_clear_param_edit() {
     let mut s = SequencerState::default();
     s.active_overlay = Some(OverlayMode::Regular);
-    s.pending_edit = PendingEdit::Param { overlay: OverlayMode::Regular, index: 2, value: 5 };
+    s.pending_edit = PendingEdit::Param {
+        overlay: OverlayMode::Regular,
+        index: 2,
+        value: 5,
+    };
     s.apply_command(InputCommand::StepSelect(3));
     assert!(matches!(s.pending_edit, PendingEdit::Param { .. }));
 }
@@ -439,34 +508,61 @@ fn apply_command_step_select_delta_advances_normally() {
 }
 
 #[test]
-fn apply_command_note_delta_sets_pending_note_edit() {
+fn note_delta_applies_immediately_writes_to_step_note() {
+    // BUG-035: NoteDelta now applies immediately; no PendingEdit::Note is created.
     let mut s = SequencerState::default();
     s.selected_step = 2;
     // default midi_note = 60 (C4), C Major. Scale-degree delta=+1 → D4=62.
     s.apply_command(InputCommand::NoteDelta(1));
-    assert!(matches!(s.pending_edit, PendingEdit::Note { step: 2, midi_note: 62 }));
+    assert_eq!(
+        s.steps[2].midi_note, 62,
+        "NoteDelta(1) must write D4=62 directly to steps[2].midi_note"
+    );
+    assert!(
+        matches!(s.pending_edit, PendingEdit::None),
+        "NoteDelta must not create a PendingEdit::Note"
+    );
 }
 
 #[test]
 fn apply_command_note_delta_negative_clamps_at_0() {
+    // BUG-035: NoteDelta applies immediately; result is clamped to 0.
     let mut s = SequencerState::default();
     s.steps[0].midi_note = 0;
     s.apply_command(InputCommand::NoteDelta(-5));
-    assert!(matches!(s.pending_edit, PendingEdit::Note { step: 0, midi_note: 0 }));
+    assert_eq!(
+        s.steps[0].midi_note, 0,
+        "NoteDelta(-5) from note 0 must clamp at 0"
+    );
+    assert!(
+        matches!(s.pending_edit, PendingEdit::None),
+        "NoteDelta must not create a PendingEdit::Note"
+    );
 }
 
 #[test]
 fn apply_command_note_delta_positive_clamps_at_127() {
+    // BUG-035: NoteDelta applies immediately; result is clamped to 127.
     let mut s = SequencerState::default();
     s.steps[0].midi_note = 127;
     s.apply_command(InputCommand::NoteDelta(10));
-    assert!(matches!(s.pending_edit, PendingEdit::Note { step: 0, midi_note: 127 }));
+    assert_eq!(
+        s.steps[0].midi_note, 127,
+        "NoteDelta(10) from note 127 must clamp at 127"
+    );
+    assert!(
+        matches!(s.pending_edit, PendingEdit::None),
+        "NoteDelta must not create a PendingEdit::Note"
+    );
 }
 
 #[test]
 fn apply_command_confirm_commits_note_edit() {
     let mut s = SequencerState::default();
-    s.pending_edit = PendingEdit::Note { step: 3, midi_note: 72 };
+    s.pending_edit = PendingEdit::Note {
+        step: 3,
+        midi_note: 72,
+    };
     s.apply_command(InputCommand::Confirm);
     assert_eq!(s.steps[3].midi_note, 72);
     assert!(matches!(s.pending_edit, PendingEdit::None));
@@ -484,7 +580,10 @@ fn apply_command_confirm_with_no_pending_is_noop() {
 #[test]
 fn apply_command_confirm_commits_velocity_edit() {
     let mut s = SequencerState::default();
-    s.pending_edit = PendingEdit::Velocity { step: 1, velocity: 90 };
+    s.pending_edit = PendingEdit::Velocity {
+        step: 1,
+        velocity: 90,
+    };
     s.apply_command(InputCommand::Confirm);
     assert_eq!(s.steps[1].velocity, 90);
     assert!(matches!(s.pending_edit, PendingEdit::None));
@@ -493,7 +592,11 @@ fn apply_command_confirm_commits_velocity_edit() {
 #[test]
 fn apply_command_confirm_clears_param_edit() {
     let mut s = SequencerState::default();
-    s.pending_edit = PendingEdit::Param { overlay: OverlayMode::Regular, index: 0, value: 3 };
+    s.pending_edit = PendingEdit::Param {
+        overlay: OverlayMode::Regular,
+        index: 0,
+        value: 3,
+    };
     s.apply_command(InputCommand::Confirm);
     assert!(matches!(s.pending_edit, PendingEdit::None));
 }
@@ -515,7 +618,13 @@ fn apply_command_velocity_delta_sets_pending_velocity_edit() {
     s.selected_step = 5;
     // default velocity = 100
     s.apply_command(InputCommand::VelocityDelta(10));
-    assert!(matches!(s.pending_edit, PendingEdit::Velocity { step: 5, velocity: 110 }));
+    assert!(matches!(
+        s.pending_edit,
+        PendingEdit::Velocity {
+            step: 5,
+            velocity: 110
+        }
+    ));
 }
 
 #[test]
@@ -523,7 +632,13 @@ fn apply_command_velocity_delta_clamps_at_127() {
     let mut s = SequencerState::default();
     s.steps[0].velocity = 127;
     s.apply_command(InputCommand::VelocityDelta(50));
-    assert!(matches!(s.pending_edit, PendingEdit::Velocity { step: 0, velocity: 127 }));
+    assert!(matches!(
+        s.pending_edit,
+        PendingEdit::Velocity {
+            step: 0,
+            velocity: 127
+        }
+    ));
 }
 
 #[test]
@@ -531,7 +646,13 @@ fn apply_command_velocity_delta_clamps_at_0() {
     let mut s = SequencerState::default();
     s.steps[0].velocity = 0;
     s.apply_command(InputCommand::VelocityDelta(-5));
-    assert!(matches!(s.pending_edit, PendingEdit::Velocity { step: 0, velocity: 0 }));
+    assert!(matches!(
+        s.pending_edit,
+        PendingEdit::Velocity {
+            step: 0,
+            velocity: 0
+        }
+    ));
 }
 
 #[test]
@@ -555,7 +676,11 @@ fn apply_command_close_overlay_clears_active_overlay() {
 fn apply_command_close_overlay_discards_param_edit() {
     let mut s = SequencerState::default();
     s.active_overlay = Some(OverlayMode::Regular);
-    s.pending_edit = PendingEdit::Param { overlay: OverlayMode::Regular, index: 0, value: 7 };
+    s.pending_edit = PendingEdit::Param {
+        overlay: OverlayMode::Regular,
+        index: 0,
+        value: 7,
+    };
     s.apply_command(InputCommand::CloseOverlay);
     assert!(matches!(s.pending_edit, PendingEdit::None));
 }
@@ -593,7 +718,11 @@ fn apply_command_param_value_delta_sets_pending_param_edit() {
     s.apply_command(InputCommand::ParamValueDelta(5));
     assert!(matches!(
         s.pending_edit,
-        PendingEdit::Param { overlay: OverlayMode::Regular, index: 2, value: 5 }
+        PendingEdit::Param {
+            overlay: OverlayMode::Regular,
+            index: 2,
+            value: 5
+        }
     ));
 }
 
@@ -606,7 +735,11 @@ fn apply_command_param_value_delta_accumulates() {
     s.apply_command(InputCommand::ParamValueDelta(3));
     assert!(matches!(
         s.pending_edit,
-        PendingEdit::Param { overlay: OverlayMode::Regular, index: 2, value: 8 }
+        PendingEdit::Param {
+            overlay: OverlayMode::Regular,
+            index: 2,
+            value: 8
+        }
     ));
 }
 
@@ -667,7 +800,10 @@ fn apply_command_confirm_with_pending_velocity_commits_to_correct_step() {
     let mut s = SequencerState::default();
     s.selected_step = 0;
     // Simulate: user moved to step 3, set velocity, then moved back to step 0.
-    s.pending_edit = PendingEdit::Velocity { step: 3, velocity: 64 };
+    s.pending_edit = PendingEdit::Velocity {
+        step: 3,
+        velocity: 64,
+    };
     s.apply_command(InputCommand::Confirm);
     assert_eq!(s.steps[3].velocity, 64, "velocity committed to step 3");
     // Other steps must be untouched.
@@ -682,7 +818,11 @@ fn apply_command_confirm_param_clears_pending_edit() {
     // the pending edit is cleared so it does not accumulate.
     let mut s = SequencerState::default();
     s.active_overlay = Some(OverlayMode::Regular);
-    s.pending_edit = PendingEdit::Param { overlay: OverlayMode::Regular, index: 4, value: -3 };
+    s.pending_edit = PendingEdit::Param {
+        overlay: OverlayMode::Regular,
+        index: 4,
+        value: -3,
+    };
     s.apply_command(InputCommand::Confirm);
     assert!(matches!(s.pending_edit, PendingEdit::None));
 }
@@ -702,7 +842,12 @@ fn tick_note_on_uses_step_velocity_64() {
     let evt = s.tick();
     assert_eq!(
         evt,
-        Some(MidiEvent::NoteOn { channel: 0, note: 60, velocity: 64, duration_nanos: 0 }),
+        Some(MidiEvent::NoteOn {
+            channel: 0,
+            note: 60,
+            velocity: 64,
+            duration_nanos: 0
+        }),
         "NoteOn velocity must match step.velocity=64"
     );
 }
@@ -719,7 +864,12 @@ fn tick_note_on_uses_step_velocity_1() {
     let evt = s.tick();
     assert_eq!(
         evt,
-        Some(MidiEvent::NoteOn { channel: 0, note: 48, velocity: 1, duration_nanos: 0 }),
+        Some(MidiEvent::NoteOn {
+            channel: 0,
+            note: 48,
+            velocity: 1,
+            duration_nanos: 0
+        }),
         "NoteOn velocity must match step.velocity=1"
     );
 }
@@ -730,7 +880,10 @@ fn tick_note_on_uses_step_velocity_1() {
 fn apply_command_step_select_clamps_at_15() {
     let mut s = SequencerState::default();
     s.apply_command(InputCommand::StepSelect(99));
-    assert_eq!(s.selected_step, 15, "StepSelect out of range should clamp to 15");
+    assert_eq!(
+        s.selected_step, 15,
+        "StepSelect out of range should clamp to 15"
+    );
 }
 
 #[test]
@@ -738,7 +891,10 @@ fn apply_command_step_select_delta_wraps() {
     let mut s = SequencerState::default();
     s.selected_step = 0;
     s.apply_command(InputCommand::StepSelectDelta(-1));
-    assert_eq!(s.selected_step, 15, "StepSelectDelta(-1) from 0 should wrap to 15");
+    assert_eq!(
+        s.selected_step, 15,
+        "StepSelectDelta(-1) from 0 should wrap to 15"
+    );
 }
 
 #[test]
@@ -747,29 +903,48 @@ fn apply_command_toggle_step_toggles_selected() {
     s.selected_step = 3;
     assert!(!s.steps[3].enabled);
     s.apply_command(InputCommand::ToggleStep);
-    assert!(s.steps[3].enabled, "ToggleStep should enable the selected step");
+    assert!(
+        s.steps[3].enabled,
+        "ToggleStep should enable the selected step"
+    );
 }
 
 #[test]
-fn apply_command_note_delta_creates_pending_edit() {
+fn note_delta_applies_immediately_to_step_midi_note() {
+    // BUG-035: NoteDelta now applies immediately; the step note is written directly.
     let mut s = SequencerState::default();
     s.selected_step = 0;
     // default midi_note = 60 (C4), C Major. Scale-degree delta=+2 → E4=64 (C→D→E).
     s.apply_command(InputCommand::NoteDelta(2));
-    assert!(matches!(s.pending_edit, PendingEdit::Note { step: 0, midi_note: 64 }));
+    assert_eq!(
+        s.steps[0].midi_note, 64,
+        "NoteDelta(2) from C4 in C Major must write E4=64 directly"
+    );
+    assert!(
+        matches!(s.pending_edit, PendingEdit::None),
+        "NoteDelta must not create a PendingEdit::Note"
+    );
 }
 
 #[test]
 fn apply_command_confirm_commits_pending_note() {
+    // BUG-035: NoteDelta now applies immediately; the note is visible right away
+    // without a Confirm. Confirm on an empty pending_edit is a no-op.
     let mut s = SequencerState::default();
     s.selected_step = 0;
     s.apply_command(InputCommand::NoteDelta(5));
-    let pending = match s.pending_edit {
-        PendingEdit::Note { midi_note, .. } => midi_note,
-        _ => panic!("expected PendingEdit::Note"),
-    };
+    // Note must already be written — no pending edit remains.
+    let applied_note = s.steps[0].midi_note;
+    assert!(
+        matches!(s.pending_edit, PendingEdit::None),
+        "NoteDelta must not leave a PendingEdit::Note"
+    );
+    // Confirm is a no-op; note must remain the same.
     s.apply_command(InputCommand::Confirm);
-    assert_eq!(s.steps[0].midi_note, pending, "Confirm should commit pending note");
+    assert_eq!(
+        s.steps[0].midi_note, applied_note,
+        "Confirm after immediate NoteDelta must not change the note"
+    );
     assert!(matches!(s.pending_edit, PendingEdit::None));
 }
 
@@ -786,20 +961,22 @@ fn apply_command_open_close_overlay() {
 
 #[test]
 fn note_delta_up_five_times_advances_five_scale_degrees() {
-    // BUG-010: Each NoteDelta(1) should use the pending note as the base so
-    // pressing Up five times advances five scale degrees, not one.
+    // BUG-035: NoteDelta applies immediately. Repeated presses accumulate because
+    // each press reads from the already-updated steps[step].midi_note.
     let mut s = SequencerState::default();
     s.selected_step = 0;
     // default: C4=60, C Major. After 5 ups should be A4=69 (C→D→E→F→G→A).
     for _ in 0..5 {
         s.apply_command(InputCommand::NoteDelta(1));
     }
-    match s.pending_edit {
-        PendingEdit::Note { step: 0, midi_note } => {
-            assert_eq!(midi_note, 69, "5× NoteDelta(1) from C4 in C Major should reach A4=69");
-        }
-        other => panic!("expected PendingEdit::Note at step 0, got {:?}", other),
-    }
+    assert_eq!(
+        s.steps[0].midi_note, 69,
+        "5× NoteDelta(1) from C4 in C Major should reach A4=69"
+    );
+    assert!(
+        matches!(s.pending_edit, PendingEdit::None),
+        "no PendingEdit should remain after immediate applies"
+    );
 }
 
 #[test]
@@ -812,7 +989,10 @@ fn note_delta_accumulates_then_confirm_commits_final_value() {
         s.apply_command(InputCommand::NoteDelta(1));
     }
     s.apply_command(InputCommand::Confirm);
-    assert_eq!(s.steps[0].midi_note, 72, "Confirm after 7 NoteDelta(1) from C4 should write C5=72");
+    assert_eq!(
+        s.steps[0].midi_note, 72,
+        "Confirm after 7 NoteDelta(1) from C4 should write C5=72"
+    );
     assert!(matches!(s.pending_edit, PendingEdit::None));
 }
 
@@ -828,7 +1008,9 @@ fn param_value_delta_key_seeds_from_committed_key_index() {
     s.selected_param = 0; // Key param
     s.apply_command(InputCommand::ParamValueDelta(1));
     match s.pending_edit {
-        PendingEdit::Param { index: 0, value, .. } => {
+        PendingEdit::Param {
+            index: 0, value, ..
+        } => {
             assert_eq!(value, 3, "D(2)+1 should give index 3 (D#), not 1");
         }
         other => panic!("expected PendingEdit::Param index 0, got {:?}", other),
@@ -844,7 +1026,9 @@ fn param_value_delta_swing_seeds_from_committed_swing_value() {
     s.selected_param = 2; // Swing param
     s.apply_command(InputCommand::ParamValueDelta(-5));
     match s.pending_edit {
-        PendingEdit::Param { index: 2, value, .. } => {
+        PendingEdit::Param {
+            index: 2, value, ..
+        } => {
             assert_eq!(value, 15, "swing(20)+(-5) should give 15, not -5");
         }
         other => panic!("expected PendingEdit::Param index 2, got {:?}", other),
@@ -865,7 +1049,10 @@ fn confirm_param_key_applies_to_state_key() {
         s.apply_command(InputCommand::ParamValueDelta(1));
     }
     s.apply_command(InputCommand::Confirm);
-    assert!(matches!(s.key, Key::Ds), "key should be D# after confirming +3 from C");
+    assert!(
+        matches!(s.key, Key::Ds),
+        "key should be D# after confirming +3 from C"
+    );
     assert!(matches!(s.pending_edit, PendingEdit::None));
 }
 
@@ -878,7 +1065,10 @@ fn confirm_param_swing_applies_to_state_swing() {
     s.selected_param = 2;
     s.apply_command(InputCommand::ParamValueDelta(15));
     s.apply_command(InputCommand::Confirm);
-    assert_eq!(s.swing, 15, "swing should be 15 after confirming +15 from 0");
+    assert_eq!(
+        s.swing, 15,
+        "swing should be 15 after confirming +15 from 0"
+    );
     assert!(matches!(s.pending_edit, PendingEdit::None));
 }
 
@@ -891,7 +1081,10 @@ fn confirm_param_mode_applies_to_state_mode() {
     s.selected_param = 1;
     s.apply_command(InputCommand::ParamValueDelta(2)); // Major(0) + 2 = Dorian(2)
     s.apply_command(InputCommand::Confirm);
-    assert!(matches!(s.mode, Mode::Dorian), "mode should be Dorian after confirming +2 from Major");
+    assert!(
+        matches!(s.mode, Mode::Dorian),
+        "mode should be Dorian after confirming +2 from Major"
+    );
     assert!(matches!(s.pending_edit, PendingEdit::None));
 }
 
@@ -904,7 +1097,10 @@ fn confirm_param_step_size_applies_to_state() {
     s.selected_param = 3;
     s.apply_command(InputCommand::ParamValueDelta(1)); // Sixteenth(4) + 1 = ThirtySecond(5)
     s.apply_command(InputCommand::Confirm);
-    assert!(matches!(s.step_size, StepSize::ThirtySecond), "step_size should be ThirtySecond after +1");
+    assert!(
+        matches!(s.step_size, StepSize::ThirtySecond),
+        "step_size should be ThirtySecond after +1"
+    );
     assert!(matches!(s.pending_edit, PendingEdit::None));
 }
 
@@ -917,7 +1113,10 @@ fn confirm_param_loop_in_applies_to_state() {
     s.selected_param = 4; // Loop param (loop_in)
     s.apply_command(InputCommand::ParamValueDelta(5)); // 0 + 5 = 5
     s.apply_command(InputCommand::Confirm);
-    assert_eq!(s.loop_in, 5, "loop_in should be 5 after confirming +5 from 0");
+    assert_eq!(
+        s.loop_in, 5,
+        "loop_in should be 5 after confirming +5 from 0"
+    );
     assert!(matches!(s.pending_edit, PendingEdit::None));
 }
 
@@ -973,13 +1172,16 @@ fn confirm_param_playing_while_paused_leaves_tick_non_firing() {
     s.steps[1].enabled = true;
     s.active_overlay = Some(OverlayMode::Regular);
     s.selected_param = 7; // Stop/Start param
-    // committed value = 0 (not playing). Delta +1 → value=1 (playing=true).
+                          // committed value = 0 (not playing). Delta +1 → value=1 (playing=true).
     s.apply_command(InputCommand::ParamValueDelta(1));
     s.apply_command(InputCommand::Confirm);
     // After confirm: playing=true was applied and BUG-017 fix clears paused.
     assert!(s.playing, "playing should be true after confirming value=1");
     // paused was cleared by the BUG-017 fix in apply_param_value(7, 1).
-    assert!(!s.paused, "paused should be cleared when playing is set via overlay (BUG-017)");
+    assert!(
+        !s.paused,
+        "paused should be cleared when playing is set via overlay (BUG-017)"
+    );
 }
 
 // ── BUG-004: tick() uses step.velocity, not hardcoded 100 ────────────────────
@@ -996,7 +1198,12 @@ fn tick_velocity_127_produces_note_on_127() {
     let evt = s.tick();
     assert_eq!(
         evt,
-        Some(MidiEvent::NoteOn { channel: 0, note: 60, velocity: 127, duration_nanos: 0 }),
+        Some(MidiEvent::NoteOn {
+            channel: 0,
+            note: 60,
+            velocity: 127,
+            duration_nanos: 0
+        }),
         "NoteOn velocity must be 127 when step.velocity=127"
     );
 }
@@ -1013,7 +1220,12 @@ fn tick_velocity_default_100_produces_note_on_100() {
     let evt = s.tick();
     assert_eq!(
         evt,
-        Some(MidiEvent::NoteOn { channel: 0, note: 60, velocity: 100, duration_nanos: 0 }),
+        Some(MidiEvent::NoteOn {
+            channel: 0,
+            note: 60,
+            velocity: 100,
+            duration_nanos: 0
+        }),
         "NoteOn velocity must be 100 when step.velocity is default"
     );
 }
@@ -1030,7 +1242,12 @@ fn tick_velocity_zero_produces_note_on_0() {
     let evt = s.tick();
     assert_eq!(
         evt,
-        Some(MidiEvent::NoteOn { channel: 0, note: 60, velocity: 0, duration_nanos: 0 }),
+        Some(MidiEvent::NoteOn {
+            channel: 0,
+            note: 60,
+            velocity: 0,
+            duration_nanos: 0
+        }),
         "NoteOn velocity must be 0 when step.velocity=0"
     );
 }
@@ -1046,12 +1263,20 @@ fn tick_velocity_preserved_after_velocity_edit_committed() {
     // Default velocity=100. Set to 55 via apply_command path.
     s.apply_command(InputCommand::VelocityDelta(-45)); // 100 - 45 = 55
     s.apply_command(InputCommand::Confirm);
-    assert_eq!(s.steps[1].velocity, 55, "velocity should be 55 after commit");
+    assert_eq!(
+        s.steps[1].velocity, 55,
+        "velocity should be 55 after commit"
+    );
     s.playhead = 0;
     let evt = s.tick();
     assert_eq!(
         evt,
-        Some(MidiEvent::NoteOn { channel: 0, note: 60, velocity: 55, duration_nanos: 0 }),
+        Some(MidiEvent::NoteOn {
+            channel: 0,
+            note: 60,
+            velocity: 55,
+            duration_nanos: 0
+        }),
         "tick() must use committed velocity=55"
     );
 }
@@ -1059,42 +1284,49 @@ fn tick_velocity_preserved_after_velocity_edit_committed() {
 // ── BUG-010: additional NoteDelta accumulation edge cases ─────────────────────
 
 #[test]
-fn note_delta_down_from_pending_not_committed_base() {
-    // BUG-010: After one NoteDelta(1) → pending=D4=62, a subsequent NoteDelta(-1)
-    // should go back to C4=60 using the pending note as base, not the committed note.
+fn note_delta_repeated_uses_committed_note_as_base() {
+    // BUG-035: NoteDelta applies immediately. Each subsequent delta uses the
+    // already-committed note as the base, so +1 then -1 returns to the start.
     let mut s = SequencerState::default();
     s.selected_step = 0;
     // step: C4=60
-    s.apply_command(InputCommand::NoteDelta(1)); // C→D, pending=62
-    s.apply_command(InputCommand::NoteDelta(-1)); // D→C, pending=60
-    match s.pending_edit {
-        PendingEdit::Note { step: 0, midi_note } => {
-            assert_eq!(midi_note, 60, "NoteDelta(-1) after +1 should return to C4=60");
-        }
-        other => panic!("expected PendingEdit::Note at step 0, got {:?}", other),
-    }
+    s.apply_command(InputCommand::NoteDelta(1)); // C→D, committed=62
+    s.apply_command(InputCommand::NoteDelta(-1)); // D→C, committed=60
+    assert_eq!(
+        s.steps[0].midi_note, 60,
+        "NoteDelta(-1) after +1 should return to C4=60"
+    );
+    assert!(
+        matches!(s.pending_edit, PendingEdit::None),
+        "no PendingEdit should remain after immediate applies"
+    );
 }
 
 #[test]
 fn note_delta_resets_base_when_step_changes() {
-    // After changing selected_step, the pending edit for the old step is cleared.
-    // A new NoteDelta on the new step must use the committed note of that step.
+    // BUG-035: NoteDelta applies immediately. After changing selected_step,
+    // a new NoteDelta uses the committed note of the newly-selected step.
     let mut s = SequencerState::default();
     s.steps[0].midi_note = 60; // C4
     s.steps[3].midi_note = 67; // G4
     s.selected_step = 0;
-    s.apply_command(InputCommand::NoteDelta(3)); // C→E→F→G? let's just check clearing
-    s.apply_command(InputCommand::StepSelect(3)); // pending cleared
-    assert!(matches!(s.pending_edit, PendingEdit::None), "StepSelect must clear pending note");
+    s.apply_command(InputCommand::NoteDelta(3)); // applies to step 0
+    s.apply_command(InputCommand::StepSelect(3)); // moves focus to step 3, clears any pending
+    assert!(
+        matches!(s.pending_edit, PendingEdit::None),
+        "StepSelect must clear pending note"
+    );
     // Now delta on step 3 must use step 3's committed note (G4=67).
     s.apply_command(InputCommand::NoteDelta(1)); // G4 → next scale degree
-    match s.pending_edit {
-        PendingEdit::Note { step: 3, midi_note } => {
-            // G4=67 in C Major, +1 = A4=69
-            assert_eq!(midi_note, 69, "NoteDelta(1) from G4=67 in C Major should give A4=69");
-        }
-        other => panic!("expected PendingEdit::Note at step 3, got {:?}", other),
-    }
+    // G4=67 in C Major, +1 = A4=69
+    assert_eq!(
+        s.steps[3].midi_note, 69,
+        "NoteDelta(1) from G4=67 in C Major should give A4=69"
+    );
+    assert!(
+        matches!(s.pending_edit, PendingEdit::None),
+        "no PendingEdit should remain after immediate apply"
+    );
 }
 
 // ── BUG-011: ParamValueDelta additional seeding tests ────────────────────────
@@ -1108,7 +1340,9 @@ fn param_value_delta_mode_seeds_from_committed_mode_index() {
     s.selected_param = 1; // Mode param
     s.apply_command(InputCommand::ParamValueDelta(1));
     match s.pending_edit {
-        PendingEdit::Param { index: 1, value, .. } => {
+        PendingEdit::Param {
+            index: 1, value, ..
+        } => {
             assert_eq!(value, 3, "Dorian(2)+1 should give index 3 (Phrygian)");
         }
         other => panic!("expected PendingEdit::Param index 1, got {:?}", other),
@@ -1124,7 +1358,9 @@ fn param_value_delta_step_size_seeds_from_committed_value() {
     s.selected_param = 3; // StepSize param
     s.apply_command(InputCommand::ParamValueDelta(1));
     match s.pending_edit {
-        PendingEdit::Param { index: 3, value, .. } => {
+        PendingEdit::Param {
+            index: 3, value, ..
+        } => {
             assert_eq!(value, 4, "Eighth(3)+1 should give index 4 (Sixteenth)");
         }
         other => panic!("expected PendingEdit::Param index 3, got {:?}", other),
@@ -1140,7 +1376,9 @@ fn param_value_delta_loop_in_seeds_from_committed_loop_in() {
     s.selected_param = 4; // Loop param
     s.apply_command(InputCommand::ParamValueDelta(2));
     match s.pending_edit {
-        PendingEdit::Param { index: 4, value, .. } => {
+        PendingEdit::Param {
+            index: 4, value, ..
+        } => {
             assert_eq!(value, 10, "loop_in(8)+2 should give 10, not 2");
         }
         other => panic!("expected PendingEdit::Param index 4, got {:?}", other),
@@ -1191,7 +1429,10 @@ fn test_confirm_playing_clears_paused() {
     };
     state.apply_command(InputCommand::Confirm);
     assert!(state.playing, "playing should be true after confirm");
-    assert!(!state.paused, "paused should be cleared when playing is set via overlay");
+    assert!(
+        !state.paused,
+        "paused should be cleared when playing is set via overlay"
+    );
 }
 
 #[test]
@@ -1206,7 +1447,10 @@ fn test_confirm_playing_false_does_not_clear_paused() {
     };
     state.apply_command(InputCommand::Confirm);
     assert!(!state.playing);
-    assert!(state.paused, "paused should be unchanged when playing is set to false");
+    assert!(
+        state.paused,
+        "paused should be unchanged when playing is set to false"
+    );
 }
 
 // ── Key/Mode Note Shifting ───────────────────────────────────────────────────
@@ -1230,8 +1474,8 @@ fn test_key_change_snaps_all_steps() {
 #[test]
 fn test_mode_change_snaps_all_steps() {
     let mut state = SequencerState::default(); // Key::C, Mode::Major
-    // B4 (71) is in C major. C NaturalMinor scale: C D Eb F G Ab Bb.
-    // Bb=70 (dist=1), C5=72 (dist=1) — tie: lower wins → Bb4=70
+                                               // B4 (71) is in C major. C NaturalMinor scale: C D Eb F G Ab Bb.
+                                               // Bb=70 (dist=1), C5=72 (dist=1) — tie: lower wins → Bb4=70
     state.steps[0].midi_note = 71; // B4
     state.pending_edit = PendingEdit::Param {
         overlay: OverlayMode::Regular,
@@ -1299,7 +1543,7 @@ fn test_disabled_steps_are_snapped() {
     let mut state = SequencerState::default(); // Key::C, Mode::Major
     state.steps[3].enabled = false;
     state.steps[3].midi_note = 61; // C#4 — not in C major
-    // Change to D major
+                                   // Change to D major
     state.pending_edit = PendingEdit::Param {
         overlay: OverlayMode::Regular,
         index: 0,
@@ -1311,7 +1555,10 @@ fn test_disabled_steps_are_snapped() {
         engine::music_theory::Key::D,
         engine::music_theory::Mode::Major,
     );
-    assert_eq!(state.steps[3].midi_note, expected, "disabled step should still be snapped");
+    assert_eq!(
+        state.steps[3].midi_note, expected,
+        "disabled step should still be snapped"
+    );
 }
 
 // ── RNG Infrastructure ───────────────────────────────────────────────────────
@@ -1320,7 +1567,10 @@ fn test_disabled_steps_are_snapped() {
 fn test_prob_hit_zero_always_false() {
     let mut seed = 0x853C_49E6_748F_EA9Bu64;
     for _ in 0..1000 {
-        assert!(!prob_hit(&mut seed, 0), "prob_hit(0) must always return false");
+        assert!(
+            !prob_hit(&mut seed, 0),
+            "prob_hit(0) must always return false"
+        );
     }
 }
 
@@ -1328,7 +1578,10 @@ fn test_prob_hit_zero_always_false() {
 fn test_prob_hit_hundred_always_true() {
     let mut seed = 0x853C_49E6_748F_EA9Bu64;
     for _ in 0..1000 {
-        assert!(prob_hit(&mut seed, 100), "prob_hit(100) must always return true");
+        assert!(
+            prob_hit(&mut seed, 100),
+            "prob_hit(100) must always return true"
+        );
     }
 }
 
@@ -1355,7 +1608,10 @@ fn test_rng_seed_advances_every_tick_even_when_not_playing() {
     assert!(!state.playing, "default state should not be playing");
     let seed_before = state.rng_seed;
     state.tick();
-    assert_ne!(state.rng_seed, seed_before, "rng_seed must advance on tick() even when not playing");
+    assert_ne!(
+        state.rng_seed, seed_before,
+        "rng_seed must advance on tick() even when not playing"
+    );
 }
 
 #[test]
@@ -1403,8 +1659,14 @@ fn test_next_rand_produces_distinct_values() {
     let v1 = next_rand(&mut seed);
     let v2 = next_rand(&mut seed);
     let v3 = next_rand(&mut seed);
-    assert_ne!(v1, v2, "consecutive next_rand calls must produce distinct values");
-    assert_ne!(v2, v3, "consecutive next_rand calls must produce distinct values");
+    assert_ne!(
+        v1, v2,
+        "consecutive next_rand calls must produce distinct values"
+    );
+    assert_ne!(
+        v2, v3,
+        "consecutive next_rand calls must produce distinct values"
+    );
 }
 
 // ── Step Randomness (Stream B) ───────────────────────────────────────────────
@@ -1437,7 +1699,10 @@ fn test_step_rand_zero_always_fires() {
             fires += 1;
         }
     }
-    assert_eq!(fires, 1000, "step_rand=0 must fire on every enabled step (got {fires})");
+    assert_eq!(
+        fires, 1000,
+        "step_rand=0 must fire on every enabled step (got {fires})"
+    );
 }
 
 #[test]
@@ -1450,10 +1715,7 @@ fn test_step_rand_hundred_never_fires() {
         step.enabled = true;
     }
     for _ in 0..1000 {
-        assert!(
-            state.tick().is_none(),
-            "step_rand=100 must never fire"
-        );
+        assert!(state.tick().is_none(), "step_rand=100 must never fire");
     }
 }
 
@@ -1513,7 +1775,10 @@ fn test_skip_modifier_false_steps_fire() {
     let mut state = playing_state_with_step(60, 80);
     state.skip_modifier = false;
     let ev = tick_until_some(&mut state, 32);
-    assert!(ev.is_some(), "skip_modifier=false must not suppress enabled steps");
+    assert!(
+        ev.is_some(),
+        "skip_modifier=false must not suppress enabled steps"
+    );
 }
 
 #[test]
@@ -1561,7 +1826,10 @@ fn test_note_modifier_positive_clamped_to_127() {
     state.note_rand = 100;
     let ev = tick_until_some(&mut state, 32).expect("should fire");
     if let MidiEvent::NoteOn { note, .. } = ev {
-        assert_eq!(note, 127, "note clamped to 127 when modifier pushes it above max");
+        assert_eq!(
+            note, 127,
+            "note clamped to 127 when modifier pushes it above max"
+        );
     } else {
         panic!("expected NoteOn");
     }
@@ -1660,7 +1928,10 @@ fn test_scale_quant_applied_after_note_modifier() {
     let ev = tick_until_some(&mut state, 32).expect("should fire");
     if let MidiEvent::NoteOn { note, .. } = ev {
         let expected = snap_to_key(61, Key::C, Mode::Major);
-        assert_eq!(note, expected, "scale_quant must be applied after note_modifier");
+        assert_eq!(
+            note, expected,
+            "scale_quant must be applied after note_modifier"
+        );
     } else {
         panic!("expected NoteOn");
     }
@@ -1684,7 +1955,10 @@ fn test_velocity_modifier_positive_adds() {
     state.velocity_modifier = 20;
     let ev = tick_until_some(&mut state, 32).expect("should fire");
     if let MidiEvent::NoteOn { velocity, .. } = ev {
-        assert_eq!(velocity, 100, "velocity_modifier=20 must add 20 to velocity");
+        assert_eq!(
+            velocity, 100,
+            "velocity_modifier=20 must add 20 to velocity"
+        );
     } else {
         panic!("expected NoteOn");
     }
@@ -1696,7 +1970,10 @@ fn test_velocity_modifier_positive_clamped_to_127() {
     state.velocity_modifier = 20;
     let ev = tick_until_some(&mut state, 32).expect("should fire");
     if let MidiEvent::NoteOn { velocity, .. } = ev {
-        assert_eq!(velocity, 127, "velocity clamped to 127 when modifier pushes it above max");
+        assert_eq!(
+            velocity, 127,
+            "velocity clamped to 127 when modifier pushes it above max"
+        );
     } else {
         panic!("expected NoteOn");
     }
@@ -1708,7 +1985,10 @@ fn test_velocity_modifier_negative_subtracts() {
     state.velocity_modifier = -20;
     let ev = tick_until_some(&mut state, 32).expect("should fire");
     if let MidiEvent::NoteOn { velocity, .. } = ev {
-        assert_eq!(velocity, 60, "velocity_modifier=-20 must subtract 20 from velocity");
+        assert_eq!(
+            velocity, 60,
+            "velocity_modifier=-20 must subtract 20 from velocity"
+        );
     } else {
         panic!("expected NoteOn");
     }
@@ -1720,7 +2000,10 @@ fn test_velocity_modifier_negative_clamped_to_zero() {
     state.velocity_modifier = -20;
     let ev = tick_until_some(&mut state, 32).expect("should fire");
     if let MidiEvent::NoteOn { velocity, .. } = ev {
-        assert_eq!(velocity, 0, "velocity clamped to 0 when modifier pushes it below 0");
+        assert_eq!(
+            velocity, 0,
+            "velocity clamped to 0 when modifier pushes it below 0"
+        );
     } else {
         panic!("expected NoteOn");
     }
@@ -1732,7 +2015,11 @@ fn test_velocity_modifier_negative_clamped_to_zero() {
 fn test_tempo_roll_point_round_trip() {
     for i in 0..TempoRollPoint::COUNT {
         let v = TempoRollPoint::from_index(i);
-        assert_eq!(v.to_index(), i, "TempoRollPoint round-trip failed for index {i}");
+        assert_eq!(
+            v.to_index(),
+            i,
+            "TempoRollPoint round-trip failed for index {i}"
+        );
     }
 }
 
@@ -1756,7 +2043,11 @@ fn test_tempo_roll_point_count() {
 fn test_tempo_rand_type_round_trip() {
     for i in 0..TempoRandType::COUNT {
         let v = TempoRandType::from_index(i);
-        assert_eq!(v.to_index(), i, "TempoRandType round-trip failed for index {i}");
+        assert_eq!(
+            v.to_index(),
+            i,
+            "TempoRandType round-trip failed for index {i}"
+        );
     }
 }
 
@@ -1834,9 +2125,15 @@ fn test_shift_committed_param_value_reflects_state() {
     state.tempo_rand_type = TempoRandType::Breathe;
     state.scale_quant = true;
     assert_eq!(state.shift_committed_param_value(1), 75);
-    assert_eq!(state.shift_committed_param_value(2), TempoRollPoint::Beat.to_index() as i64);
+    assert_eq!(
+        state.shift_committed_param_value(2),
+        TempoRollPoint::Beat.to_index() as i64
+    );
     assert_eq!(state.shift_committed_param_value(3), 50);
-    assert_eq!(state.shift_committed_param_value(4), TempoRandType::Breathe.to_index() as i64);
+    assert_eq!(
+        state.shift_committed_param_value(4),
+        TempoRandType::Breathe.to_index() as i64
+    );
     assert_eq!(state.shift_committed_param_value(6), 1);
 }
 
@@ -2219,5 +2516,8 @@ fn test_generate_random_sequence_produces_variety() {
             break;
         }
     }
-    assert!(!all_same, "GenerateRandomSequence produced identical sequences 10 times in a row");
+    assert!(
+        !all_same,
+        "GenerateRandomSequence produced identical sequences 10 times in a row"
+    );
 }

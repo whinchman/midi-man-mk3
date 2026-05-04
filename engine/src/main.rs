@@ -13,12 +13,14 @@
 //   Shutdown order: set hid_shutdown flag → join hid_thread → drop cmd_tx → join cmd_thread
 //   → join clock_thread → join midi_thread
 
-use std::sync::{Arc, RwLock, mpsc};
+use engine::cli::{parse_args_from_iter, CliArgs};
+use engine::input::InputCommand;
+#[cfg(feature = "hw-io")]
+use engine::midi_out::MidiCtrlMsg;
+use engine::state::{MidiEvent, SequencerState};
 #[cfg(feature = "hw-io")]
 use std::sync::atomic::{AtomicBool, Ordering};
-use engine::state::{MidiEvent, SequencerState};
-use engine::input::InputCommand;
-use engine::cli::{CliArgs, parse_args_from_iter};
+use std::sync::{mpsc, Arc, RwLock};
 
 fn parse_args() -> CliArgs {
     parse_args_from_iter(std::env::args().skip(1))
@@ -34,21 +36,12 @@ fn main() {
         println!("[main] HID PID override: {pid:#06x}");
     }
 
-    // --- MIDI setup (must happen before TUI takes over stdin/stdout) ---
+    // --- MIDI port from CLI arg (no pre-TUI prompt — port can be set via F4 CLI) ---
     #[cfg(feature = "hw-io")]
-    let selected_midi_port: Option<String> =
-        engine::midi_out::choose_midi_port(args.midi_port.as_deref());
-    #[cfg(feature = "hw-io")]
-    let selected_midi_channel: u8 = engine::midi_out::choose_midi_channel();
+    let selected_midi_port: Option<String> = args.midi_port.clone();
 
     // --- Shared state ---
     let state: Arc<RwLock<SequencerState>> = Arc::new(RwLock::new(SequencerState::default()));
-
-    // Apply selected MIDI channel to initial state.
-    #[cfg(feature = "hw-io")]
-    {
-        state.write().expect("state poisoned").midi_channel = selected_midi_channel;
-    }
 
     // --- Channels ---
     // midi: clock -> midi_out  (bounded; clock never blocks waiting for midi_out)
@@ -57,15 +50,23 @@ fn main() {
     let (cmd_tx, cmd_rx) = mpsc::sync_channel::<InputCommand>(64);
     // notify: cmd-processor -> ui  (bounded; try_send so clock never blocks)
     let (ui_notify_tx, ui_notify_rx) = mpsc::sync_channel::<()>(16);
+    // midi_ctrl: ui -> midi_out  (runtime port/channel changes from F4 CLI)
+    #[cfg(feature = "hw-io")]
+    let (midi_ctrl_tx, midi_ctrl_rx) = mpsc::sync_channel::<MidiCtrlMsg>(16);
+    // midi_log: midi_out -> ui  (MIDI thread log messages routed into CLI panel)
+    #[cfg(feature = "hw-io")]
+    let (midi_log_tx, midi_log_rx) = mpsc::sync_channel::<(bool, String)>(64);
 
     // --- Thread 1: MIDI output (hw-io only) ---
     #[cfg(feature = "hw-io")]
     let midi_thread = {
         let rx = midi_rx;
+        let ctrl_rx = midi_ctrl_rx;
         let port_name = selected_midi_port;
+        let log_tx = midi_log_tx;
         std::thread::Builder::new()
             .name("midi-out".to_owned())
-            .spawn(move || engine::midi_out::run_midi_out(rx, port_name))
+            .spawn(move || engine::midi_out::run_midi_out(rx, ctrl_rx, port_name, log_tx))
             .expect("failed to spawn midi-out thread")
     };
     // Without hw-io there is no clock or midi thread — drop midi_rx immediately.
@@ -102,7 +103,16 @@ fn main() {
         let hid_shutdown_flag = Arc::clone(&hid_shutdown);
         std::thread::Builder::new()
             .name("hid".to_owned())
-            .spawn(move || engine::hid::run_hid(hid_cmd_tx, hid_state, hid_notify, vid, pid, hid_shutdown_flag))
+            .spawn(move || {
+                engine::hid::run_hid(
+                    hid_cmd_tx,
+                    hid_state,
+                    hid_notify,
+                    vid,
+                    pid,
+                    hid_shutdown_flag,
+                )
+            })
             .expect("failed to spawn hid thread")
     };
 
@@ -115,7 +125,8 @@ fn main() {
         .spawn(move || {
             while let Ok(cmd) = cmd_rx.recv() {
                 {
-                    let mut s = cmd_state.write()
+                    let mut s = cmd_state
+                        .write()
                         .expect("cmd-processor: state RwLock poisoned");
                     s.apply_command(cmd);
                 }
@@ -131,13 +142,20 @@ fn main() {
 
     // --- Thread 5: UI (hw-io only) ---
     // run_ui blocks until Ctrl-C; main blocks here waiting for it.
+    //
+    // BUG-032 fix: clone midi_ctrl_tx before moving it into the UI thread so that
+    // the original sender remains alive in main. Without the clone, when run_ui
+    // returns, ctrl_rx disconnects and run_midi_out exits its loop — before main
+    // gets a chance to send MidiEvent::Stop. Holding the original here ensures the
+    // MIDI thread stays alive until we explicitly drop it after sending Stop.
     #[cfg(feature = "hw-io")]
     {
         let ui_state = Arc::clone(&state);
         let ui_cmd_tx = cmd_tx.clone();
+        let ui_ctrl_tx = midi_ctrl_tx.clone(); // pass clone; original stays alive in main
         let ui_thread = std::thread::Builder::new()
             .name("ui".to_owned())
-            .spawn(move || engine::ui::run_ui(ui_state, ui_notify_rx, ui_cmd_tx))
+            .spawn(move || engine::ui::run_ui(ui_state, ui_cmd_tx, ui_notify_rx, ui_ctrl_tx, midi_log_rx))
             .expect("failed to spawn ui thread");
 
         // Block until UI exits (user pressed Ctrl-C).
@@ -153,8 +171,16 @@ fn main() {
 
     // --- Cleanup ---
     // Send MIDI Stop before letting threads wind down.
+    // BUG-032: midi_ctrl_tx (original) is still alive here — run_midi_out is
+    // still running because ctrl_rx is not yet disconnected. The Stop event
+    // is therefore guaranteed to reach the MIDI thread.
     #[cfg(feature = "hw-io")]
     let _ = midi_tx.send(MidiEvent::Stop);
+
+    // Drop midi_ctrl_tx now — all MIDI control changes have been sent. The
+    // MIDI thread will see ctrl_rx disconnect and can wind down after Stop.
+    #[cfg(feature = "hw-io")]
+    drop(midi_ctrl_tx);
 
     // Drop midi_tx: clock exits when its send() returns Err (receiver dropped).
     drop(midi_tx);

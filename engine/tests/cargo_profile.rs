@@ -10,7 +10,6 @@
 /// Tests use line-based string search rather than a TOML parser to avoid a
 /// dev-dependency, and use CARGO_MANIFEST_DIR to locate the workspace root
 /// reliably regardless of the working directory at test invocation time.
-
 use std::path::PathBuf;
 
 /// Returns the workspace root by traversing up from CARGO_MANIFEST_DIR
@@ -19,16 +18,15 @@ use std::path::PathBuf;
 fn workspace_cargo_toml() -> PathBuf {
     // CARGO_MANIFEST_DIR is set by cargo test to the crate being tested.
     // For this crate that is <workspace>/engine.
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
-        .expect("CARGO_MANIFEST_DIR must be set by cargo");
+    let manifest_dir =
+        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR must be set by cargo");
     let mut path = PathBuf::from(manifest_dir);
 
     // Walk up until we find a Cargo.toml that contains `[workspace]`.
     loop {
         let candidate = path.join("Cargo.toml");
         if candidate.exists() {
-            let content = std::fs::read_to_string(&candidate)
-                .unwrap_or_default();
+            let content = std::fs::read_to_string(&candidate).unwrap_or_default();
             if content.contains("[workspace]") {
                 return candidate;
             }
@@ -89,7 +87,7 @@ fn firmware_release_profile_has_debug_false() {
     // The `debug = false` must appear before the next `[` heading (or end of file).
     let end_of_section = after_section[1..] // skip the opening `[` of this section
         .find('[')
-        .map(|idx| idx + 1)   // offset back relative to after_section
+        .map(|idx| idx + 1) // offset back relative to after_section
         .unwrap_or(after_section.len());
 
     let section_body = &after_section[..end_of_section];
@@ -158,7 +156,9 @@ fn firmware_override_does_not_affect_engine_profile() {
     // per-package engine overrides.  This is a combined check of tests 3 & 2.
     let content = read_workspace_cargo_toml();
 
-    let firmware_overrides = content.matches("[profile.release.package.firmware]").count();
+    let firmware_overrides = content
+        .matches("[profile.release.package.firmware]")
+        .count();
     assert_eq!(
         firmware_overrides, 1,
         "expected exactly one [profile.release.package.firmware] section, found {}",

@@ -8,13 +8,15 @@
 /// `CARGO_MANIFEST_DIR` is set by Cargo to the engine crate root at test time.
 /// The workspace root (where `.cargo/config.toml` and `.gitignore` live) is one
 /// directory above.
-
 use std::path::{Path, PathBuf};
 
 /// Return the workspace root directory (one level above the engine crate root).
 fn workspace_root() -> PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    PathBuf::from(manifest_dir).parent().expect("engine crate must have a parent directory").to_path_buf()
+    PathBuf::from(manifest_dir)
+        .parent()
+        .expect("engine crate must have a parent directory")
+        .to_path_buf()
 }
 
 /// Read `.cargo/config.toml` from the workspace root and return all non-comment,
@@ -43,9 +45,16 @@ fn full_cargo_config() -> String {
 
 fn read_cargo_config() -> String {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let config_path = Path::new(manifest_dir).join("..").join(".cargo").join("config.toml");
-    std::fs::read_to_string(&config_path)
-        .unwrap_or_else(|e| panic!("cannot read .cargo/config.toml at {}: {e}", config_path.display()))
+    let config_path = Path::new(manifest_dir)
+        .join("..")
+        .join(".cargo")
+        .join("config.toml");
+    std::fs::read_to_string(&config_path).unwrap_or_else(|e| {
+        panic!(
+            "cannot read .cargo/config.toml at {}: {e}",
+            config_path.display()
+        )
+    })
 }
 
 /// Read the full text of `.gitignore`.

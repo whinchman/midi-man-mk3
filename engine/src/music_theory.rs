@@ -161,9 +161,7 @@ static CHROMA_NAMES: [&str; 12] = [
     "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
 ];
 
-static OCTAVE_NAMES: [&str; 11] = [
-    "-1", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
-];
+static OCTAVE_NAMES: [&str; 11] = ["-1", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
 
 /// Returns the note name for a MIDI note number (0–127).
 /// Uses sharp notation (e.g. "C#4", "A#5"). C4 = MIDI 60, C-1 = MIDI 0.
@@ -273,4 +271,3 @@ pub fn next_note(current: u8, key: Key, mode: Mode, direction: i8) -> u8 {
     let midi = root + target_octave * 12 + cum[target_degree_in_oct];
     midi.clamp(0, 127) as u8
 }
-

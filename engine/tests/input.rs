@@ -1,4 +1,6 @@
-use engine::input::{InputCommand, KeyCodeSimple, OverlayMode, overlay_key_to_command, root_key_to_command};
+use engine::input::{
+    overlay_key_to_command, root_key_to_command, FocusPanel, InputCommand, KeyCodeSimple,
+};
 
 // --- root_key_to_command ---
 
@@ -51,15 +53,21 @@ fn root_enter_is_confirm() {
 }
 
 #[test]
-fn root_f1_opens_regular_overlay() {
+fn root_f1_sets_focus_sequencer() {
     let cmd = root_key_to_command(KeyCodeSimple::F1, false);
-    assert!(matches!(cmd, Some(InputCommand::OpenOverlay(OverlayMode::Regular))));
+    assert!(matches!(
+        cmd,
+        Some(InputCommand::SetFocus(FocusPanel::Sequencer))
+    ));
 }
 
 #[test]
-fn root_f2_opens_shift_overlay() {
+fn root_f2_sets_focus_seq_params() {
     let cmd = root_key_to_command(KeyCodeSimple::F2, false);
-    assert!(matches!(cmd, Some(InputCommand::OpenOverlay(OverlayMode::Shift))));
+    assert!(matches!(
+        cmd,
+        Some(InputCommand::SetFocus(FocusPanel::SeqParams))
+    ));
 }
 
 #[test]

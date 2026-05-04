@@ -9,7 +9,7 @@
 //! other `NoteOff` scheduling is delegated to `midi_out.rs`, which uses
 //! `duration_nanos` embedded in each `NoteOn`.
 
-use std::sync::{Arc, RwLock, mpsc::SyncSender};
+use std::sync::{mpsc::SyncSender, Arc, RwLock};
 
 use crate::state::{MidiEvent, SequencerState, StepSize, TempoRandType, TempoRollPoint};
 
@@ -40,7 +40,11 @@ pub struct TempoRollState {
 
 impl Default for TempoRollState {
     fn default() -> Self {
-        Self { phase: 0, direction: 1, current_offset: 0 }
+        Self {
+            phase: 0,
+            direction: 1,
+            current_offset: 0,
+        }
     }
 }
 
@@ -112,7 +116,7 @@ pub fn compute_effective_bpm(
         TempoRollPoint::Off => false,
         TempoRollPoint::Step => true,
         TempoRollPoint::Beat => step_count.is_multiple_of(4),
-        TempoRollPoint::Seq  => step_count.is_multiple_of(16),
+        TempoRollPoint::Seq => step_count.is_multiple_of(16),
     };
 
     if fires && prob_hit(rng, params.tempo_rand) {
@@ -125,11 +129,19 @@ pub fn compute_effective_bpm(
             }
             TempoRandType::Up => {
                 let next = roll_state.current_offset + 1;
-                if next > vm { 0 } else { next }
+                if next > vm {
+                    0
+                } else {
+                    next
+                }
             }
             TempoRandType::Down => {
                 let next = roll_state.current_offset - 1;
-                if next < -vm { 0 } else { next }
+                if next < -vm {
+                    0
+                } else {
+                    next
+                }
             }
             TempoRandType::Breathe => {
                 // Triangle wave: rise from 0 to +vm, fall through -vm, repeat.
@@ -187,11 +199,11 @@ pub fn compute_effective_bpm(
 /// tick_nanos = 60_000_000_000 * num / (bpm * den)
 pub fn step_ratio(step_size: StepSize) -> (u64, u64) {
     match step_size {
-        StepSize::Whole        => (4, 1),
-        StepSize::Half         => (2, 1),
-        StepSize::Quarter      => (1, 1),
-        StepSize::Eighth       => (1, 2),
-        StepSize::Sixteenth    => (1, 4),
+        StepSize::Whole => (4, 1),
+        StepSize::Half => (2, 1),
+        StepSize::Quarter => (1, 1),
+        StepSize::Eighth => (1, 2),
+        StepSize::Sixteenth => (1, 4),
         StepSize::ThirtySecond => (1, 8),
     }
 }
@@ -240,7 +252,10 @@ fn try_set_realtime() {
 /// The return value is not checked; on failure the timespec remains zero-initialized,
 /// which the caller handles gracefully by sleeping until an already-past time.
 fn monotonic_now() -> libc::timespec {
-    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
     // SAFETY: ts is a valid, properly-aligned timespec on the stack.
     #[cfg(target_os = "linux")]
     unsafe {
@@ -336,7 +351,13 @@ pub fn run_clock(state: Arc<RwLock<SequencerState>>, midi_tx: SyncSender<MidiEve
         };
 
         // Compute effective BPM (jitter applied clock-locally; base BPM never mutated).
-        let effective_bpm = compute_effective_bpm(bpm, &mut roll_state, &rand_snapshot, &mut local_rng, step_count);
+        let effective_bpm = compute_effective_bpm(
+            bpm,
+            &mut roll_state,
+            &rand_snapshot,
+            &mut local_rng,
+            step_count,
+        );
 
         let period = tick_nanos(effective_bpm, step_size);
         let swing_off = swing_offset_nanos(swing, period);
@@ -358,7 +379,13 @@ pub fn run_clock(state: Arc<RwLock<SequencerState>>, midi_tx: SyncSender<MidiEve
                 s.tick()
             };
 
-            if let Some(MidiEvent::NoteOn { channel, note, velocity, .. }) = maybe_event {
+            if let Some(MidiEvent::NoteOn {
+                channel,
+                note,
+                velocity,
+                ..
+            }) = maybe_event
+            {
                 // Retrigger: if the same note is still held, send NoteOff first
                 // so the MIDI device recognises the following NoteOn as a new note.
                 if last_note == Some((channel, note))
@@ -371,7 +398,9 @@ pub fn run_clock(state: Arc<RwLock<SequencerState>>, midi_tx: SyncSender<MidiEve
                     channel,
                     note,
                     velocity,
-                    duration_nanos: period,
+                    // 90% gate: NoteOff fires before the next tick to avoid
+                    // racing with consecutive steps at the period boundary.
+                    duration_nanos: period / 10 * 9,
                 };
                 if midi_tx.send(event).is_err() {
                     // Receiver dropped — exit cleanly.
@@ -386,4 +415,3 @@ pub fn run_clock(state: Arc<RwLock<SequencerState>>, midi_tx: SyncSender<MidiEve
         step_count = step_count.wrapping_add(1);
     }
 }
-

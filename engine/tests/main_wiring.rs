@@ -1,7 +1,7 @@
 use engine::cli::{parse_args_from_iter, parse_hex_u16};
 use engine::input::InputCommand;
 use engine::state::{MidiEvent, SequencerState};
-use std::sync::{Arc, RwLock, mpsc};
+use std::sync::{mpsc, Arc, RwLock};
 use std::time::Duration;
 
 /// Verify that the command processor loop correctly applies commands to state
@@ -16,34 +16,39 @@ fn cmd_processor_applies_commands_and_notifies_ui() {
     // Spawn the command processor.
     let proc_state = Arc::clone(&state);
     let proc_notify = ui_notify_tx.clone();
-    let _proc = std::thread::spawn(move || {
-        loop {
-            match cmd_rx.recv() {
-                Ok(cmd) => {
-                    {
-                        let mut s = proc_state.write().expect("poisoned");
-                        s.apply_command(cmd);
-                    }
-                    let _ = proc_notify.try_send(());
+    let _proc = std::thread::spawn(move || loop {
+        match cmd_rx.recv() {
+            Ok(cmd) => {
+                {
+                    let mut s = proc_state.write().expect("poisoned");
+                    s.apply_command(cmd);
                 }
-                Err(_) => break,
+                let _ = proc_notify.try_send(());
             }
+            Err(_) => break,
         }
     });
 
     // Send a ToggleStep command for step 3.
-    cmd_tx.send(InputCommand::StepSelect(3)).expect("send failed");
+    cmd_tx
+        .send(InputCommand::StepSelect(3))
+        .expect("send failed");
     cmd_tx.send(InputCommand::ToggleStep).expect("send failed");
 
     // Wait for both notifications (one per command).
-    ui_notify_rx.recv_timeout(Duration::from_millis(500))
+    ui_notify_rx
+        .recv_timeout(Duration::from_millis(500))
         .expect("no notify for StepSelect");
-    ui_notify_rx.recv_timeout(Duration::from_millis(500))
+    ui_notify_rx
+        .recv_timeout(Duration::from_millis(500))
         .expect("no notify for ToggleStep");
 
     // Verify state was mutated.
     let s = state.read().expect("poisoned");
-    assert!(s.steps[3].enabled, "step 3 should be enabled after ToggleStep");
+    assert!(
+        s.steps[3].enabled,
+        "step 3 should be enabled after ToggleStep"
+    );
 
     // Drop sender to shut down the cmd-processor.
     drop(cmd_tx);
@@ -76,17 +81,15 @@ fn cmd_processor_handles_multiple_commands_in_order() {
 
     let proc_state = Arc::clone(&state);
     let proc_notify = ui_notify_tx;
-    let _proc = std::thread::spawn(move || {
-        loop {
-            match cmd_rx.recv() {
-                Ok(cmd) => {
-                    let mut s = proc_state.write().expect("poisoned");
-                    s.apply_command(cmd);
-                    drop(s);
-                    let _ = proc_notify.try_send(());
-                }
-                Err(_) => break,
+    let _proc = std::thread::spawn(move || loop {
+        match cmd_rx.recv() {
+            Ok(cmd) => {
+                let mut s = proc_state.write().expect("poisoned");
+                s.apply_command(cmd);
+                drop(s);
+                let _ = proc_notify.try_send(());
             }
+            Err(_) => break,
         }
     });
 
@@ -98,7 +101,8 @@ fn cmd_processor_handles_multiple_commands_in_order() {
 
     // Drain 10 notifications.
     for _ in 0..10 {
-        ui_notify_rx.recv_timeout(Duration::from_millis(500))
+        ui_notify_rx
+            .recv_timeout(Duration::from_millis(500))
             .expect("timeout waiting for notify");
     }
 
@@ -127,7 +131,10 @@ fn parse_hex_u16_variants() {
 // -----------------------------------------------------------------------
 
 fn args(v: &[&str]) -> impl Iterator<Item = String> {
-    v.iter().map(|s| s.to_string()).collect::<Vec<_>>().into_iter()
+    v.iter()
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>()
+        .into_iter()
 }
 
 /// No arguments: all fields are None (defaults are applied elsewhere).
@@ -164,16 +171,22 @@ fn cli_hid_pid_is_set() {
 #[test]
 fn cli_malformed_hid_vid_does_not_panic() {
     let a = parse_args_from_iter(args(&["--hid-vid", "notahex"]));
-    assert!(a.hid_vid.is_none(), "malformed hex should leave hid_vid as None");
+    assert!(
+        a.hid_vid.is_none(),
+        "malformed hex should leave hid_vid as None"
+    );
 }
 
 /// All three flags together.
 #[test]
 fn cli_all_flags_together() {
     let a = parse_args_from_iter(args(&[
-        "--midi-port", "FluidSynth",
-        "--hid-vid", "0x2E8A",
-        "--hid-pid", "0x000A",
+        "--midi-port",
+        "FluidSynth",
+        "--hid-vid",
+        "0x2E8A",
+        "--hid-pid",
+        "0x000A",
     ]));
     assert_eq!(a.midi_port.as_deref(), Some("FluidSynth"));
     assert_eq!(a.hid_vid, Some(0x2E8Au16));
@@ -194,17 +207,15 @@ fn cmd_processor_exits_when_sender_dropped() {
 
     let proc_state = Arc::clone(&state);
     let proc_notify = ui_notify_tx;
-    let proc = std::thread::spawn(move || {
-        loop {
-            match cmd_rx.recv() {
-                Ok(cmd) => {
-                    let mut s = proc_state.write().expect("poisoned");
-                    s.apply_command(cmd);
-                    drop(s);
-                    let _ = proc_notify.try_send(());
-                }
-                Err(_) => break,
+    let proc = std::thread::spawn(move || loop {
+        match cmd_rx.recv() {
+            Ok(cmd) => {
+                let mut s = proc_state.write().expect("poisoned");
+                s.apply_command(cmd);
+                drop(s);
+                let _ = proc_notify.try_send(());
             }
+            Err(_) => break,
         }
     });
 
