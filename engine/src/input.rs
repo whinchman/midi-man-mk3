@@ -153,6 +153,11 @@ pub fn shift_action_key_to_command(key_code: KeyCodeSimple) -> Option<InputComma
 ///
 /// Returns `None` for unmapped keys. `FocusPanel::Cli` always returns `None`
 /// because the caller manages text input directly in `UiState`.
+/// `FocusPanel::SeqParams` (F2) maps Up/Down to `PanelParamDelta`; Left/Right
+/// param navigation is handled by the caller which adjusts the local param
+/// index and sends `PanelParamSelect`. `FocusPanel::RandParams` (F3) maps
+/// Up/Down to `RandParamDelta`; Left/Right is handled identically by the
+/// caller which sends `RandParamSelect`.
 pub fn panel_key_to_command(key: KeyCodeSimple, focus: FocusPanel) -> Option<InputCommand> {
     match focus {
         FocusPanel::Sequencer => match key {
@@ -164,11 +169,18 @@ pub fn panel_key_to_command(key: KeyCodeSimple, focus: FocusPanel) -> Option<Inp
             KeyCodeSimple::Enter => Some(InputCommand::Confirm),
             _ => None,
         },
-        FocusPanel::SeqParams | FocusPanel::RandParams => match key {
+        FocusPanel::SeqParams => match key {
             KeyCodeSimple::Up => Some(InputCommand::PanelParamDelta(1)),
             KeyCodeSimple::Down => Some(InputCommand::PanelParamDelta(-1)),
             // Left/Right param navigation is handled by the caller which adjusts
             // the local param index and then sends PanelParamSelect(new_idx).
+            _ => None,
+        },
+        FocusPanel::RandParams => match key {
+            KeyCodeSimple::Up => Some(InputCommand::RandParamDelta(1)),
+            KeyCodeSimple::Down => Some(InputCommand::RandParamDelta(-1)),
+            // Left/Right param navigation is handled by the caller which adjusts
+            // the local param index and then sends RandParamSelect(new_idx).
             _ => None,
         },
         FocusPanel::Cli => None,
@@ -378,15 +390,15 @@ mod tests {
     }
 
     #[test]
-    fn rand_params_focus_up_maps_to_panel_param_delta_plus_one() {
+    fn rand_params_focus_up_maps_to_rand_param_delta_plus_one() {
         let cmd = panel_key_to_command(KeyCodeSimple::Up, FocusPanel::RandParams);
-        assert!(matches!(cmd, Some(InputCommand::PanelParamDelta(1))));
+        assert!(matches!(cmd, Some(InputCommand::RandParamDelta(1))));
     }
 
     #[test]
-    fn rand_params_focus_down_maps_to_panel_param_delta_minus_one() {
+    fn rand_params_focus_down_maps_to_rand_param_delta_minus_one() {
         let cmd = panel_key_to_command(KeyCodeSimple::Down, FocusPanel::RandParams);
-        assert!(matches!(cmd, Some(InputCommand::PanelParamDelta(-1))));
+        assert!(matches!(cmd, Some(InputCommand::RandParamDelta(-1))));
     }
 
     #[test]
