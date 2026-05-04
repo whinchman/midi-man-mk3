@@ -34,7 +34,24 @@ use std::time::Instant;
 
 use crate::input::{FocusPanel, InputCommand};
 use crate::midi_out::MidiCtrlMsg;
+use crate::music_theory::{note_name, parse_note_name};
 use crate::ui_render::{LogEntry, LogTag};
+
+// ── HELP_ENTRIES ──────────────────────────────────────────────────────────────
+
+/// All CLI commands with brief descriptions shown by `help`.
+pub(crate) const HELP_ENTRIES: &[(&str, &str)] = &[
+    ("port <name>",      "connect to MIDI output port by name"),
+    ("port list",        "list available MIDI output ports"),
+    ("channel <1-16>",   "set MIDI output channel"),
+    ("seed <hex>",       "set random seed (e.g. 0xDEAD)"),
+    ("rand all",         "randomise notes and velocities"),
+    ("rand velo",        "randomise velocities only"),
+    ("rand notes",       "randomise note sequence"),
+    ("note set <step> <note> [vel]", "set a step's note and velocity"),
+    ("clear",            "clear the CLI log"),
+    ("help",             "show this help"),
+];
 
 // ── UiState ───────────────────────────────────────────────────────────────────
 
@@ -120,7 +137,10 @@ pub(crate) fn handle_cli_submit(
         return;
     }
 
-    if let Some(name) = line.strip_prefix("port ") {
+    if line == "port list" {
+        let _ = midi_ctrl_tx.send(MidiCtrlMsg::ListPorts);
+        push_log(&mut ui.cli_log, ts, LogTag::Cmd, "port list (querying...)".into());
+    } else if let Some(name) = line.strip_prefix("port ") {
         let name = name.trim().to_string();
         let _ = midi_ctrl_tx.send(MidiCtrlMsg::ChangePort(name.clone()));
         let _ = cmd_tx.send(InputCommand::MidiDeviceName(name.clone()));
@@ -170,6 +190,23 @@ pub(crate) fn handle_cli_submit(
                 format!("invalid hex: {rest}"),
             );
         }
+    } else if line == "rand all" {
+        let _ = cmd_tx.send(InputCommand::RandAll);
+        push_log(&mut ui.cli_log, ts, LogTag::Cmd, "rand all".into());
+    } else if line == "rand velo" {
+        let _ = cmd_tx.send(InputCommand::RandVelocities);
+        push_log(&mut ui.cli_log, ts, LogTag::Cmd, "rand velo".into());
+    } else if line == "rand notes" {
+        let _ = cmd_tx.send(InputCommand::GenerateRandomSequence);
+        push_log(&mut ui.cli_log, ts, LogTag::Cmd, "rand notes".into());
+    } else if let Some(rest) = line.strip_prefix("note set ") {
+        handle_cli_note_set(ui, cmd_tx, ts, rest.trim());
+    } else if line == "clear" || line == "ok" {
+        ui.cli_log.clear();
+    } else if line == "help" {
+        for (cmd, desc) in HELP_ENTRIES {
+            push_log(&mut ui.cli_log, ts, LogTag::Info, format!("{cmd}  —  {desc}"));
+        }
     } else {
         push_log(
             &mut ui.cli_log,
@@ -177,6 +214,99 @@ pub(crate) fn handle_cli_submit(
             LogTag::Err,
             format!("unknown command: {line}"),
         );
+    }
+}
+
+/// Parse and apply a `note set <step> <note> [velocity]` CLI command.
+///
+/// Logs `LogTag::Err` on any parse failure and `LogTag::Cmd` on success.
+#[cfg_attr(not(feature = "hw-io"), allow(dead_code))]
+fn handle_cli_note_set(
+    ui: &mut UiState,
+    cmd_tx: &SyncSender<InputCommand>,
+    ts: u64,
+    rest: &str,
+) {
+    let mut parts = rest.split_whitespace();
+
+    let step = match parts.next().and_then(|s| s.parse::<usize>().ok()) {
+        Some(s) if s <= 15 => s,
+        Some(_) => {
+            push_log(&mut ui.cli_log, ts, LogTag::Err, "step must be 0–15".into());
+            return;
+        }
+        None => {
+            push_log(&mut ui.cli_log, ts, LogTag::Err, "note set: expected <step> <note> [velocity]".into());
+            return;
+        }
+    };
+
+    let note_str = match parts.next() {
+        Some(s) => s,
+        None => {
+            push_log(&mut ui.cli_log, ts, LogTag::Err, "note set: missing note name".into());
+            return;
+        }
+    };
+
+    let midi_note = match parse_note_name(note_str) {
+        Some(n) => n,
+        None => {
+            push_log(&mut ui.cli_log, ts, LogTag::Err, format!("note set: invalid note '{note_str}'"));
+            return;
+        }
+    };
+
+    let velocity: u8 = match parts.next() {
+        Some(s) => match s.parse::<u8>() {
+            Ok(v) if v <= 127 => v,
+            Ok(_) => {
+                push_log(&mut ui.cli_log, ts, LogTag::Err, "velocity must be 0–127".into());
+                return;
+            }
+            Err(_) => {
+                push_log(&mut ui.cli_log, ts, LogTag::Err, format!("note set: invalid velocity '{s}'"));
+                return;
+            }
+        },
+        None => 127,
+    };
+
+    let _ = cmd_tx.send(InputCommand::NoteSet { step, midi_note, velocity });
+    push_log(
+        &mut ui.cli_log,
+        ts,
+        LogTag::Cmd,
+        format!("note set {step} → {} vel {velocity}", note_name(midi_note)),
+    );
+}
+
+// ── MIDI log sentinel parsing ─────────────────────────────────────────────────
+
+/// Parse a `[ports]` or `[ports-err]` sentinel from the MIDI output thread.
+///
+/// Returns `Some(entries)` when `(ok, msg)` is a recognised port-listing sentinel,
+/// where each entry is a `(LogTag, String)` pair ready to push into the CLI log.
+/// Returns `None` for any non-sentinel message so the caller handles it normally.
+///
+/// Sentinel contracts:
+/// - `(true,  "[ports]<name1>\x1f<name2>…")` — one `LogTag::Info` per port name.
+/// - `(true,  "[ports]")` with empty payload  — single `LogTag::Info` "no MIDI ports available".
+/// - `(false, "[ports-err] <msg>")` or any `ok=false` msg — single `LogTag::Err` with the full message.
+/// - Anything else                             — `None`.
+#[cfg_attr(not(feature = "hw-io"), allow(dead_code))]
+pub(crate) fn parse_ports_sentinel(ok: bool, msg: &str) -> Option<Vec<(LogTag, String)>> {
+    if ok {
+        let payload = msg.strip_prefix("[ports]")?;
+        if payload.is_empty() {
+            Some(vec![(LogTag::Info, "no MIDI ports available".into())])
+        } else {
+            Some(payload.split('\x1f').map(|name| (LogTag::Info, name.to_string())).collect())
+        }
+    } else if msg.starts_with("[ports-err]") {
+        Some(vec![(LogTag::Err, msg.to_string())])
+    } else {
+        None
     }
 }
 
@@ -437,10 +567,20 @@ pub fn run_ui(
         // ── Drain MIDI log messages ───────────────────────────────────────────
         // Route messages from the MIDI output thread into the CLI log panel
         // before rendering so this frame shows the latest MIDI status.
+        // Special sentinels for port listing:
+        //   (true,  "[ports]name1\x1fname2") → one LogTag::Info per port name
+        //   (true,  "[ports]")               → "no MIDI ports available" LogTag::Info
+        //   (false, "[ports-err] ...")        → LogTag::Err (falls through to default)
         while let Ok((ok, msg)) = midi_log_rx.try_recv() {
             let ts = ui.start_time.elapsed().as_millis() as u64;
-            let tag = if ok { crate::ui_render::LogTag::Midi } else { crate::ui_render::LogTag::Err };
-            push_log(&mut ui.cli_log, ts, tag, msg);
+            if let Some(entries) = parse_ports_sentinel(ok, &msg) {
+                for (tag, text) in entries {
+                    push_log(&mut ui.cli_log, ts, tag, text);
+                }
+            } else {
+                let tag = if ok { crate::ui_render::LogTag::Midi } else { crate::ui_render::LogTag::Err };
+                push_log(&mut ui.cli_log, ts, tag, msg);
+            }
         }
 
         // ── Render ───────────────────────────────────────────────────────────
@@ -903,5 +1043,251 @@ mod tests {
         // The first entry (msg0) should have been dropped; msg1 is now the oldest.
         assert_eq!(log[0].text, "msg1", "oldest entry (msg0) should have been evicted");
         assert_eq!(log[199].text, "msg200", "newest entry should be msg200");
+    }
+
+    // ── new CLI command tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn cli_submit_rand_all_sends_command_and_logs() {
+        let (cmd_tx, cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
+        let mut ui = UiState::new();
+        ui.cli_line = "rand all".into();
+
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+
+        let cmd = cmd_rx.try_recv().expect("expected InputCommand");
+        assert!(matches!(cmd, InputCommand::RandAll));
+        assert_eq!(ui.cli_log.len(), 1);
+        assert!(matches!(ui.cli_log[0].tag, LogTag::Cmd));
+    }
+
+    #[test]
+    fn cli_submit_rand_velo_sends_command_and_logs() {
+        let (cmd_tx, cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
+        let mut ui = UiState::new();
+        ui.cli_line = "rand velo".into();
+
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+
+        let cmd = cmd_rx.try_recv().expect("expected InputCommand");
+        assert!(matches!(cmd, InputCommand::RandVelocities));
+        assert_eq!(ui.cli_log.len(), 1);
+        assert!(matches!(ui.cli_log[0].tag, LogTag::Cmd));
+    }
+
+    #[test]
+    fn cli_submit_rand_notes_sends_command_and_logs() {
+        let (cmd_tx, cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
+        let mut ui = UiState::new();
+        ui.cli_line = "rand notes".into();
+
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+
+        let cmd = cmd_rx.try_recv().expect("expected InputCommand");
+        assert!(matches!(cmd, InputCommand::GenerateRandomSequence));
+        assert_eq!(ui.cli_log.len(), 1);
+        assert!(matches!(ui.cli_log[0].tag, LogTag::Cmd));
+    }
+
+    #[test]
+    fn cli_submit_port_list_sends_list_ports_and_logs() {
+        let (cmd_tx, _cmd_rx, ctrl_tx, ctrl_rx) = make_channels();
+        let mut ui = UiState::new();
+        ui.cli_line = "port list".into();
+
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+
+        let ctrl_msg = ctrl_rx.try_recv().expect("expected MidiCtrlMsg");
+        assert!(matches!(ctrl_msg, MidiCtrlMsg::ListPorts));
+        assert_eq!(ui.cli_log.len(), 1);
+        assert!(matches!(ui.cli_log[0].tag, LogTag::Cmd));
+        assert!(ui.cli_log[0].text.contains("querying"));
+    }
+
+    #[test]
+    fn cli_submit_clear_empties_log() {
+        let (cmd_tx, cmd_rx, ctrl_tx, ctrl_rx) = make_channels();
+        let mut ui = UiState::new();
+        // Prefill the log.
+        push_log(&mut ui.cli_log, 0, LogTag::Info, "old entry".into());
+        ui.cli_line = "clear".into();
+
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+
+        assert!(ui.cli_log.is_empty(), "clear should empty the log");
+        assert!(cmd_rx.try_recv().is_err(), "clear sends no InputCommand");
+        assert!(ctrl_rx.try_recv().is_err(), "clear sends no MidiCtrlMsg");
+    }
+
+    #[test]
+    fn cli_submit_ok_empties_log() {
+        let (cmd_tx, cmd_rx, ctrl_tx, ctrl_rx) = make_channels();
+        let mut ui = UiState::new();
+        push_log(&mut ui.cli_log, 0, LogTag::Info, "old entry".into());
+        ui.cli_line = "ok".into();
+
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+
+        assert!(ui.cli_log.is_empty(), "ok should empty the log");
+        assert!(cmd_rx.try_recv().is_err(), "ok sends no InputCommand");
+        assert!(ctrl_rx.try_recv().is_err(), "ok sends no MidiCtrlMsg");
+    }
+
+    #[test]
+    fn cli_submit_help_pushes_one_info_per_entry() {
+        let (cmd_tx, _cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
+        let mut ui = UiState::new();
+        ui.cli_line = "help".into();
+
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+
+        assert_eq!(ui.cli_log.len(), HELP_ENTRIES.len());
+        for entry in &ui.cli_log {
+            assert!(matches!(entry.tag, LogTag::Info));
+        }
+    }
+
+    // ── parse_ports_sentinel tests ────────────────────────────────────────────
+
+    #[test]
+    fn parse_ports_sentinel_multi_port_list() {
+        let result = parse_ports_sentinel(true, "[ports]Port A\x1fPort B");
+        assert_eq!(
+            result,
+            Some(vec![
+                (LogTag::Info, "Port A".to_string()),
+                (LogTag::Info, "Port B".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn parse_ports_sentinel_empty_port_list() {
+        let result = parse_ports_sentinel(true, "[ports]");
+        assert_eq!(
+            result,
+            Some(vec![(LogTag::Info, "no MIDI ports available".to_string())])
+        );
+    }
+
+    #[test]
+    fn parse_ports_sentinel_error_path() {
+        let result = parse_ports_sentinel(false, "[ports-err] boom");
+        assert_eq!(
+            result,
+            Some(vec![(LogTag::Err, "[ports-err] boom".to_string())])
+        );
+    }
+
+    #[test]
+    fn parse_ports_sentinel_non_sentinel_ok_returns_none() {
+        let result = parse_ports_sentinel(true, "normal log message");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn parse_ports_sentinel_non_sentinel_err_returns_none() {
+        let result = parse_ports_sentinel(false, "some error");
+        assert_eq!(result, None);
+    }
+
+    // ── handle_cli_note_set tests ─────────────────────────────────────────────
+
+    #[test]
+    fn note_set_valid_sends_note_set_cmd_and_logs_cmd() {
+        let (cmd_tx, cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
+        let mut ui = UiState::new();
+        ui.cli_line = "note set 3 C4".into();
+
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+
+        let cmd = cmd_rx.try_recv().expect("expected NoteSet");
+        assert!(
+            matches!(cmd, InputCommand::NoteSet { step: 3, midi_note: 60, velocity: 127 }),
+            "expected NoteSet {{ step: 3, midi_note: 60, velocity: 127 }}, got: {cmd:?}"
+        );
+        assert_eq!(ui.cli_log.len(), 1);
+        assert!(matches!(ui.cli_log[0].tag, LogTag::Cmd));
+        assert!(ui.cli_log[0].text.contains("C4"));
+    }
+
+    #[test]
+    fn note_set_with_velocity_uses_provided_velocity() {
+        let (cmd_tx, cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
+        let mut ui = UiState::new();
+        ui.cli_line = "note set 0 G3 64".into();
+
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+
+        let cmd = cmd_rx.try_recv().expect("expected NoteSet");
+        assert!(
+            matches!(cmd, InputCommand::NoteSet { step: 0, midi_note: 55, velocity: 64 }),
+            "got: {cmd:?}"
+        );
+    }
+
+    #[test]
+    fn note_set_step_out_of_range_logs_error() {
+        let (cmd_tx, cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
+        let mut ui = UiState::new();
+        ui.cli_line = "note set 16 C4".into();
+
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+
+        assert!(cmd_rx.try_recv().is_err(), "no command for invalid step");
+        assert_eq!(ui.cli_log.len(), 1);
+        assert!(matches!(ui.cli_log[0].tag, LogTag::Err));
+    }
+
+    #[test]
+    fn note_set_invalid_note_name_logs_error() {
+        let (cmd_tx, cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
+        let mut ui = UiState::new();
+        ui.cli_line = "note set 5 X4".into();
+
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+
+        assert!(cmd_rx.try_recv().is_err(), "no command for invalid note");
+        assert_eq!(ui.cli_log.len(), 1);
+        assert!(matches!(ui.cli_log[0].tag, LogTag::Err));
+    }
+
+    #[test]
+    fn note_set_velocity_out_of_range_logs_error() {
+        let (cmd_tx, cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
+        let mut ui = UiState::new();
+        ui.cli_line = "note set 2 C4 200".into();
+
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+
+        assert!(cmd_rx.try_recv().is_err(), "no command for velocity > 127");
+        assert_eq!(ui.cli_log.len(), 1);
+        assert!(matches!(ui.cli_log[0].tag, LogTag::Err));
+    }
+
+    #[test]
+    fn note_set_missing_note_logs_error() {
+        let (cmd_tx, cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
+        let mut ui = UiState::new();
+        ui.cli_line = "note set 1".into();
+
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+
+        assert!(cmd_rx.try_recv().is_err(), "no command when note missing");
+        assert_eq!(ui.cli_log.len(), 1);
+        assert!(matches!(ui.cli_log[0].tag, LogTag::Err));
+    }
+
+    #[test]
+    fn note_set_step_15_is_valid_boundary() {
+        let (cmd_tx, cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
+        let mut ui = UiState::new();
+        ui.cli_line = "note set 15 A4".into();
+
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+
+        let cmd = cmd_rx.try_recv().expect("expected NoteSet");
+        assert!(matches!(cmd, InputCommand::NoteSet { step: 15, .. }));
+        assert!(matches!(ui.cli_log[0].tag, LogTag::Cmd));
     }
 }

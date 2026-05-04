@@ -62,6 +62,7 @@ pub struct LogEntry {
 }
 
 /// Tag controlling how a log entry is coloured in the CLI panel.
+#[derive(Debug, PartialEq)]
 pub enum LogTag {
     /// Informational message.
     Info,
