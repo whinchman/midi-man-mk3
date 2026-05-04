@@ -7,6 +7,7 @@
 //! bytes over ALSA via `midir`. Note-off scheduling is owned here.
 
 use std::sync::mpsc::Receiver;
+use std::sync::mpsc::SyncSender;
 use std::thread;
 use std::time::Duration;
 
@@ -41,6 +42,7 @@ pub trait MidiSender: Send + 'static {
 #[cfg(feature = "hw-io")]
 struct MidirSender {
     conn: Arc<Mutex<midir::MidiOutputConnection>>,
+    log_tx: SyncSender<(bool, String)>,
 }
 
 #[cfg(feature = "hw-io")]
@@ -51,13 +53,14 @@ impl MidiSender for MidirSender {
             .lock()
             .expect("MidiOutputConnection mutex poisoned");
         if let Err(e) = guard.send(data) {
-            eprintln!("[midi_out] send error: {e}");
+            let _ = self.log_tx.send((false, format!("[midi_out] send error: {e}")));
         }
     }
 
     fn try_clone(&self) -> Box<dyn MidiSender> {
         Box::new(MidirSender {
             conn: Arc::clone(&self.conn),
+            log_tx: self.log_tx.clone(),
         })
     }
 }
@@ -68,9 +71,14 @@ impl MidiSender for MidirSender {
 /// Returns `None` when `port_names` is empty (caller should disable MIDI).
 /// When `filter` is `Some(f)`, returns the index of the first port whose name
 /// contains `f` (case-insensitive substring match), or `Some(0)` when no port
-/// matches (falling back to the first port with a logged warning).
+/// matches (falling back to the first port with a logged warning sent on
+/// `log_tx`).
 /// When `filter` is `None`, returns `Some(0)`.
-pub fn select_port_idx(port_names: &[&str], filter: Option<&str>) -> Option<usize> {
+pub fn select_port_idx(
+    port_names: &[&str],
+    filter: Option<&str>,
+    log_tx: &SyncSender<(bool, String)>,
+) -> Option<usize> {
     if port_names.is_empty() {
         return None;
     }
@@ -85,10 +93,13 @@ pub fn select_port_idx(port_names: &[&str], filter: Option<&str>) -> Option<usiz
             match found {
                 Some((idx, _)) => Some(idx),
                 None => {
-                    eprintln!(
-                        "[midi_out] no port matching '{}' found — falling back to first port",
-                        f
-                    );
+                    let _ = log_tx.send((
+                        false,
+                        format!(
+                            "[midi_out] no port matching '{}' found — falling back to first port",
+                            f
+                        ),
+                    ));
                     Some(0)
                 }
             }
@@ -100,18 +111,18 @@ pub fn select_port_idx(port_names: &[&str], filter: Option<&str>) -> Option<usiz
 ///
 /// Returns `None` if no ports are available or the port cannot be opened.
 #[cfg(feature = "hw-io")]
-fn open_port(port_name: Option<&str>) -> Option<Box<dyn MidiSender>> {
+fn open_port(port_name: Option<&str>, log_tx: &SyncSender<(bool, String)>) -> Option<Box<dyn MidiSender>> {
     let output = match midir::MidiOutput::new("midi-man-mk3") {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("[midi_out] failed to create MidiOutput: {e}");
+            let _ = log_tx.send((false, format!("[midi_out] failed to create MidiOutput: {e}")));
             return None;
         }
     };
 
     let ports = output.ports();
     if ports.is_empty() {
-        eprintln!("[midi_out] no ALSA MIDI output ports available — MIDI output disabled");
+        let _ = log_tx.send((false, "[midi_out] no ALSA MIDI output ports available — MIDI output disabled".to_owned()));
         return None;
     }
 
@@ -121,7 +132,7 @@ fn open_port(port_name: Option<&str>) -> Option<Box<dyn MidiSender>> {
         .collect();
     let port_name_refs: Vec<&str> = port_name_strings.iter().map(String::as_str).collect();
 
-    let chosen_idx = select_port_idx(&port_name_refs, port_name).expect("ports is non-empty");
+    let chosen_idx = select_port_idx(&port_name_refs, port_name, log_tx).expect("ports is non-empty");
 
     let port = &ports[chosen_idx];
     let chosen_name = output
@@ -130,13 +141,14 @@ fn open_port(port_name: Option<&str>) -> Option<Box<dyn MidiSender>> {
 
     match output.connect(port, "midi-man-mk3-out") {
         Ok(conn) => {
-            println!("[midi_out] connected to: {chosen_name}");
+            let _ = log_tx.send((true, format!("[midi_out] connected to: {chosen_name}")));
             Some(Box::new(MidirSender {
                 conn: Arc::new(Mutex::new(conn)),
+                log_tx: log_tx.clone(),
             }))
         }
         Err(e) => {
-            eprintln!("[midi_out] failed to connect to '{chosen_name}': {e}");
+            let _ = log_tx.send((false, format!("[midi_out] failed to connect to '{chosen_name}': {e}")));
             None
         }
     }
@@ -203,23 +215,27 @@ pub fn dispatch(sender: &mut Box<dyn MidiSender>, event: MidiEvent) {
 /// Polls `ctrl_rx` non-blockingly before each MIDI recv (50 ms timeout). Exits
 /// when `ctrl_rx` is disconnected or `rx` is disconnected.
 ///
+/// `log_tx` receives `(true, msg)` for info/success and `(false, msg)` for
+/// errors; these are forwarded to the CLI log panel via the UI thread.
+///
 /// Requires the `hw-io` feature (ALSA/midir).
 #[cfg(feature = "hw-io")]
 pub fn run_midi_out(
     rx: Receiver<MidiEvent>,
     ctrl_rx: Receiver<MidiCtrlMsg>,
     port_name: Option<String>,
+    log_tx: SyncSender<(bool, String)>,
 ) {
     use std::sync::mpsc::RecvTimeoutError;
     use std::sync::mpsc::TryRecvError;
 
-    let mut sender = open_port(port_name.as_deref());
+    let mut sender = open_port(port_name.as_deref(), &log_tx);
 
     loop {
         // Non-blocking ctrl check first.
         match ctrl_rx.try_recv() {
             Ok(MidiCtrlMsg::ChangePort(name)) => {
-                sender = open_port(Some(&name));
+                sender = open_port(Some(&name), &log_tx);
             }
             Ok(MidiCtrlMsg::ChangeChannel(_)) => {
                 // Channel is applied at the MidiEvent level via state.midi_channel.
@@ -258,11 +274,15 @@ pub fn run_midi_out_with_sender(rx: Receiver<MidiEvent>, sender: &mut Box<dyn Mi
 /// the `hw-io` feature. The `open_port_fn` closure is called when a
 /// `ChangePort` message arrives; returning `None` disables MIDI output.
 ///
+/// `log_tx` receives `(true, msg)` for info/success and `(false, msg)` for
+/// errors; these are forwarded to the CLI log panel via the UI thread.
+///
 /// Exits when `ctrl_rx` is disconnected or `midi_rx` is disconnected.
 pub fn run_midi_out_with_open_fn<F>(
     midi_rx: std::sync::mpsc::Receiver<MidiEvent>,
     ctrl_rx: std::sync::mpsc::Receiver<MidiCtrlMsg>,
     initial_sender: Option<Box<dyn MidiSender>>,
+    _log_tx: SyncSender<(bool, String)>,
     mut open_port_fn: F,
 ) where
     F: FnMut(&str) -> Option<Box<dyn MidiSender>>,
@@ -335,28 +355,36 @@ mod tests {
 
     // ── select_port_idx ──────────────────────────────────────────────────────
 
+    fn dummy_log_tx() -> mpsc::SyncSender<(bool, String)> {
+        mpsc::sync_channel::<(bool, String)>(1).0
+    }
+
     #[test]
     fn select_port_idx_returns_none_for_empty() {
-        assert_eq!(select_port_idx(&[], None), None);
-        assert_eq!(select_port_idx(&[], Some("foo")), None);
+        let log_tx = dummy_log_tx();
+        assert_eq!(select_port_idx(&[], None, &log_tx), None);
+        assert_eq!(select_port_idx(&[], Some("foo"), &log_tx), None);
     }
 
     #[test]
     fn select_port_idx_returns_zero_with_no_filter() {
+        let log_tx = dummy_log_tx();
         let ports = ["Port A", "Port B"];
-        assert_eq!(select_port_idx(&ports, None), Some(0));
+        assert_eq!(select_port_idx(&ports, None, &log_tx), Some(0));
     }
 
     #[test]
     fn select_port_idx_matches_case_insensitively() {
+        let log_tx = dummy_log_tx();
         let ports = ["ALSA Port 0", "USB Synth"];
-        assert_eq!(select_port_idx(&ports, Some("synth")), Some(1));
+        assert_eq!(select_port_idx(&ports, Some("synth"), &log_tx), Some(1));
     }
 
     #[test]
     fn select_port_idx_falls_back_to_zero_on_no_match() {
+        let log_tx = dummy_log_tx();
         let ports = ["Port A", "Port B"];
-        assert_eq!(select_port_idx(&ports, Some("zzz")), Some(0));
+        assert_eq!(select_port_idx(&ports, Some("zzz"), &log_tx), Some(0));
     }
 
     // ── dispatch ─────────────────────────────────────────────────────────────
@@ -415,8 +443,9 @@ mod tests {
         drop(midi_tx);
 
         // The thread should finish without hanging or panicking.
+        let log_tx = mpsc::sync_channel::<(bool, String)>(1).0;
         let handle = std::thread::spawn(move || {
-            run_midi_out_with_open_fn(midi_rx, ctrl_rx, None, |_| None);
+            run_midi_out_with_open_fn(midi_rx, ctrl_rx, None, log_tx, |_| None);
         });
 
         handle
@@ -440,8 +469,9 @@ mod tests {
         let port_change_received = Arc::new(Mutex::new(false));
         let flag = Arc::clone(&port_change_received);
 
+        let log_tx = mpsc::sync_channel::<(bool, String)>(1).0;
         let handle = std::thread::spawn(move || {
-            run_midi_out_with_open_fn(midi_rx, ctrl_rx, None, |_name| {
+            run_midi_out_with_open_fn(midi_rx, ctrl_rx, None, log_tx, |_name| {
                 *flag.lock().unwrap() = true;
                 None // no real ALSA hardware in tests
             });

@@ -398,6 +398,8 @@ fn translate_key(
 /// - `ui_notify_rx`  — wakeup channel; the clock and HID threads send `()` after each
 ///   state mutation.  A 50 ms timeout fires if no wakeup arrives.
 /// - `midi_ctrl_tx`  — control channel to the MIDI output thread (port/channel changes).
+/// - `midi_log_rx`   — log messages from the MIDI output thread; drained each frame and
+///   pushed into the CLI log panel.  `true` = info/success, `false` = error.
 ///
 /// # Termination
 ///
@@ -410,6 +412,7 @@ pub fn run_ui(
     cmd_tx: SyncSender<InputCommand>,
     ui_notify_rx: Receiver<()>,
     midi_ctrl_tx: SyncSender<MidiCtrlMsg>,
+    midi_log_rx: Receiver<(bool, String)>,
 ) {
     let _guard = match TerminalGuard::enter() {
         Ok(g) => g,
@@ -431,6 +434,15 @@ pub fn run_ui(
     let mut ui = UiState::new();
 
     loop {
+        // ── Drain MIDI log messages ───────────────────────────────────────────
+        // Route messages from the MIDI output thread into the CLI log panel
+        // before rendering so this frame shows the latest MIDI status.
+        while let Ok((ok, msg)) = midi_log_rx.try_recv() {
+            let ts = ui.start_time.elapsed().as_millis() as u64;
+            let tag = if ok { crate::ui_render::LogTag::Midi } else { crate::ui_render::LogTag::Err };
+            push_log(&mut ui.cli_log, ts, tag, msg);
+        }
+
         // ── Render ───────────────────────────────────────────────────────────
         // Acquire read lock, clone state, release lock, then render.
         let state_snapshot = { state.read().expect("run_ui: state RwLock poisoned").clone() };

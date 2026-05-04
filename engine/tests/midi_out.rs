@@ -7,6 +7,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+fn dummy_log_tx() -> std::sync::mpsc::SyncSender<(bool, String)> {
+    std::sync::mpsc::sync_channel::<(bool, String)>(1).0
+}
+
 /// Shared byte log accessible from both the main thread and spawned note-off threads.
 type Log = Arc<Mutex<Vec<u8>>>;
 
@@ -348,62 +352,70 @@ fn concurrent_note_ons_all_note_offs_arrive_in_deadline_order() {
 /// Empty port list returns None.
 #[test]
 fn select_port_idx_empty_list_returns_none() {
-    assert_eq!(select_port_idx(&[], None), None);
-    assert_eq!(select_port_idx(&[], Some("anything")), None);
+    let log_tx = dummy_log_tx();
+    assert_eq!(select_port_idx(&[], None, &log_tx), None);
+    assert_eq!(select_port_idx(&[], Some("anything"), &log_tx), None);
 }
 
 /// No filter: always returns index 0.
 #[test]
 fn select_port_idx_no_filter_returns_first() {
+    let log_tx = dummy_log_tx();
     let ports = ["PortA", "PortB", "PortC"];
-    assert_eq!(select_port_idx(&ports, None), Some(0));
+    assert_eq!(select_port_idx(&ports, None, &log_tx), Some(0));
 }
 
 /// Case-insensitive substring match finds the correct port.
 #[test]
 fn select_port_idx_case_insensitive_match() {
+    let log_tx = dummy_log_tx();
     let ports = ["FluidSynth virtual port", "USB MIDI", "Timidity"];
     // Lowercase filter matches uppercase port name.
-    assert_eq!(select_port_idx(&ports, Some("fluidsynth")), Some(0));
+    assert_eq!(select_port_idx(&ports, Some("fluidsynth"), &log_tx), Some(0));
     // Uppercase filter matches mixed-case port name.
-    assert_eq!(select_port_idx(&ports, Some("MIDI")), Some(1));
+    assert_eq!(select_port_idx(&ports, Some("MIDI"), &log_tx), Some(1));
     // Partial substring match.
-    assert_eq!(select_port_idx(&ports, Some("imid")), Some(2));
+    assert_eq!(select_port_idx(&ports, Some("imid"), &log_tx), Some(2));
 }
 
 /// Exact match (full port name) is found.
 #[test]
 fn select_port_idx_exact_name_match() {
+    let log_tx = dummy_log_tx();
     let ports = ["Alpha", "Beta", "Gamma"];
-    assert_eq!(select_port_idx(&ports, Some("Beta")), Some(1));
+    assert_eq!(select_port_idx(&ports, Some("Beta"), &log_tx), Some(1));
 }
 
 /// When no port matches the filter, falls back to index 0.
 #[test]
 fn select_port_idx_no_match_falls_back_to_zero() {
+    let log_tx = dummy_log_tx();
     let ports = ["PortA", "PortB"];
-    assert_eq!(select_port_idx(&ports, Some("ZZZ_nonexistent")), Some(0));
+    assert_eq!(select_port_idx(&ports, Some("ZZZ_nonexistent"), &log_tx), Some(0));
 }
 
 /// Single-port list with matching filter.
 #[test]
 fn select_port_idx_single_port_matches() {
+    let log_tx = dummy_log_tx();
     let ports = ["OnlyPort"];
-    assert_eq!(select_port_idx(&ports, Some("only")), Some(0));
+    assert_eq!(select_port_idx(&ports, Some("only"), &log_tx), Some(0));
 }
 
 /// Single-port list with non-matching filter still returns 0 (fallback).
 #[test]
 fn select_port_idx_single_port_no_match_falls_back() {
+    let log_tx = dummy_log_tx();
     let ports = ["OnlyPort"];
-    assert_eq!(select_port_idx(&ports, Some("other")), Some(0));
+    assert_eq!(select_port_idx(&ports, Some("other"), &log_tx), Some(0));
 }
 
 /// Filter matches the last port in the list.
 #[test]
 fn select_port_idx_matches_last_port() {
+    let log_tx = dummy_log_tx();
     let ports = ["Alpha", "Beta", "Gamma", "Delta"];
-    assert_eq!(select_port_idx(&ports, Some("delta")), Some(3));
+    assert_eq!(select_port_idx(&ports, Some("delta"), &log_tx), Some(3));
 }
 
 // -----------------------------------------------------------------------
@@ -418,42 +430,47 @@ fn select_port_idx_matches_last_port() {
 /// index 0 (the first port), not the fallback path.
 #[test]
 fn select_port_idx_empty_filter_matches_first_port() {
+    let log_tx = dummy_log_tx();
     let ports = ["Alpha", "Beta", "Gamma"];
     // "" is contained in every string, so port 0 matches directly.
-    assert_eq!(select_port_idx(&ports, Some("")), Some(0));
+    assert_eq!(select_port_idx(&ports, Some(""), &log_tx), Some(0));
 }
 
 /// When the filter matches ports at indices 1 and 2, the *first* match
 /// (index 1) is returned — not index 0 or 2.
 #[test]
 fn select_port_idx_filter_matches_multiple_returns_first_match() {
+    let log_tx = dummy_log_tx();
     let ports = ["Alpha", "BetaMIDI", "GammaMIDI"];
     // Both ports 1 and 2 contain "midi" — port 1 must win.
-    assert_eq!(select_port_idx(&ports, Some("midi")), Some(1));
+    assert_eq!(select_port_idx(&ports, Some("midi"), &log_tx), Some(1));
 }
 
 /// Filter is all uppercase; port names are all lowercase. Case-insensitive
 /// match must still succeed.
 #[test]
 fn select_port_idx_uppercase_filter_matches_lowercase_port() {
+    let log_tx = dummy_log_tx();
     let ports = ["fluidsynth", "timidity", "usb"];
-    assert_eq!(select_port_idx(&ports, Some("FLUID")), Some(0));
-    assert_eq!(select_port_idx(&ports, Some("TIMIDITY")), Some(1));
+    assert_eq!(select_port_idx(&ports, Some("FLUID"), &log_tx), Some(0));
+    assert_eq!(select_port_idx(&ports, Some("TIMIDITY"), &log_tx), Some(1));
 }
 
 /// With five ports and a non-matching filter, fallback is still index 0
 /// regardless of list length.
 #[test]
 fn select_port_idx_fallback_with_many_ports_returns_zero() {
+    let log_tx = dummy_log_tx();
     let ports = ["PortA", "PortB", "PortC", "PortD", "PortE"];
-    assert_eq!(select_port_idx(&ports, Some("ZZZ_nonexistent")), Some(0));
+    assert_eq!(select_port_idx(&ports, Some("ZZZ_nonexistent"), &log_tx), Some(0));
 }
 
 /// Filter matches exactly one port that is not index 0 in a longer list.
 #[test]
 fn select_port_idx_unique_match_not_at_zero() {
+    let log_tx = dummy_log_tx();
     let ports = ["Alpha", "Beta", "SpecialSynth", "Delta", "Epsilon"];
-    assert_eq!(select_port_idx(&ports, Some("special")), Some(2));
+    assert_eq!(select_port_idx(&ports, Some("special"), &log_tx), Some(2));
 }
 
 // -----------------------------------------------------------------------
@@ -483,7 +500,7 @@ fn change_channel_is_noop_loop_continues() {
     drop(ctrl_tx);
     drop(midi_tx);
 
-    run_midi_out_with_open_fn(midi_rx, ctrl_rx, initial_sender, |_| None);
+    run_midi_out_with_open_fn(midi_rx, ctrl_rx, initial_sender, dummy_log_tx(), |_| None);
 
     // The Start event must still have been dispatched — sender was not replaced.
     let bytes = log.lock().expect("lock").clone();
@@ -512,7 +529,7 @@ fn change_port_no_match_sender_becomes_none_no_crash() {
 
     // If the loop panics this test fails via join().
     let handle = std::thread::spawn(move || {
-        run_midi_out_with_open_fn(midi_rx, ctrl_rx, initial_sender, |_name| {
+        run_midi_out_with_open_fn(midi_rx, ctrl_rx, initial_sender, dummy_log_tx(), |_name| {
             None // port not found
         });
     });
@@ -579,7 +596,7 @@ fn multiple_change_port_last_port_is_active() {
 
     drop(midi_tx); // only the thread clone keeps midi_rx live
 
-    run_midi_out_with_open_fn(midi_rx, ctrl_rx, None, move |name| {
+    run_midi_out_with_open_fn(midi_rx, ctrl_rx, None, dummy_log_tx(), move |name: &str| {
         ports_opened_clone
             .lock()
             .expect("ports_opened lock")
@@ -620,7 +637,7 @@ fn events_dropped_silently_when_no_sender() {
 
     // initial_sender = None; open_port_fn never called (no ChangePort msgs).
     let handle = std::thread::spawn(move || {
-        run_midi_out_with_open_fn(midi_rx, ctrl_rx, None, |_| None);
+        run_midi_out_with_open_fn(midi_rx, ctrl_rx, None, dummy_log_tx(), |_| None);
     });
 
     handle

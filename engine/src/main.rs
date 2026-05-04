@@ -53,6 +53,9 @@ fn main() {
     // midi_ctrl: ui -> midi_out  (runtime port/channel changes from F4 CLI)
     #[cfg(feature = "hw-io")]
     let (midi_ctrl_tx, midi_ctrl_rx) = mpsc::sync_channel::<MidiCtrlMsg>(16);
+    // midi_log: midi_out -> ui  (MIDI thread log messages routed into CLI panel)
+    #[cfg(feature = "hw-io")]
+    let (midi_log_tx, midi_log_rx) = mpsc::sync_channel::<(bool, String)>(64);
 
     // --- Thread 1: MIDI output (hw-io only) ---
     #[cfg(feature = "hw-io")]
@@ -60,9 +63,10 @@ fn main() {
         let rx = midi_rx;
         let ctrl_rx = midi_ctrl_rx;
         let port_name = selected_midi_port;
+        let log_tx = midi_log_tx;
         std::thread::Builder::new()
             .name("midi-out".to_owned())
-            .spawn(move || engine::midi_out::run_midi_out(rx, ctrl_rx, port_name))
+            .spawn(move || engine::midi_out::run_midi_out(rx, ctrl_rx, port_name, log_tx))
             .expect("failed to spawn midi-out thread")
     };
     // Without hw-io there is no clock or midi thread — drop midi_rx immediately.
@@ -151,7 +155,7 @@ fn main() {
         let ui_ctrl_tx = midi_ctrl_tx.clone(); // pass clone; original stays alive in main
         let ui_thread = std::thread::Builder::new()
             .name("ui".to_owned())
-            .spawn(move || engine::ui::run_ui(ui_state, ui_cmd_tx, ui_notify_rx, ui_ctrl_tx))
+            .spawn(move || engine::ui::run_ui(ui_state, ui_cmd_tx, ui_notify_rx, ui_ctrl_tx, midi_log_rx))
             .expect("failed to spawn ui thread");
 
         // Block until UI exits (user pressed Ctrl-C).
