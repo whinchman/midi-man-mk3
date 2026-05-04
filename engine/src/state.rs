@@ -466,19 +466,19 @@ impl SequencerState {
             }
             InputCommand::NoteDelta(d) => {
                 let step = self.selected_step;
-                // BUG-010 fix: use pending note as base so repeated presses accumulate.
-                let base_note = match self.pending_edit {
-                    PendingEdit::Note {
-                        step: ps,
-                        midi_note,
-                    } if ps == step => midi_note,
-                    _ => self.steps[step].midi_note,
-                };
-                let new_note = crate::music_theory::next_note(base_note, self.key, self.mode, d);
-                self.pending_edit = PendingEdit::Note {
-                    step,
-                    midi_note: new_note,
-                };
+                // BUG-035: apply immediately — the new focus model has no overlay/cancel.
+                // Repeated presses accumulate on the committed note value.
+                let new_note = crate::music_theory::next_note(
+                    self.steps[step].midi_note,
+                    self.key,
+                    self.mode,
+                    d,
+                );
+                self.steps[step].midi_note = new_note;
+                // Clear stale pending note edit for this step so Confirm is a no-op.
+                if matches!(self.pending_edit, PendingEdit::Note { step: ps, .. } if ps == step) {
+                    self.pending_edit = PendingEdit::None;
+                }
             }
             InputCommand::Confirm => {
                 match self.pending_edit {
@@ -1133,6 +1133,48 @@ mod tests {
         assert_eq!(
             state.tempo_rand, original_tempo_rand,
             "PanelParamDelta must not change tempo_rand"
+        );
+    }
+
+    // ── BUG-035: NoteDelta must apply immediately without Confirm ────────────
+
+    #[test]
+    fn note_delta_applies_immediately_without_confirm() {
+        let mut state = SequencerState::default();
+        let original_note = state.steps[0].midi_note;
+        // Apply NoteDelta — note must be written immediately, no Confirm needed.
+        state.apply_command(InputCommand::NoteDelta(1));
+        assert_ne!(
+            state.steps[0].midi_note, original_note,
+            "NoteDelta(1) must update steps[selected_step].midi_note immediately"
+        );
+    }
+
+    #[test]
+    fn note_delta_clears_pending_note_edit() {
+        let mut state = SequencerState::default();
+        // Manually install a stale PendingEdit::Note for the current step.
+        state.pending_edit = PendingEdit::Note {
+            step: 0,
+            midi_note: 42,
+        };
+        state.apply_command(InputCommand::NoteDelta(1));
+        assert_eq!(
+            state.pending_edit,
+            PendingEdit::None,
+            "NoteDelta must clear a stale PendingEdit::Note for the same step"
+        );
+    }
+
+    #[test]
+    fn note_delta_does_not_affect_other_steps() {
+        let mut state = SequencerState::default();
+        // selected_step is 0 by default; record step 1's note.
+        let step1_note = state.steps[1].midi_note;
+        state.apply_command(InputCommand::NoteDelta(1));
+        assert_eq!(
+            state.steps[1].midi_note, step1_note,
+            "NoteDelta must only modify the selected step, not other steps"
         );
     }
 }

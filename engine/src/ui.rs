@@ -317,11 +317,24 @@ fn translate_key(
 
     // ── Focus-specific keys ────────────────────────────────────────────────────
     match ui.focus {
-        FocusPanel::Sequencer => {
-            if let Some(cmd) = panel_key_to_command(simple, FocusPanel::Sequencer) {
-                let _ = cmd_tx.send(cmd);
+        FocusPanel::Sequencer => match simple {
+            // BUG-034: update ui.selected_step here so the render reflects the
+            // new highlighted step immediately.  ui.selected_step must stay in
+            // sync with SequencerState.selected_step (updated via cmd_tx below).
+            KeyCodeSimple::Left => {
+                ui.selected_step = ui.selected_step.saturating_sub(1);
+                let _ = cmd_tx.send(InputCommand::StepSelectDelta(-1));
             }
-        }
+            KeyCodeSimple::Right => {
+                ui.selected_step = (ui.selected_step + 1).min(15);
+                let _ = cmd_tx.send(InputCommand::StepSelectDelta(1));
+            }
+            key => {
+                if let Some(cmd) = panel_key_to_command(key, FocusPanel::Sequencer) {
+                    let _ = cmd_tx.send(cmd);
+                }
+            }
+        },
         FocusPanel::SeqParams => match simple {
             KeyCodeSimple::Left => {
                 ui.seq_param_idx = ui.seq_param_idx.saturating_sub(1);

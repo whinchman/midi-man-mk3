@@ -509,45 +509,51 @@ fn apply_command_step_select_delta_advances_normally() {
 
 #[test]
 fn apply_command_note_delta_sets_pending_note_edit() {
+    // BUG-035: NoteDelta now applies immediately; no PendingEdit::Note is created.
     let mut s = SequencerState::default();
     s.selected_step = 2;
     // default midi_note = 60 (C4), C Major. Scale-degree delta=+1 → D4=62.
     s.apply_command(InputCommand::NoteDelta(1));
-    assert!(matches!(
-        s.pending_edit,
-        PendingEdit::Note {
-            step: 2,
-            midi_note: 62
-        }
-    ));
+    assert_eq!(
+        s.steps[2].midi_note, 62,
+        "NoteDelta(1) must write D4=62 directly to steps[2].midi_note"
+    );
+    assert!(
+        matches!(s.pending_edit, PendingEdit::None),
+        "NoteDelta must not create a PendingEdit::Note"
+    );
 }
 
 #[test]
 fn apply_command_note_delta_negative_clamps_at_0() {
+    // BUG-035: NoteDelta applies immediately; result is clamped to 0.
     let mut s = SequencerState::default();
     s.steps[0].midi_note = 0;
     s.apply_command(InputCommand::NoteDelta(-5));
-    assert!(matches!(
-        s.pending_edit,
-        PendingEdit::Note {
-            step: 0,
-            midi_note: 0
-        }
-    ));
+    assert_eq!(
+        s.steps[0].midi_note, 0,
+        "NoteDelta(-5) from note 0 must clamp at 0"
+    );
+    assert!(
+        matches!(s.pending_edit, PendingEdit::None),
+        "NoteDelta must not create a PendingEdit::Note"
+    );
 }
 
 #[test]
 fn apply_command_note_delta_positive_clamps_at_127() {
+    // BUG-035: NoteDelta applies immediately; result is clamped to 127.
     let mut s = SequencerState::default();
     s.steps[0].midi_note = 127;
     s.apply_command(InputCommand::NoteDelta(10));
-    assert!(matches!(
-        s.pending_edit,
-        PendingEdit::Note {
-            step: 0,
-            midi_note: 127
-        }
-    ));
+    assert_eq!(
+        s.steps[0].midi_note, 127,
+        "NoteDelta(10) from note 127 must clamp at 127"
+    );
+    assert!(
+        matches!(s.pending_edit, PendingEdit::None),
+        "NoteDelta must not create a PendingEdit::Note"
+    );
 }
 
 #[test]
@@ -905,32 +911,39 @@ fn apply_command_toggle_step_toggles_selected() {
 
 #[test]
 fn apply_command_note_delta_creates_pending_edit() {
+    // BUG-035: NoteDelta now applies immediately; the step note is written directly.
     let mut s = SequencerState::default();
     s.selected_step = 0;
     // default midi_note = 60 (C4), C Major. Scale-degree delta=+2 → E4=64 (C→D→E).
     s.apply_command(InputCommand::NoteDelta(2));
-    assert!(matches!(
-        s.pending_edit,
-        PendingEdit::Note {
-            step: 0,
-            midi_note: 64
-        }
-    ));
+    assert_eq!(
+        s.steps[0].midi_note, 64,
+        "NoteDelta(2) from C4 in C Major must write E4=64 directly"
+    );
+    assert!(
+        matches!(s.pending_edit, PendingEdit::None),
+        "NoteDelta must not create a PendingEdit::Note"
+    );
 }
 
 #[test]
 fn apply_command_confirm_commits_pending_note() {
+    // BUG-035: NoteDelta now applies immediately; the note is visible right away
+    // without a Confirm. Confirm on an empty pending_edit is a no-op.
     let mut s = SequencerState::default();
     s.selected_step = 0;
     s.apply_command(InputCommand::NoteDelta(5));
-    let pending = match s.pending_edit {
-        PendingEdit::Note { midi_note, .. } => midi_note,
-        _ => panic!("expected PendingEdit::Note"),
-    };
+    // Note must already be written — no pending edit remains.
+    let applied_note = s.steps[0].midi_note;
+    assert!(
+        matches!(s.pending_edit, PendingEdit::None),
+        "NoteDelta must not leave a PendingEdit::Note"
+    );
+    // Confirm is a no-op; note must remain the same.
     s.apply_command(InputCommand::Confirm);
     assert_eq!(
-        s.steps[0].midi_note, pending,
-        "Confirm should commit pending note"
+        s.steps[0].midi_note, applied_note,
+        "Confirm after immediate NoteDelta must not change the note"
     );
     assert!(matches!(s.pending_edit, PendingEdit::None));
 }
@@ -948,23 +961,22 @@ fn apply_command_open_close_overlay() {
 
 #[test]
 fn note_delta_up_five_times_advances_five_scale_degrees() {
-    // BUG-010: Each NoteDelta(1) should use the pending note as the base so
-    // pressing Up five times advances five scale degrees, not one.
+    // BUG-035: NoteDelta applies immediately. Repeated presses accumulate because
+    // each press reads from the already-updated steps[step].midi_note.
     let mut s = SequencerState::default();
     s.selected_step = 0;
     // default: C4=60, C Major. After 5 ups should be A4=69 (C→D→E→F→G→A).
     for _ in 0..5 {
         s.apply_command(InputCommand::NoteDelta(1));
     }
-    match s.pending_edit {
-        PendingEdit::Note { step: 0, midi_note } => {
-            assert_eq!(
-                midi_note, 69,
-                "5× NoteDelta(1) from C4 in C Major should reach A4=69"
-            );
-        }
-        other => panic!("expected PendingEdit::Note at step 0, got {:?}", other),
-    }
+    assert_eq!(
+        s.steps[0].midi_note, 69,
+        "5× NoteDelta(1) from C4 in C Major should reach A4=69"
+    );
+    assert!(
+        matches!(s.pending_edit, PendingEdit::None),
+        "no PendingEdit should remain after immediate applies"
+    );
 }
 
 #[test]
@@ -1273,50 +1285,48 @@ fn tick_velocity_preserved_after_velocity_edit_committed() {
 
 #[test]
 fn note_delta_down_from_pending_not_committed_base() {
-    // BUG-010: After one NoteDelta(1) → pending=D4=62, a subsequent NoteDelta(-1)
-    // should go back to C4=60 using the pending note as base, not the committed note.
+    // BUG-035: NoteDelta applies immediately. Each subsequent delta uses the
+    // already-committed note as the base, so +1 then -1 returns to the start.
     let mut s = SequencerState::default();
     s.selected_step = 0;
     // step: C4=60
-    s.apply_command(InputCommand::NoteDelta(1)); // C→D, pending=62
-    s.apply_command(InputCommand::NoteDelta(-1)); // D→C, pending=60
-    match s.pending_edit {
-        PendingEdit::Note { step: 0, midi_note } => {
-            assert_eq!(
-                midi_note, 60,
-                "NoteDelta(-1) after +1 should return to C4=60"
-            );
-        }
-        other => panic!("expected PendingEdit::Note at step 0, got {:?}", other),
-    }
+    s.apply_command(InputCommand::NoteDelta(1)); // C→D, committed=62
+    s.apply_command(InputCommand::NoteDelta(-1)); // D→C, committed=60
+    assert_eq!(
+        s.steps[0].midi_note, 60,
+        "NoteDelta(-1) after +1 should return to C4=60"
+    );
+    assert!(
+        matches!(s.pending_edit, PendingEdit::None),
+        "no PendingEdit should remain after immediate applies"
+    );
 }
 
 #[test]
 fn note_delta_resets_base_when_step_changes() {
-    // After changing selected_step, the pending edit for the old step is cleared.
-    // A new NoteDelta on the new step must use the committed note of that step.
+    // BUG-035: NoteDelta applies immediately. After changing selected_step,
+    // a new NoteDelta uses the committed note of the newly-selected step.
     let mut s = SequencerState::default();
     s.steps[0].midi_note = 60; // C4
     s.steps[3].midi_note = 67; // G4
     s.selected_step = 0;
-    s.apply_command(InputCommand::NoteDelta(3)); // C→E→F→G? let's just check clearing
-    s.apply_command(InputCommand::StepSelect(3)); // pending cleared
+    s.apply_command(InputCommand::NoteDelta(3)); // applies to step 0
+    s.apply_command(InputCommand::StepSelect(3)); // moves focus to step 3, clears any pending
     assert!(
         matches!(s.pending_edit, PendingEdit::None),
         "StepSelect must clear pending note"
     );
     // Now delta on step 3 must use step 3's committed note (G4=67).
     s.apply_command(InputCommand::NoteDelta(1)); // G4 → next scale degree
-    match s.pending_edit {
-        PendingEdit::Note { step: 3, midi_note } => {
-            // G4=67 in C Major, +1 = A4=69
-            assert_eq!(
-                midi_note, 69,
-                "NoteDelta(1) from G4=67 in C Major should give A4=69"
-            );
-        }
-        other => panic!("expected PendingEdit::Note at step 3, got {:?}", other),
-    }
+    // G4=67 in C Major, +1 = A4=69
+    assert_eq!(
+        s.steps[3].midi_note, 69,
+        "NoteDelta(1) from G4=67 in C Major should give A4=69"
+    );
+    assert!(
+        matches!(s.pending_edit, PendingEdit::None),
+        "no PendingEdit should remain after immediate apply"
+    );
 }
 
 // ── BUG-011: ParamValueDelta additional seeding tests ────────────────────────
