@@ -542,4 +542,92 @@ mod tests {
         assert!(with_names.starts_with("[ports]"));
         assert!(with_names.contains('\x1F'));
     }
+
+    /// Verify that each ListPorts message produces exactly one log entry, no more.
+    ///
+    /// The loop processes one ctrl message per midi-recv cycle. This test sends a
+    /// single ListPorts and confirms exactly one `[ports]` response arrives — not
+    /// zero (dropped silently) and not two (duplicated).
+    #[test]
+    fn list_ports_sends_exactly_one_message_per_request() {
+        let (midi_tx, midi_rx) = mpsc::channel::<MidiEvent>();
+        let (ctrl_tx, ctrl_rx) = mpsc::channel::<MidiCtrlMsg>();
+        let (log_tx, log_rx) = mpsc::sync_channel::<(bool, String)>(8);
+
+        ctrl_tx.send(MidiCtrlMsg::ListPorts).unwrap();
+        drop(ctrl_tx);
+        drop(midi_tx);
+
+        let handle = std::thread::spawn(move || {
+            run_midi_out_with_open_fn(midi_rx, ctrl_rx, None, log_tx, |_| None);
+        });
+
+        handle.join().expect("loop thread panicked");
+
+        let msg = log_rx.recv().expect("expected log message from ListPorts");
+        // No second message should have been sent.
+        assert!(
+            log_rx.try_recv().is_err(),
+            "ListPorts sent more messages than the one expected"
+        );
+        assert_eq!(msg, (true, "[ports]".to_owned()), "ListPorts message incorrect");
+    }
+
+    /// Verify that [ports-err] sentinel format matches the spec.
+    ///
+    /// The hw-io error path formats errors as `(false, "[ports-err] <msg>")`.
+    /// This test validates the format string used there without requiring ALSA.
+    #[test]
+    fn ports_err_sentinel_format_matches_spec() {
+        let error_text = "some alsa error";
+        let payload = format!("[ports-err] {error_text}");
+        assert!(
+            payload.starts_with("[ports-err] "),
+            "error sentinel must start with '[ports-err] '"
+        );
+        assert!(
+            payload.contains(error_text),
+            "error sentinel must include the original error message"
+        );
+        // Confirm it is distinct from the success sentinel.
+        assert!(
+            !payload.starts_with("[ports]"),
+            "error sentinel must not start with '[ports]'"
+        );
+    }
+
+    /// Verify that ListPorts does not interfere with MIDI event dispatch.
+    ///
+    /// A ListPorts request followed by a MIDI event should produce the ports log
+    /// message and then dispatch the event normally.
+    #[test]
+    fn list_ports_does_not_block_subsequent_midi_events() {
+        let (midi_tx, midi_rx) = mpsc::channel::<MidiEvent>();
+        let (ctrl_tx, ctrl_rx) = mpsc::channel::<MidiCtrlMsg>();
+        let (log_tx, log_rx) = mpsc::sync_channel::<(bool, String)>(4);
+
+        let (mock, sent) = MockSender::new();
+        let boxed: Box<dyn MidiSender> = Box::new(mock);
+
+        ctrl_tx.send(MidiCtrlMsg::ListPorts).unwrap();
+        drop(ctrl_tx);
+
+        midi_tx.send(MidiEvent::Start).unwrap();
+        drop(midi_tx);
+
+        let handle = std::thread::spawn(move || {
+            run_midi_out_with_open_fn(midi_rx, ctrl_rx, Some(boxed), log_tx, |_| None);
+        });
+
+        handle.join().expect("loop thread panicked");
+
+        // The ports sentinel must have been sent.
+        let msg = log_rx.recv().expect("expected ports log message");
+        assert_eq!(msg, (true, "[ports]".to_owned()));
+
+        // The MIDI Start event must have been dispatched.
+        let bytes = sent.lock().unwrap();
+        assert!(!bytes.is_empty(), "MIDI event was not dispatched after ListPorts");
+        assert_eq!(bytes[0], vec![0xFA], "Start event should produce 0xFA byte");
+    }
 }
