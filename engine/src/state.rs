@@ -610,11 +610,18 @@ impl SequencerState {
             InputCommand::MidiDeviceName(name) => {
                 self.midi_device_name = name;
             }
-            // Focus and panel param commands are handled at the UI layer.
-            // state.rs is not the consumer of these variants.
+            // SetFocus is handled at the UI layer; state doesn't track focus.
             InputCommand::SetFocus(_) => {}
-            InputCommand::PanelParamSelect(_) => {}
-            InputCommand::PanelParamDelta(_) => {}
+            // PanelParamSelect: jump to an absolute param index (clamped to 0–7).
+            InputCommand::PanelParamSelect(n) => {
+                self.selected_param = n.min(7);
+            }
+            // PanelParamDelta: adjust selected param value immediately (no pending edit).
+            InputCommand::PanelParamDelta(d) => {
+                let current = self.committed_param_value(self.selected_param);
+                let new_val = self.clamped_param_value(self.selected_param, current + d as i64);
+                self.apply_param_value(self.selected_param, new_val);
+            }
         }
     }
 
@@ -1003,6 +1010,53 @@ mod tests {
         assert_eq!(
             state.midi_device_name, "",
             "MidiDeviceName with empty string must clear the stored name"
+        );
+    }
+
+    // ── BUG-031: PanelParamSelect and PanelParamDelta ────────────────────────
+
+    #[test]
+    fn panel_param_select_sets_selected_param() {
+        let mut state = SequencerState::default();
+        state.apply_command(InputCommand::PanelParamSelect(3));
+        assert_eq!(state.selected_param, 3, "PanelParamSelect(3) should set selected_param to 3");
+    }
+
+    #[test]
+    fn panel_param_select_clamps_to_7() {
+        let mut state = SequencerState::default();
+        state.apply_command(InputCommand::PanelParamSelect(255));
+        assert_eq!(
+            state.selected_param, 7,
+            "PanelParamSelect(255) should clamp selected_param to 7"
+        );
+    }
+
+    #[test]
+    fn panel_param_delta_adjusts_swing() {
+        // Param index 2 = swing (-50..=50).
+        let mut state = SequencerState::default();
+        state.swing = 10;
+        // Select param index 2 (Swing).
+        state.apply_command(InputCommand::PanelParamSelect(2));
+        // Apply a delta of +5.
+        state.apply_command(InputCommand::PanelParamDelta(5));
+        assert_eq!(
+            state.swing, 15,
+            "PanelParamDelta(5) with Swing selected should increase swing by 5"
+        );
+    }
+
+    #[test]
+    fn panel_param_delta_clamps_at_boundary() {
+        // Swing at max (50) + delta(10) must stay at 50.
+        let mut state = SequencerState::default();
+        state.swing = 50;
+        state.apply_command(InputCommand::PanelParamSelect(2));
+        state.apply_command(InputCommand::PanelParamDelta(10));
+        assert_eq!(
+            state.swing, 50,
+            "PanelParamDelta(10) when swing is already at 50 should clamp to 50"
         );
     }
 }
