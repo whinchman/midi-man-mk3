@@ -146,3 +146,171 @@ running 0 tests
 
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 ```
+
+### Code review (2026-05-13)
+
+Reviewer: code-reviewer agent. Diff size: +336 / -66 across engine/src/ui.rs
+and engine/src/midi_out.rs. Verdict: **approve**.
+
+#### Fix-by-fix verification
+
+- **Fix 1 — 1–16 step indexing.**
+  - `handle_cli_note_set` (engine/src/ui.rs:246-263): predicate is
+    `Some(s) if (1..=16).contains(&s) => s`, rejecting 0 and >16. Error
+    message reads `"step must be 1–16"`. Internal `step = user_step - 1` is
+    correctly 0-indexed. Success log uses `format!("note set {user_step} →
+    {} vel {velocity}", …)`, preserving the user-facing 1–16 value (e.g.
+    `note set 4` logs as `note set 4`, not `note set 3`).
+  - `HELP_ENTRIES` updated to `"note set <1-16> <note> [vel]"`.
+  - `note_set_step_16_is_valid_boundary` (line 1425) renamed correctly,
+    asserts `InputCommand::NoteSet { step: 15, .. }` for input `note set 16
+    A4`.
+  - `note_set_step_out_of_range_logs_error` (line 1361) asserts both 0 and
+    17 are rejected.
+  - `note_set_valid_sends_note_set_cmd_and_logs_cmd` (line 1306) updated:
+    input `note set 4 C4`, asserts emitted `step: 3` and log text contains
+    `"note set 4"`.
+
+- **Fix 2 — trailing-token rejection.**
+  - `handle_cli_note_set` (engine/src/ui.rs:315-323): after velocity parse,
+    `if parts.next().is_some()` logs `LogTag::Err` with `"note set:
+    unexpected trailing input"` and returns without sending. Order is
+    correct (after the velocity Some-branch, before the `cmd_tx.send`).
+  - Test `note_set_rejects_trailing_tokens` (line 1439) covers input
+    `note set 3 C4 64 extra`, asserts `cmd_rx.try_recv().is_err()` (zero
+    `InputCommand` sent), single `LogTag::Err` log entry containing
+    `"unexpected trailing input"`.
+
+- **Fix 3 — doc-only on `parse_ports_sentinel`.**
+  - Doc updated (engine/src/ui.rs:354-355) to the two-bullet form
+    specified.
+  - Function body is semantically unchanged. The single-line
+    `Some(payload.split('\x1f').map(...).collect())` was reformatted to
+    multi-line by rustfmt — same parser, same output. Test
+    `parse_ports_sentinel_non_sentinel_err_returns_none` is unchanged and
+    passes.
+
+- **Fix 4 — stale comment in `run_ui`.**
+  - engine/src/ui.rs:637 now reads `(false, "[ports-err] ...")        →
+    LogTag::Err via parse_ports_sentinel`. Match is exact.
+
+- **Fix 5 — `ListPorts` blank-entry guard.**
+  - engine/src/midi_out.rs:268-280: names mapping uses
+    `.enumerate().map(|(idx, p)| match output.port_name(p) { Ok(name) if
+    !name.is_empty() => name, _ => format!("port #{idx}") })`, followed by
+    a defensive `.filter(|name| !name.is_empty())`. The fallback covers
+    both the `Err` arm AND the `Ok(empty)` arm, which is stricter than the
+    spec required and an improvement. `idx` is the iteration position in
+    `ports()`, which is the user-visible slot number — correct.
+  - Spec's note about the second `ListPorts` arm
+    (`run_midi_out_with_open_fn` at line 321) is correct: it only sends
+    `(true, "[ports]")` with no port iteration, so no fix is needed there.
+    The task note already documents this.
+  - Two new tests added: `list_ports_payload_uses_indexed_fallback_when_
+    port_name_fails` (asserts exact payload `"[ports]Port Zero\x1Fport
+    #1\x1Fport #2"` covering Err and empty-Ok cases) and
+    `list_ports_payload_contains_no_blank_entries` (asserts no `\x1F\x1F`,
+    no leading/trailing `\x1F`). Both go through a `build_ports_payload`
+    helper that mirrors the production mapping logic.
+
+- **Fix 6 — `ok` alias documented.**
+  - engine/src/ui.rs:55-56: separate entries `("clear", "clear the CLI
+    log")` and `("ok", "alias of clear")`. The implementation at line 218
+    (`line == "clear" || line == "ok"`) was pre-existing — this fix is
+    docs-only as specified. Help test (`cli_submit_help_pushes_one_info_
+    per_entry`, line 1247) is keyed off `HELP_ENTRIES.len()` so it
+    auto-tracks.
+
+#### Other observations
+
+- No `unwrap()` introduced in non-test code. The only new `.expect()` is
+  in the test helper `list_ports_payload_contains_no_blank_entries`
+  (engine/src/midi_out.rs:682) — acceptable.
+- No new heap allocations on the MIDI/clock hot path. `ListPorts` is a
+  one-shot CLI query; its allocations are bounded by port count.
+- No TODO/FIXME/XXX/HACK markers introduced.
+- The vast majority of `+` lines in the diff (≈two-thirds) are pure
+  rustfmt line-wraps of pre-existing one-line `send`/`assert_eq!`/etc.
+  calls. These are noise but not regressions; they make the diff larger
+  than the spec strictly required, but every semantic change matches the
+  spec.
+- Pre-existing minor inconsistency (not introduced by this PR): the
+  producer joins with `\x1F` (uppercase hex) and the parser splits on
+  `\x1f` (lowercase hex). These are byte-equivalent (both `0x1F`) so it
+  is harmless, just stylistically inconsistent. Not worth a follow-up.
+- `cargo test -p engine` confirmed locally: all suites pass (the run
+  shown in the task's prior notes — 635 passed, 0 failed — was
+  reproduced).
+
+#### Findings
+
+No findings — approve.
+
+#### Summary
+
+- 0 critical, 0 warning, 0 info findings
+- Branch: feature/cli-commands-pr-110-copilot-fixes
+- Diff size: +336 -66 (≈two-thirds is incidental rustfmt reformatting)
+
+### QA pass (2026-05-13)
+
+Reviewer: qa agent. Reviewed coder commit `cb668d5` against all six
+acceptance criteria. All existing tests green. Filled five small coverage
+gaps where the existing tests were too loose to catch plausible
+regressions; no new bugs found in production code.
+
+**Verdict: qa-pass.**
+
+#### Coverage gaps found (and filled)
+
+- **Fix 1 (lower boundary)**: step=1 was exercised only incidentally by
+  `note_set_with_velocity_uses_provided_velocity`. Added explicit named
+  test `note_set_step_1_is_valid_boundary` that pins both the
+  user→internal mapping and the user-facing log text.
+- **Fix 1 (upper-boundary log text)**: `note_set_step_16_is_valid_boundary`
+  only checked the emitted `InputCommand::NoteSet { step: 15, .. }` and
+  said nothing about the log text. A regression where the success log
+  leaked the internal 0-indexed step at the upper edge would slip
+  through. Added `note_set_step_16_log_displays_user_facing_step` to
+  assert the log says "note set 16", not "note set 15".
+- **Fix 2 (exact message wording)**: `note_set_rejects_trailing_tokens`
+  only matched `.contains("unexpected trailing input")`. The spec
+  mandates the full message "note set: unexpected trailing input". Added
+  `note_set_trailing_tokens_uses_exact_spec_message` with an `assert_eq!`
+  for the full text.
+- **Fix 6 (ok alias presence)**: `cli_submit_help_pushes_one_info_per_
+  entry` keys off `HELP_ENTRIES.len()`, which would pass even if the
+  `ok` entry were swapped for an unrelated one. Added
+  `help_entries_includes_ok_alias` (constant-level) and
+  `cli_submit_help_output_includes_ok_alias_line` (renders the help
+  output and looks for the actual `ok` line) to lock in the alias.
+
+Fix 3, Fix 4, and Fix 5 were verified to have adequate test coverage
+already; no additions needed. (Fix 5's `build_ports_payload` helper is
+not strictly a mutation-test of the production code path, but the spec
+explicitly accepts the "no blank entries" approach, and the
+implementation is short enough that the helper-mirror is the best
+practical option without spinning up a fake `midir::MidiOutput`.)
+
+#### Tests added on this branch (qa commit)
+
+- `engine/src/ui.rs::tests::note_set_step_1_is_valid_boundary`
+- `engine/src/ui.rs::tests::note_set_step_16_log_displays_user_facing_step`
+- `engine/src/ui.rs::tests::note_set_trailing_tokens_uses_exact_spec_message`
+- `engine/src/ui.rs::tests::help_entries_includes_ok_alias`
+- `engine/src/ui.rs::tests::cli_submit_help_output_includes_ok_alias_line`
+
+QA commit: `38a69fc` — `test(engine): add QA coverage for PR #110
+Copilot fixes`. Only `engine/src/ui.rs` was modified (test module only).
+No application code touched.
+
+#### Final test counts
+
+- Before QA: 635 passed, 0 failed.
+- After QA: **640 passed, 0 failed** (+5 new tests).
+- `cargo clippy -p engine -- -D warnings`: clean.
+- `rustfmt --check --edition 2021 engine/src/{ui,midi_out}.rs`: clean.
+
+#### Bugs found
+
+None.
