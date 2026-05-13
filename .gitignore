@@ -10,6 +10,9 @@ Cargo.lock.bak
 .workflow/worktrees/*
 !.workflow/worktrees/.gitkeep
 
+# Agent transient scratch / lock files
+.workflow/temp/
+
 # Claude project-level memory (contains local paths and session data)
 .claude/projects/
 
