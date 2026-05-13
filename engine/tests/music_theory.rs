@@ -1,5 +1,5 @@
 use engine::music_theory::{
-    next_note, note_name, notes_in_key, snap_to_key, Key, Mode, SCALE_INTERVALS,
+    next_note, note_name, notes_in_key, parse_note_name, snap_to_key, Key, Mode, SCALE_INTERVALS,
 };
 
 #[test]
@@ -402,4 +402,112 @@ fn snap_natural_minor() {
     // A natural minor: A=69, B=71, C=72, D=74, E=76, F=77, G=79
     // Bb (70) in A natural minor: A=69 (dist 1), B=71 (dist 1) — tie: lower wins → A(69)
     assert_eq!(snap_to_key(70, Key::A, Mode::NaturalMinor), 69);
+}
+
+// ── parse_note_name: round-trip and extended edge cases ───────────────────────
+
+/// parse_note_name(note_name(n)) must equal Some(n) for every valid MIDI value.
+/// note_name uses sharp notation (e.g. "C#4"), which parse_note_name accepts via '#'.
+#[test]
+fn parse_note_name_round_trip_all_128_midi_values() {
+    for n in 0u8..=127 {
+        let name = note_name(n);
+        assert_eq!(
+            parse_note_name(&name),
+            Some(n),
+            "round-trip failed for MIDI {n}: note_name={name:?}"
+        );
+    }
+}
+
+/// Each natural letter parses correctly at octave 4 (spot-check all 7).
+#[test]
+fn parse_note_name_all_natural_letters_octave_4() {
+    // C=0, D=2, E=4, F=5, G=7, A=9, B=11 — add (4+1)*12=60 to each
+    assert_eq!(parse_note_name("C4"), Some(60));
+    assert_eq!(parse_note_name("D4"), Some(62));
+    assert_eq!(parse_note_name("E4"), Some(64));
+    assert_eq!(parse_note_name("F4"), Some(65));
+    assert_eq!(parse_note_name("G4"), Some(67));
+    assert_eq!(parse_note_name("A4"), Some(69));
+    assert_eq!(parse_note_name("B4"), Some(71));
+}
+
+/// All 7 natural letters are recognised case-insensitively.
+#[test]
+fn parse_note_name_all_natural_letters_lowercase_octave_4() {
+    assert_eq!(parse_note_name("d4"), Some(62));
+    assert_eq!(parse_note_name("e4"), Some(64));
+    assert_eq!(parse_note_name("f4"), Some(65));
+    assert_eq!(parse_note_name("g4"), Some(67));
+    assert_eq!(parse_note_name("a4"), Some(69));
+    assert_eq!(parse_note_name("b4"), Some(71));
+}
+
+/// Flat accidental (`b`) for every applicable pitch class at octave 4.
+#[test]
+fn parse_note_name_flat_accidentals_octave_4() {
+    // Db4: D(2)-1=1  → (4+1)*12+1=61
+    assert_eq!(parse_note_name("Db4"), Some(61));
+    // Eb4: E(4)-1=3  → 60+3=63
+    assert_eq!(parse_note_name("Eb4"), Some(63));
+    // Gb4: G(7)-1=6  → 60+6=66
+    assert_eq!(parse_note_name("Gb4"), Some(66));
+    // Ab4: A(9)-1=8  → 60+8=68
+    assert_eq!(parse_note_name("Ab4"), Some(68));
+    // Bb4: B(11)-1=10 → 60+10=70
+    assert_eq!(parse_note_name("Bb4"), Some(70));
+}
+
+/// Sharp-s accidental for every applicable pitch class at octave 3.
+#[test]
+fn parse_note_name_sharp_s_accidentals_octave_3() {
+    // Cs3: C(0)+1=1  → (3+1)*12+1=49
+    assert_eq!(parse_note_name("Cs3"), Some(49));
+    // Ds3: D(2)+1=3  → 48+3=51
+    assert_eq!(parse_note_name("Ds3"), Some(51));
+    // Fs3: F(5)+1=6  → 48+6=54
+    assert_eq!(parse_note_name("Fs3"), Some(54));
+    // Gs3: G(7)+1=8  → 48+8=56
+    assert_eq!(parse_note_name("Gs3"), Some(56));
+    // As3: A(9)+1=10 → 48+10=58
+    assert_eq!(parse_note_name("As3"), Some(58));
+}
+
+/// Octave -1 is the lowest valid octave (MIDI 0–11).
+#[test]
+fn parse_note_name_octave_neg1_all_naturals() {
+    assert_eq!(parse_note_name("C-1"), Some(0));
+    assert_eq!(parse_note_name("D-1"), Some(2));
+    assert_eq!(parse_note_name("G-1"), Some(7));
+    assert_eq!(parse_note_name("B-1"), Some(11));
+}
+
+/// Values that produce MIDI < 0 must return None.
+#[test]
+fn parse_note_name_below_range_returns_none() {
+    // Cb-1: C(0)-1=-1 → (−1+1)*12+(−1)=−1 → None
+    assert_eq!(parse_note_name("Cb-1"), None);
+}
+
+/// Values that produce MIDI > 127 must return None.
+#[test]
+fn parse_note_name_above_range_returns_none() {
+    // G#9: G(7)+1=8 → (9+1)*12+8=128 → None
+    assert_eq!(parse_note_name("G#9"), None);
+    // A9: A(9) → 120+9=129 → None
+    assert_eq!(parse_note_name("A9"), None);
+    // Ab9: A(9)-1=8 → 120+8=128 → None
+    assert_eq!(parse_note_name("Ab9"), None);
+}
+
+/// Various forms of invalid input must return None.
+#[test]
+fn parse_note_name_invalid_inputs() {
+    assert_eq!(parse_note_name(""), None);        // empty
+    assert_eq!(parse_note_name("X4"), None);      // invalid letter
+    assert_eq!(parse_note_name("C"), None);       // missing octave
+    assert_eq!(parse_note_name("C#"), None);      // sharp but missing octave
+    assert_eq!(parse_note_name("4"), None);       // digit first, no letter
+    assert_eq!(parse_note_name("C4.5"), None);    // non-integer octave
 }
