@@ -55,7 +55,9 @@ impl MidiSender for MidirSender {
             .lock()
             .expect("MidiOutputConnection mutex poisoned");
         if let Err(e) = guard.send(data) {
-            let _ = self.log_tx.send((false, format!("[midi_out] send error: {e}")));
+            let _ = self
+                .log_tx
+                .send((false, format!("[midi_out] send error: {e}")));
         }
     }
 
@@ -113,18 +115,27 @@ pub fn select_port_idx(
 ///
 /// Returns `None` if no ports are available or the port cannot be opened.
 #[cfg(feature = "hw-io")]
-fn open_port(port_name: Option<&str>, log_tx: &SyncSender<(bool, String)>) -> Option<Box<dyn MidiSender>> {
+fn open_port(
+    port_name: Option<&str>,
+    log_tx: &SyncSender<(bool, String)>,
+) -> Option<Box<dyn MidiSender>> {
     let output = match midir::MidiOutput::new("midi-man-mk3") {
         Ok(o) => o,
         Err(e) => {
-            let _ = log_tx.send((false, format!("[midi_out] failed to create MidiOutput: {e}")));
+            let _ = log_tx.send((
+                false,
+                format!("[midi_out] failed to create MidiOutput: {e}"),
+            ));
             return None;
         }
     };
 
     let ports = output.ports();
     if ports.is_empty() {
-        let _ = log_tx.send((false, "[midi_out] no ALSA MIDI output ports available — MIDI output disabled".to_owned()));
+        let _ = log_tx.send((
+            false,
+            "[midi_out] no ALSA MIDI output ports available — MIDI output disabled".to_owned(),
+        ));
         return None;
     }
 
@@ -134,7 +145,8 @@ fn open_port(port_name: Option<&str>, log_tx: &SyncSender<(bool, String)>) -> Op
         .collect();
     let port_name_refs: Vec<&str> = port_name_strings.iter().map(String::as_str).collect();
 
-    let chosen_idx = select_port_idx(&port_name_refs, port_name, log_tx).expect("ports is non-empty");
+    let chosen_idx =
+        select_port_idx(&port_name_refs, port_name, log_tx).expect("ports is non-empty");
 
     let port = &ports[chosen_idx];
     let chosen_name = output
@@ -150,7 +162,10 @@ fn open_port(port_name: Option<&str>, log_tx: &SyncSender<(bool, String)>) -> Op
             }))
         }
         Err(e) => {
-            let _ = log_tx.send((false, format!("[midi_out] failed to connect to '{chosen_name}': {e}")));
+            let _ = log_tx.send((
+                false,
+                format!("[midi_out] failed to connect to '{chosen_name}': {e}"),
+            ));
             None
         }
     }
@@ -247,9 +262,21 @@ pub fn run_midi_out(
                 match midir::MidiOutput::new("midi-man-mk3-list") {
                     Ok(output) => {
                         let ports = output.ports();
+                        // For each port, prefer the real name. If `port_name`
+                        // errors, fall back to `port #<idx>` so the entry is
+                        // never blank.
                         let names: Vec<String> = ports
                             .iter()
-                            .map(|p| output.port_name(p).unwrap_or_default())
+                            .enumerate()
+                            .map(|(idx, p)| match output.port_name(p) {
+                                Ok(name) if !name.is_empty() => name,
+                                _ => format!("port #{idx}"),
+                            })
+                            // Defence in depth: drop any entries that are still
+                            // empty after the fallback. Real ALSA shouldn't hit
+                            // this, but a future code change shouldn't be able
+                            // to emit blank entries by accident.
+                            .filter(|name| !name.is_empty())
                             .collect();
                         let payload = format!("[ports]{}", names.join("\x1F"));
                         let _ = log_tx.send((true, payload));
@@ -525,9 +552,14 @@ mod tests {
 
         handle.join().expect("loop thread panicked");
 
-        let msg = log_rx.recv().expect("expected a log message from ListPorts");
+        let msg = log_rx
+            .recv()
+            .expect("expected a log message from ListPorts");
         assert_eq!(msg.0, true, "ListPorts should send success=true");
-        assert_eq!(msg.1, "[ports]", "ListPorts should send empty [ports] sentinel");
+        assert_eq!(
+            msg.1, "[ports]",
+            "ListPorts should send empty [ports] sentinel"
+        );
     }
 
     /// Verify that ListPorts response starts with "[ports]" sentinel prefix.
@@ -570,7 +602,11 @@ mod tests {
             log_rx.try_recv().is_err(),
             "ListPorts sent more messages than the one expected"
         );
-        assert_eq!(msg, (true, "[ports]".to_owned()), "ListPorts message incorrect");
+        assert_eq!(
+            msg,
+            (true, "[ports]".to_owned()),
+            "ListPorts message incorrect"
+        );
     }
 
     /// Verify that [ports-err] sentinel format matches the spec.
@@ -594,6 +630,70 @@ mod tests {
             !payload.starts_with("[ports]"),
             "error sentinel must not start with '[ports]'"
         );
+    }
+
+    /// Replicates the `ListPorts` names-mapping logic for unit testing.
+    ///
+    /// The real `run_midi_out` arm builds port names from
+    /// `midir::MidiOutput::port_name`, which we cannot make fail in a unit
+    /// test. This helper mirrors the same fallback + filter behaviour so the
+    /// payload-shape contract can be asserted directly: any port whose name
+    /// lookup returns `Err` or an empty string falls back to `port #<idx>`,
+    /// and the resulting `[ports]<a>\x1F<b>` payload must contain no empty
+    /// slots and no leading/trailing `\x1F`.
+    fn build_ports_payload<F>(num_ports: usize, port_name: F) -> String
+    where
+        F: Fn(usize) -> Result<String, ()>,
+    {
+        let names: Vec<String> = (0..num_ports)
+            .map(|idx| match port_name(idx) {
+                Ok(name) if !name.is_empty() => name,
+                _ => format!("port #{idx}"),
+            })
+            .filter(|name| !name.is_empty())
+            .collect();
+        format!("[ports]{}", names.join("\x1F"))
+    }
+
+    /// When `port_name` fails for an entry, the payload uses the
+    /// `port #<idx>` fallback rather than emitting a blank slot.
+    #[test]
+    fn list_ports_payload_uses_indexed_fallback_when_port_name_fails() {
+        // Three ports: index 0 ok, index 1 errors, index 2 ok with empty name.
+        let payload = build_ports_payload(3, |idx| match idx {
+            0 => Ok("Port Zero".to_owned()),
+            1 => Err(()),
+            2 => Ok(String::new()),
+            _ => unreachable!(),
+        });
+
+        assert_eq!(payload, "[ports]Port Zero\x1Fport #1\x1Fport #2");
+    }
+
+    /// The joined payload must never contain a `\x1F\x1F` (blank slot) or
+    /// have a leading/trailing `\x1F` separator — even when ports report
+    /// errors or empty names.
+    #[test]
+    fn list_ports_payload_contains_no_blank_entries() {
+        // Two ports, both fail port_name lookup.
+        let payload = build_ports_payload(2, |_idx| Err(()));
+        let body = payload
+            .strip_prefix("[ports]")
+            .expect("payload must start with [ports]");
+        assert!(
+            !body.contains("\x1F\x1F"),
+            "payload body must not contain double sentinel: {body:?}"
+        );
+        assert!(
+            !body.starts_with('\x1F'),
+            "payload body must not start with sentinel: {body:?}"
+        );
+        assert!(
+            !body.ends_with('\x1F'),
+            "payload body must not end with sentinel: {body:?}"
+        );
+        // Both entries should use the fallback.
+        assert_eq!(body, "port #0\x1Fport #1");
     }
 
     /// Verify that ListPorts does not interfere with MIDI event dispatch.
@@ -627,7 +727,10 @@ mod tests {
 
         // The MIDI Start event must have been dispatched.
         let bytes = sent.lock().unwrap();
-        assert!(!bytes.is_empty(), "MIDI event was not dispatched after ListPorts");
+        assert!(
+            !bytes.is_empty(),
+            "MIDI event was not dispatched after ListPorts"
+        );
         assert_eq!(bytes[0], vec![0xFA], "Start event should produce 0xFA byte");
     }
 }
