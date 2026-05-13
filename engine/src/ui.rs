@@ -1457,4 +1457,118 @@ mod tests {
             ui.cli_log[0].text
         );
     }
+
+    // ── QA additions for PR #110 Copilot fixes ────────────────────────────────
+    //
+    // Fix 2 (exact wording): assert the full spec-mandated message verbatim,
+    // not just a substring. Catches accidental rewording in future refactors.
+    #[test]
+    fn note_set_trailing_tokens_uses_exact_spec_message() {
+        let (cmd_tx, cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
+        let mut ui = UiState::new();
+        ui.cli_line = "note set 3 C4 64 extra".into();
+
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+
+        assert!(cmd_rx.try_recv().is_err());
+        assert_eq!(ui.cli_log.len(), 1);
+        assert!(matches!(ui.cli_log[0].tag, LogTag::Err));
+        // Exact-match the spec wording (Fix 2 acceptance criterion).
+        assert_eq!(ui.cli_log[0].text, "note set: unexpected trailing input");
+    }
+
+    // Fix 1 (lower boundary): the spec-mandated step=1 boundary deserves an
+    // explicit named test. While `note_set_with_velocity_uses_provided_velocity`
+    // exercises step 1 incidentally, this test pins the boundary contract:
+    // user-facing step 1 must map to internal step 0 AND the success log must
+    // show "note set 1" (not "note set 0").
+    #[test]
+    fn note_set_step_1_is_valid_boundary() {
+        let (cmd_tx, cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
+        let mut ui = UiState::new();
+        // User-facing step 1 maps to internal step 0.
+        ui.cli_line = "note set 1 C4".into();
+
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+
+        let cmd = cmd_rx.try_recv().expect("expected NoteSet");
+        assert!(
+            matches!(cmd, InputCommand::NoteSet { step: 0, .. }),
+            "expected internal step 0 for user step 1, got: {cmd:?}"
+        );
+        assert_eq!(ui.cli_log.len(), 1);
+        assert!(matches!(ui.cli_log[0].tag, LogTag::Cmd));
+        assert!(
+            ui.cli_log[0].text.contains("note set 1"),
+            "log should display user-facing step 1, got: {}",
+            ui.cli_log[0].text
+        );
+    }
+
+    // Fix 1 (upper-boundary log text): existing `note_set_step_16_is_valid_boundary`
+    // checks the cmd's internal step value (15) but does NOT assert the log
+    // text shows the user-facing step "16". This test plugs that gap so a
+    // regression where the log accidentally shows the internal 15 at the
+    // upper boundary would fail loudly.
+    #[test]
+    fn note_set_step_16_log_displays_user_facing_step() {
+        let (cmd_tx, cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
+        let mut ui = UiState::new();
+        ui.cli_line = "note set 16 A4".into();
+
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+
+        let _cmd = cmd_rx.try_recv().expect("expected NoteSet");
+        assert_eq!(ui.cli_log.len(), 1);
+        assert!(matches!(ui.cli_log[0].tag, LogTag::Cmd));
+        assert!(
+            ui.cli_log[0].text.contains("note set 16"),
+            "log should display user-facing step 16 (not internal 15), got: {}",
+            ui.cli_log[0].text
+        );
+        // Defence: make sure we did not accidentally emit "note set 15".
+        assert!(
+            !ui.cli_log[0].text.contains("note set 15"),
+            "log must not leak internal 0-indexed step 15, got: {}",
+            ui.cli_log[0].text
+        );
+    }
+
+    // Fix 6 (HELP_ENTRIES contents): the existing help test asserts
+    // `cli_log.len() == HELP_ENTRIES.len()`, which would pass even if `ok`
+    // were swapped for an unrelated entry. These two tests pin the actual
+    // presence of the `ok` alias entry both in the constant and in the
+    // user-visible help output.
+    #[test]
+    fn help_entries_includes_ok_alias() {
+        assert!(
+            HELP_ENTRIES.iter().any(|(cmd, _)| *cmd == "ok"),
+            "HELP_ENTRIES must include the `ok` alias entry"
+        );
+        assert!(
+            HELP_ENTRIES.iter().any(|(cmd, _)| *cmd == "clear"),
+            "HELP_ENTRIES must still include the `clear` entry"
+        );
+    }
+
+    #[test]
+    fn cli_submit_help_output_includes_ok_alias_line() {
+        let (cmd_tx, _cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
+        let mut ui = UiState::new();
+        ui.cli_line = "help".into();
+
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+
+        // The `help` command renders each entry as "<cmd>  —  <desc>". Look
+        // for the rendered `ok` line directly, not just the constant.
+        let has_ok_line = ui
+            .cli_log
+            .iter()
+            .any(|e| e.text.starts_with("ok  —  ") || e.text.starts_with("ok "));
+        assert!(
+            has_ok_line,
+            "help output must include the `ok` alias line; got entries: {:?}",
+            ui.cli_log.iter().map(|e| &e.text).collect::<Vec<_>>()
+        );
+    }
 }
