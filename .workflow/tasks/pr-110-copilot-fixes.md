@@ -1,7 +1,7 @@
 # Task: Address 6 Copilot review comments on PR #110
 
 - **Type**: coder
-- **Status**: pending
+- **Status**: done
 - **Repo**: .
 - **Parallel Group**: 1
 - **Feature Branch**: feature/cli-commands
@@ -110,3 +110,39 @@ Existing test sites you will be updating live in `engine/src/ui.rs` near:
 - `handle_cli_note_set` tests at lines 1197–1290
 
 ## Notes
+
+### Implementation summary (2026-05-13)
+
+- Branch: `feature/cli-commands-pr-110-copilot-fixes` (note: had to drop the
+  `/pr-110-copilot-fixes` segment from the planned name because git cannot
+  create a sub-ref under an existing branch named `feature/cli-commands`).
+- Commit: `cb668d5` — `fix(engine): address PR #110 Copilot review comments`.
+- Files changed: `engine/src/ui.rs`, `engine/src/midi_out.rs`.
+- All 6 Copilot fixes applied per the acceptance criteria above. The two new
+  unit tests required by the spec are present:
+  - `note_set_rejects_trailing_tokens`
+  - `list_ports_payload_uses_indexed_fallback_when_port_name_fails` plus a
+    companion `list_ports_payload_contains_no_blank_entries` test (the spec
+    accepted either approach; both are included).
+- Note on Fix 5 second arm: the testable `run_midi_out_with_open_fn`
+  ListPorts arm just sends `(true, "[ports]")` and never iterates ports, so
+  there is no blank-name path to fix there — only the real `run_midi_out`
+  arm was updated.
+
+### Test results
+
+- `cargo test -p engine`: 635 passed, 0 failed.
+- `cargo clippy -p engine -- -D warnings`: clean.
+- `rustfmt --check --edition 2021 engine/src/{ui,midi_out}.rs`: clean.
+
+### Last 5 lines of `cargo test -p engine`
+
+```
+test result: ok. 58 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+   Doc-tests engine
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
