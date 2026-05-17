@@ -978,6 +978,10 @@ pub fn run_ui(
             cli_log: &ui.cli_log,
             midi_device_name: &ui.midi_device_name,
             midi_channel_display: ui.midi_channel_display,
+            play_mode: ui.play_mode,
+            song_slots: ui.song.as_ref().map(|s| s.slots.as_slice()).unwrap_or(&[]),
+            song_cursor: ui.song_cursor,
+            song_active_slot: state_snapshot.song_slot_index,
         };
         if let Err(e) = terminal.draw(|frame| {
             render_frame(frame, &state_snapshot, &snapshot);
