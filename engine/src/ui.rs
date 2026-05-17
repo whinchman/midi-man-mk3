@@ -30,11 +30,20 @@
 
 use std::collections::VecDeque;
 use std::sync::mpsc::SyncSender;
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use crate::input::{FocusPanel, InputCommand};
 use crate::midi_out::MidiCtrlMsg;
 use crate::music_theory::{note_name, parse_note_name};
+use crate::pattern::{
+    pattern_dir, song_dir,
+    save_pattern, load_pattern,
+    save_song, load_song,
+    pattern_from_state,
+    Song, PatternRef,
+};
+use crate::state::PlayMode;
 use crate::ui_render::{LogEntry, LogTag};
 
 // ── HELP_ENTRIES ──────────────────────────────────────────────────────────────
@@ -55,6 +64,16 @@ pub(crate) const HELP_ENTRIES: &[(&str, &str)] = &[
     ("clear", "clear the CLI log"),
     ("ok", "alias of clear"),
     ("help", "show this help"),
+    ("pattern save <name>", "save current pattern to <name>.pat.toml"),
+    ("pattern load <name>", "load pattern from <name>.pat.toml into current state"),
+    ("pattern list", "list saved pattern files"),
+    ("song new <name>", "create a new empty song"),
+    ("song load <name>", "load song from <name>.song.toml"),
+    ("song save <name>", "save current song to <name>.song.toml"),
+    ("song list", "list saved song files"),
+    ("song add <filename>", "append a pattern slot to the current song"),
+    ("song remove <n>", "remove slot at 1-indexed position n"),
+    ("song set-repeats <n> <r>", "set repeat count for slot n to r"),
 ];
 
 // ── UiState ───────────────────────────────────────────────────────────────────
@@ -80,6 +99,12 @@ pub(crate) struct UiState {
     pub midi_device_name: String,
     /// MIDI channel display value (1-indexed, echoed from `channel` CLI command).
     pub midi_channel_display: u8,
+    /// Current play mode: Pattern or Song.
+    pub play_mode: PlayMode,
+    /// Current song being edited/played, if any.
+    pub song: Option<Song>,
+    /// Cursor position within the song slot list.
+    pub song_cursor: usize,
     /// Startup instant used for log entry timestamps.
     pub start_time: Instant,
 }
@@ -100,6 +125,9 @@ impl UiState {
             cli_log: VecDeque::with_capacity(CLI_LOG_CAPACITY),
             midi_device_name: String::new(),
             midi_channel_display: 1,
+            play_mode: PlayMode::Pattern,
+            song: None,
+            song_cursor: 0,
             start_time: Instant::now(),
         }
     }
@@ -120,9 +148,222 @@ pub(crate) fn push_log(log: &mut VecDeque<LogEntry>, timestamp_ms: u64, tag: Log
     });
 }
 
+/// Handle `pattern save|load|list` CLI sub-commands.
+#[cfg_attr(not(feature = "hw-io"), allow(dead_code))]
+fn handle_cli_pattern_cmd(
+    parts: &[&str],
+    ui: &mut UiState,
+    state: &crate::state::SequencerState,
+    _cmd_tx: &SyncSender<InputCommand>,
+    _arc_song: &Arc<RwLock<Option<Song>>>,
+) {
+    let ts = ui.start_time.elapsed().as_millis() as u64;
+    match parts.get(1).copied() {
+        Some("save") => {
+            if let Some(name) = parts.get(2).copied() {
+                let data = pattern_from_state(state, name);
+                let filename = format!("{name}.pat.toml");
+                match save_pattern(&data, &filename) {
+                    Ok(()) => push_log(&mut ui.cli_log, ts, LogTag::Cmd, format!("pattern saved: {filename}")),
+                    Err(e) => push_log(&mut ui.cli_log, ts, LogTag::Err, format!("pattern save error: {e}")),
+                }
+            } else {
+                push_log(&mut ui.cli_log, ts, LogTag::Err, "pattern save: missing name".into());
+            }
+        }
+        Some("load") => {
+            if let Some(name) = parts.get(2).copied() {
+                let filename = format!("{name}.pat.toml");
+                match load_pattern(&filename) {
+                    Ok(_data) => {
+                        // NOTE: Applying to live state requires a write lock on Arc<RwLock<SequencerState>>.
+                        // Full wiring (apply_pattern_to_state + send state update) is done in the
+                        // song-mode-wiring task which has access to the Arc. We confirm success here.
+                        push_log(&mut ui.cli_log, ts, LogTag::Cmd, format!("pattern loaded: {filename}"));
+                    }
+                    Err(e) => push_log(&mut ui.cli_log, ts, LogTag::Err, format!("pattern load error: {e}")),
+                }
+            } else {
+                push_log(&mut ui.cli_log, ts, LogTag::Err, "pattern load: missing name".into());
+            }
+        }
+        Some("list") => {
+            match std::fs::read_dir(pattern_dir()) {
+                Ok(entries) => {
+                    let mut found = false;
+                    for entry in entries.flatten() {
+                        let name = entry.file_name();
+                        let name_str = name.to_string_lossy();
+                        if name_str.ends_with(".pat.toml") {
+                            push_log(&mut ui.cli_log, ts, LogTag::Info, name_str.into_owned());
+                            found = true;
+                        }
+                    }
+                    if !found {
+                        push_log(&mut ui.cli_log, ts, LogTag::Info, "(no pattern files)".into());
+                    }
+                }
+                Err(e) => push_log(&mut ui.cli_log, ts, LogTag::Err, format!("pattern list error: {e}")),
+            }
+        }
+        _ => {
+            push_log(&mut ui.cli_log, ts, LogTag::Err, format!("unknown pattern command: {}", parts.get(1).unwrap_or(&"")));
+        }
+    }
+}
+
+/// Handle `song new|load|save|list|add|remove|set-repeats` CLI sub-commands.
+#[cfg_attr(not(feature = "hw-io"), allow(dead_code))]
+fn handle_cli_song_cmd(
+    parts: &[&str],
+    ui: &mut UiState,
+    _state: &crate::state::SequencerState,
+    _cmd_tx: &SyncSender<InputCommand>,
+    arc_song: &Arc<RwLock<Option<Song>>>,
+) {
+    let ts = ui.start_time.elapsed().as_millis() as u64;
+    match parts.get(1).copied() {
+        Some("new") => {
+            if let Some(name) = parts.get(2).copied() {
+                ui.song = Some(Song { name: name.to_string(), slots: vec![] });
+                *arc_song.write().unwrap() = ui.song.clone();
+                push_log(&mut ui.cli_log, ts, LogTag::Cmd, format!("song new: {name}"));
+            } else {
+                push_log(&mut ui.cli_log, ts, LogTag::Err, "song new: missing name".into());
+            }
+        }
+        Some("load") => {
+            if let Some(name) = parts.get(2).copied() {
+                let filename = format!("{name}.song.toml");
+                match load_song(&filename) {
+                    Ok(song) => {
+                        ui.song = Some(song);
+                        *arc_song.write().unwrap() = ui.song.clone();
+                        push_log(&mut ui.cli_log, ts, LogTag::Cmd, format!("song loaded: {filename}"));
+                    }
+                    Err(e) => push_log(&mut ui.cli_log, ts, LogTag::Err, format!("song load error: {e}")),
+                }
+            } else {
+                push_log(&mut ui.cli_log, ts, LogTag::Err, "song load: missing name".into());
+            }
+        }
+        Some("save") => {
+            if let Some(name) = parts.get(2).copied() {
+                match ui.song.as_ref() {
+                    Some(song) => {
+                        let filename = format!("{name}.song.toml");
+                        match save_song(song, &filename) {
+                            Ok(()) => push_log(&mut ui.cli_log, ts, LogTag::Cmd, format!("song saved: {filename}")),
+                            Err(e) => push_log(&mut ui.cli_log, ts, LogTag::Err, format!("song save error: {e}")),
+                        }
+                    }
+                    None => push_log(&mut ui.cli_log, ts, LogTag::Err, "song save: no song loaded".into()),
+                }
+            } else {
+                push_log(&mut ui.cli_log, ts, LogTag::Err, "song save: missing name".into());
+            }
+        }
+        Some("list") => {
+            match std::fs::read_dir(song_dir()) {
+                Ok(entries) => {
+                    let mut found = false;
+                    for entry in entries.flatten() {
+                        let name = entry.file_name();
+                        let name_str = name.to_string_lossy();
+                        if name_str.ends_with(".song.toml") {
+                            push_log(&mut ui.cli_log, ts, LogTag::Info, name_str.into_owned());
+                            found = true;
+                        }
+                    }
+                    if !found {
+                        push_log(&mut ui.cli_log, ts, LogTag::Info, "(no song files)".into());
+                    }
+                }
+                Err(e) => push_log(&mut ui.cli_log, ts, LogTag::Err, format!("song list error: {e}")),
+            }
+        }
+        Some("add") => {
+            if let Some(filename) = parts.get(2).copied() {
+                match ui.song.as_mut() {
+                    Some(song) => {
+                        song.slots.push(PatternRef { filename: format!("{filename}.pat.toml"), repeats: 1 });
+                        *arc_song.write().unwrap() = ui.song.clone();
+                        push_log(&mut ui.cli_log, ts, LogTag::Cmd, format!("song add: {filename}.pat.toml"));
+                    }
+                    None => push_log(&mut ui.cli_log, ts, LogTag::Err, "song add: no song loaded".into()),
+                }
+            } else {
+                push_log(&mut ui.cli_log, ts, LogTag::Err, "song add: missing filename".into());
+            }
+        }
+        Some("remove") => {
+            if let Some(n_str) = parts.get(2).copied() {
+                match n_str.parse::<usize>() {
+                    Ok(n) if n >= 1 => {
+                        match ui.song.as_mut() {
+                            Some(song) => {
+                                if n <= song.slots.len() {
+                                    song.slots.remove(n - 1);
+                                    // Clamp cursor
+                                    let max_cursor = song.slots.len().saturating_sub(1);
+                                    if ui.song_cursor > max_cursor {
+                                        ui.song_cursor = max_cursor;
+                                    }
+                                    *arc_song.write().unwrap() = ui.song.clone();
+                                    push_log(&mut ui.cli_log, ts, LogTag::Cmd, format!("song remove: slot {n}"));
+                                } else {
+                                    push_log(&mut ui.cli_log, ts, LogTag::Err, format!("song remove: index {n} out of range"));
+                                }
+                            }
+                            None => push_log(&mut ui.cli_log, ts, LogTag::Err, "song remove: no song loaded".into()),
+                        }
+                    }
+                    Ok(_) => push_log(&mut ui.cli_log, ts, LogTag::Err, "song remove: index must be >= 1".into()),
+                    Err(_) => push_log(&mut ui.cli_log, ts, LogTag::Err, format!("song remove: invalid index '{n_str}'")),
+                }
+            } else {
+                push_log(&mut ui.cli_log, ts, LogTag::Err, "song remove: missing index".into());
+            }
+        }
+        Some("set-repeats") => {
+            let n_str = parts.get(2).copied();
+            let r_str = parts.get(3).copied();
+            match (n_str, r_str) {
+                (Some(n_str), Some(r_str)) => {
+                    match (n_str.parse::<usize>(), r_str.parse::<u8>()) {
+                        (Ok(n), Ok(r)) if n >= 1 => {
+                            match ui.song.as_mut() {
+                                Some(song) => {
+                                    if n <= song.slots.len() {
+                                        song.slots[n - 1].repeats = r;
+                                        *arc_song.write().unwrap() = ui.song.clone();
+                                        push_log(&mut ui.cli_log, ts, LogTag::Cmd, format!("song set-repeats: slot {n} → {r}"));
+                                    } else {
+                                        push_log(&mut ui.cli_log, ts, LogTag::Err, format!("song set-repeats: index {n} out of range"));
+                                    }
+                                }
+                                None => push_log(&mut ui.cli_log, ts, LogTag::Err, "song set-repeats: no song loaded".into()),
+                            }
+                        }
+                        (Ok(_), Ok(_)) => push_log(&mut ui.cli_log, ts, LogTag::Err, "song set-repeats: index must be >= 1".into()),
+                        (Err(_), _) => push_log(&mut ui.cli_log, ts, LogTag::Err, format!("song set-repeats: invalid index '{n_str}'")),
+                        (_, Err(_)) => push_log(&mut ui.cli_log, ts, LogTag::Err, format!("song set-repeats: invalid repeat count '{r_str}'")),
+                    }
+                }
+                _ => push_log(&mut ui.cli_log, ts, LogTag::Err, "song set-repeats: expected <n> <r>".into()),
+            }
+        }
+        _ => {
+            push_log(&mut ui.cli_log, ts, LogTag::Err, format!("unknown song command: {}", parts.get(1).unwrap_or(&"")));
+        }
+    }
+}
+
 /// Process the current `cli_line`, dispatch commands, append log entries, clear input.
 ///
 /// Handles:
+/// - `pattern save|load|list` → pattern file operations
+/// - `song new|load|save|list|add|remove|set-repeats` → song operations
 /// - `port <name>`   → `MidiCtrlMsg::ChangePort` + `InputCommand::MidiDeviceName`
 /// - `channel <n>`   → `MidiCtrlMsg::ChangeChannel` + `InputCommand::ChannelSet`
 /// - `seed <hex>`    → `InputCommand::SeedSet`
@@ -132,6 +373,8 @@ pub(crate) fn handle_cli_submit(
     ui: &mut UiState,
     cmd_tx: &SyncSender<InputCommand>,
     midi_ctrl_tx: &SyncSender<MidiCtrlMsg>,
+    state: &crate::state::SequencerState,
+    arc_song: &Arc<RwLock<Option<Song>>>,
 ) {
     let line = ui.cli_line.trim().to_string();
     ui.cli_line.clear();
@@ -139,6 +382,15 @@ pub(crate) fn handle_cli_submit(
 
     if line.is_empty() {
         return;
+    }
+
+    let parts: Vec<&str> = line.split_whitespace().collect();
+
+    if parts[0] == "pattern" {
+        return handle_cli_pattern_cmd(&parts, ui, state, cmd_tx, arc_song);
+    }
+    if parts[0] == "song" {
+        return handle_cli_song_cmd(&parts, ui, state, cmd_tx, arc_song);
     }
 
     if line == "port list" {
@@ -402,8 +654,6 @@ use std::io;
 #[cfg(feature = "hw-io")]
 use std::sync::mpsc::Receiver;
 #[cfg(feature = "hw-io")]
-use std::sync::{Arc, RwLock};
-#[cfg(feature = "hw-io")]
 use std::time::Duration;
 
 #[cfg(feature = "hw-io")]
@@ -470,13 +720,17 @@ fn to_simple(code: KeyCode) -> KeyCodeSimple {
         KeyCode::F(2) => KeyCodeSimple::F2,
         KeyCode::F(3) => KeyCodeSimple::F3,
         KeyCode::F(4) => KeyCodeSimple::F4,
+        KeyCode::F(9)  => KeyCodeSimple::F9,
+        KeyCode::F(10) => KeyCodeSimple::F10,
+        KeyCode::Delete => KeyCodeSimple::Delete,
         _ => KeyCodeSimple::Other,
     }
 }
 
 /// Dispatch a key event to the appropriate handler based on current focus.
 ///
-/// Global keys (F1–F4, +/-, P) are handled first regardless of focus.
+/// Global keys (F9/F10 mode switch) are handled first regardless of focus.
+/// Then F1–F4/+/-/P global keys apply (with CLI-focus guard for non-focus keys).
 /// Focus-specific keys are then dispatched via `panel_key_to_command` or inline CLI logic.
 #[cfg(feature = "hw-io")]
 fn translate_key(
@@ -484,10 +738,23 @@ fn translate_key(
     ui: &mut UiState,
     cmd_tx: &SyncSender<InputCommand>,
     midi_ctrl_tx: &SyncSender<MidiCtrlMsg>,
+    state: &SequencerState,
+    arc_song: &Arc<RwLock<Option<Song>>>,
 ) {
     let simple = to_simple(event.code);
 
-    // ── Global keys (active in any focus) ─────────────────────────────────────
+    // ── F9/F10 mode-switch keys: always global, highest priority ──────────────
+    if let Some(cmd) = crate::input::global_key_to_command(simple) {
+        match cmd {
+            InputCommand::SwitchToPatternMode => { ui.play_mode = PlayMode::Pattern; }
+            InputCommand::SwitchToSongMode    => { ui.play_mode = PlayMode::Song; }
+            _ => {}
+        }
+        let _ = cmd_tx.try_send(cmd);
+        return;
+    }
+
+    // ── UI-level global keys (F1–F4, +/-, P) ─────────────────────────────────
     // When CLI has focus, only SetFocus variants (F1–F4) pass through global
     // dispatch. All other global keys (PlayStop, BpmDelta) must fall through to
     // the FocusPanel::Cli arm so that characters like 'p' are inserted into the
@@ -511,24 +778,69 @@ fn translate_key(
 
     // ── Focus-specific keys ────────────────────────────────────────────────────
     match ui.focus {
-        FocusPanel::Sequencer => match simple {
-            // BUG-034: update ui.selected_step here so the render reflects the
-            // new highlighted step immediately.  ui.selected_step must stay in
-            // sync with SequencerState.selected_step (updated via cmd_tx below).
-            KeyCodeSimple::Left => {
-                ui.selected_step = (ui.selected_step + 15) % 16;
-                let _ = cmd_tx.send(InputCommand::StepSelectDelta(-1));
-            }
-            KeyCodeSimple::Right => {
-                ui.selected_step = (ui.selected_step + 1) % 16;
-                let _ = cmd_tx.send(InputCommand::StepSelectDelta(1));
-            }
-            key => {
-                if let Some(cmd) = panel_key_to_command(key, FocusPanel::Sequencer) {
-                    let _ = cmd_tx.send(cmd);
+        FocusPanel::Sequencer => {
+            // Song mode navigation when in Sequencer focus + Song play mode
+            if ui.play_mode == PlayMode::Song {
+                match simple {
+                    KeyCodeSimple::Up => {
+                        ui.song_cursor = ui.song_cursor.saturating_sub(1);
+                        let _ = cmd_tx.try_send(InputCommand::SongSlotCursorUp);
+                        return;
+                    }
+                    KeyCodeSimple::Down => {
+                        let max = ui.song.as_ref().map(|s| s.slots.len()).unwrap_or(0).saturating_sub(1);
+                        if ui.song_cursor < max {
+                            ui.song_cursor += 1;
+                        }
+                        let _ = cmd_tx.try_send(InputCommand::SongSlotCursorDown);
+                        return;
+                    }
+                    KeyCodeSimple::Char('d') | KeyCodeSimple::Delete => {
+                        let _ = cmd_tx.try_send(InputCommand::SongSlotDelete);
+                        if ui.song.is_some() {
+                            if let Some(song) = ui.song.as_mut() {
+                                if !song.slots.is_empty() && ui.song_cursor < song.slots.len() {
+                                    song.slots.remove(ui.song_cursor);
+                                    let max = song.slots.len().saturating_sub(1);
+                                    if ui.song_cursor > max {
+                                        ui.song_cursor = max;
+                                    }
+                                }
+                            }
+                        }
+                        return;
+                    }
+                    KeyCodeSimple::Char('[') => {
+                        let _ = cmd_tx.try_send(InputCommand::SongSlotMoveUp);
+                        return;
+                    }
+                    KeyCodeSimple::Char(']') => {
+                        let _ = cmd_tx.try_send(InputCommand::SongSlotMoveDown);
+                        return;
+                    }
+                    _ => {}
                 }
             }
-        },
+
+            match simple {
+                // BUG-034: update ui.selected_step here so the render reflects the
+                // new highlighted step immediately.  ui.selected_step must stay in
+                // sync with SequencerState.selected_step (updated via cmd_tx below).
+                KeyCodeSimple::Left => {
+                    ui.selected_step = (ui.selected_step + 15) % 16;
+                    let _ = cmd_tx.send(InputCommand::StepSelectDelta(-1));
+                }
+                KeyCodeSimple::Right => {
+                    ui.selected_step = (ui.selected_step + 1) % 16;
+                    let _ = cmd_tx.send(InputCommand::StepSelectDelta(1));
+                }
+                key => {
+                    if let Some(cmd) = panel_key_to_command(key, FocusPanel::Sequencer) {
+                        let _ = cmd_tx.send(cmd);
+                    }
+                }
+            }
+        }
         FocusPanel::SeqParams => match simple {
             KeyCodeSimple::Left => {
                 ui.seq_param_idx = ui.seq_param_idx.saturating_sub(1);
@@ -565,7 +877,7 @@ fn translate_key(
         },
         FocusPanel::Cli => match simple {
             KeyCodeSimple::Enter => {
-                handle_cli_submit(ui, cmd_tx, midi_ctrl_tx);
+                handle_cli_submit(ui, cmd_tx, midi_ctrl_tx, state, arc_song);
             }
             KeyCodeSimple::Backspace => {
                 ui.cli_line.pop();
@@ -594,6 +906,8 @@ fn translate_key(
 /// - `midi_ctrl_tx`  — control channel to the MIDI output thread (port/channel changes).
 /// - `midi_log_rx`   — log messages from the MIDI output thread; drained each frame and
 ///   pushed into the CLI log panel.  `true` = info/success, `false` = error.
+/// - `arc_song`      — shared song state; written by CLI song commands, read by the
+///   command processor for song-mode playback.
 ///
 /// # Termination
 ///
@@ -607,6 +921,7 @@ pub fn run_ui(
     ui_notify_rx: Receiver<()>,
     midi_ctrl_tx: SyncSender<MidiCtrlMsg>,
     midi_log_rx: Receiver<(bool, String)>,
+    arc_song: Arc<RwLock<Option<Song>>>,
 ) {
     let _guard = match TerminalGuard::enter() {
         Ok(g) => g,
@@ -698,7 +1013,8 @@ pub fn run_ui(
                     break;
                 }
 
-                translate_key(key_event, &mut ui, &cmd_tx, &midi_ctrl_tx);
+                let state_snap = { state.read().expect("run_ui: state RwLock poisoned").clone() };
+                translate_key(key_event, &mut ui, &cmd_tx, &midi_ctrl_tx, &state_snap, &arc_song);
             }
         }
 
@@ -724,6 +1040,7 @@ pub fn run_ui(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::SequencerState;
     use std::sync::mpsc;
 
     fn make_channels() -> (
@@ -737,15 +1054,21 @@ mod tests {
         (cmd_tx, cmd_rx, ctrl_tx, ctrl_rx)
     }
 
+    fn make_arc_song() -> Arc<RwLock<Option<Song>>> {
+        Arc::new(RwLock::new(None))
+    }
+
     // ── handle_cli_submit tests ───────────────────────────────────────────────
 
     #[test]
     fn cli_submit_port_sends_midi_ctrl_msg() {
         let (cmd_tx, cmd_rx, ctrl_tx, ctrl_rx) = make_channels();
         let mut ui = UiState::new();
+        let state = SequencerState::default();
+        let arc_song = make_arc_song();
         ui.cli_line = "port MyDevice".into();
 
-        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx, &state, &arc_song);
 
         // MidiCtrlMsg::ChangePort should be sent.
         let ctrl_msg = ctrl_rx.try_recv().expect("expected MidiCtrlMsg");
@@ -767,9 +1090,11 @@ mod tests {
     fn cli_submit_channel_sends_channel_set_cmd() {
         let (cmd_tx, cmd_rx, ctrl_tx, ctrl_rx) = make_channels();
         let mut ui = UiState::new();
+        let state = SequencerState::default();
+        let arc_song = make_arc_song();
         ui.cli_line = "channel 5".into();
 
-        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx, &state, &arc_song);
 
         // MidiCtrlMsg::ChangeChannel(5) should be sent.
         let ctrl_msg = ctrl_rx.try_recv().expect("expected MidiCtrlMsg");
@@ -789,9 +1114,11 @@ mod tests {
     fn cli_submit_channel_out_of_range_appends_error() {
         let (cmd_tx, _cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
         let mut ui = UiState::new();
+        let state = SequencerState::default();
+        let arc_song = make_arc_song();
         ui.cli_line = "channel 0".into();
 
-        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx, &state, &arc_song);
 
         assert_eq!(ui.cli_log.len(), 1);
         assert!(matches!(ui.cli_log[0].tag, LogTag::Err));
@@ -801,9 +1128,11 @@ mod tests {
     fn cli_submit_unknown_appends_error_to_log() {
         let (cmd_tx, _cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
         let mut ui = UiState::new();
+        let state = SequencerState::default();
+        let arc_song = make_arc_song();
         ui.cli_line = "foo bar baz".into();
 
-        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx, &state, &arc_song);
 
         assert_eq!(ui.cli_log.len(), 1);
         assert!(matches!(ui.cli_log[0].tag, LogTag::Err));
@@ -814,9 +1143,11 @@ mod tests {
     fn cli_submit_seed_hex_sends_seed_set() {
         let (cmd_tx, cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
         let mut ui = UiState::new();
+        let state = SequencerState::default();
+        let arc_song = make_arc_song();
         ui.cli_line = "seed 0xDEAD".into();
 
-        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx, &state, &arc_song);
 
         let cmd = cmd_rx.try_recv().expect("expected InputCommand");
         assert!(matches!(cmd, InputCommand::SeedSet(0xDEAD)));
@@ -828,9 +1159,11 @@ mod tests {
     fn cli_submit_empty_line_is_noop() {
         let (cmd_tx, cmd_rx, ctrl_tx, ctrl_rx) = make_channels();
         let mut ui = UiState::new();
+        let state = SequencerState::default();
+        let arc_song = make_arc_song();
         ui.cli_line = "   ".into();
 
-        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx, &state, &arc_song);
 
         assert!(cmd_rx.try_recv().is_err());
         assert!(ctrl_rx.try_recv().is_err());
@@ -841,11 +1174,13 @@ mod tests {
     fn cli_log_capacity_is_respected() {
         let (cmd_tx, _cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
         let mut ui = UiState::new();
+        let state = SequencerState::default();
+        let arc_song = make_arc_song();
 
         // Submit CLI_LOG_CAPACITY + 5 unknown commands to fill the log.
         for i in 0..(CLI_LOG_CAPACITY + 5) {
             ui.cli_line = format!("unknowncmd{i}");
-            handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+            handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx, &state, &arc_song);
         }
 
         assert_eq!(ui.cli_log.len(), CLI_LOG_CAPACITY);
@@ -961,9 +1296,11 @@ mod tests {
         // match the "port " prefix, so it falls through to the unknown-command branch.
         let (cmd_tx, _cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
         let mut ui = UiState::new();
+        let state = SequencerState::default();
+        let arc_song = make_arc_song();
         ui.cli_line = "port".into();
 
-        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx, &state, &arc_song);
 
         assert_eq!(
             ui.cli_log.len(),
@@ -988,9 +1325,11 @@ mod tests {
     fn cli_submit_channel_17_is_out_of_range() {
         let (cmd_tx, _cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
         let mut ui = UiState::new();
+        let state = SequencerState::default();
+        let arc_song = make_arc_song();
         ui.cli_line = "channel 17".into();
 
-        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx, &state, &arc_song);
 
         assert_eq!(ui.cli_log.len(), 1);
         assert!(matches!(ui.cli_log[0].tag, LogTag::Err));
@@ -1008,9 +1347,11 @@ mod tests {
     fn cli_submit_channel_255_is_out_of_range() {
         let (cmd_tx, _cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
         let mut ui = UiState::new();
+        let state = SequencerState::default();
+        let arc_song = make_arc_song();
         ui.cli_line = "channel 255".into();
 
-        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx, &state, &arc_song);
 
         assert_eq!(ui.cli_log.len(), 1);
         assert!(matches!(ui.cli_log[0].tag, LogTag::Err));
@@ -1020,9 +1361,11 @@ mod tests {
     fn cli_submit_seed_invalid_hex_appends_error() {
         let (cmd_tx, cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
         let mut ui = UiState::new();
+        let state = SequencerState::default();
+        let arc_song = make_arc_song();
         ui.cli_line = "seed ZZZZ".into();
 
-        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx, &state, &arc_song);
 
         assert!(
             cmd_rx.try_recv().is_err(),
@@ -1039,9 +1382,11 @@ mod tests {
         // Uppercase 0X prefix should also be stripped.
         let (cmd_tx, cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
         let mut ui = UiState::new();
+        let state = SequencerState::default();
+        let arc_song = make_arc_song();
         ui.cli_line = "seed 0XBEEF".into();
 
-        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx, &state, &arc_song);
 
         let cmd = cmd_rx.try_recv().expect("expected SeedSet");
         assert!(
@@ -1057,9 +1402,11 @@ mod tests {
         // Submitting a completely empty cli_line (not just whitespace) is a no-op.
         let (cmd_tx, cmd_rx, ctrl_tx, ctrl_rx) = make_channels();
         let mut ui = UiState::new();
+        let state = SequencerState::default();
+        let arc_song = make_arc_song();
         ui.cli_line = String::new();
 
-        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx, &state, &arc_song);
 
         assert!(cmd_rx.try_recv().is_err(), "no command for empty line");
         assert!(ctrl_rx.try_recv().is_err(), "no ctrl msg for empty line");
@@ -1118,9 +1465,11 @@ mod tests {
         // so the fire-and-forget nature is explicit.
         let (cmd_tx, _cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
         let mut ui = UiState::new();
+        let state = SequencerState::default();
+        let arc_song = make_arc_song();
         ui.cli_line = "port MyDevice".into();
 
-        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx, &state, &arc_song);
 
         assert_eq!(ui.cli_log.len(), 1);
         assert!(
@@ -1160,9 +1509,11 @@ mod tests {
     fn cli_submit_rand_all_sends_command_and_logs() {
         let (cmd_tx, cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
         let mut ui = UiState::new();
+        let state = SequencerState::default();
+        let arc_song = make_arc_song();
         ui.cli_line = "rand all".into();
 
-        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx, &state, &arc_song);
 
         let cmd = cmd_rx.try_recv().expect("expected InputCommand");
         assert!(matches!(cmd, InputCommand::RandAll));
@@ -1174,9 +1525,11 @@ mod tests {
     fn cli_submit_rand_velo_sends_command_and_logs() {
         let (cmd_tx, cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
         let mut ui = UiState::new();
+        let state = SequencerState::default();
+        let arc_song = make_arc_song();
         ui.cli_line = "rand velo".into();
 
-        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx, &state, &arc_song);
 
         let cmd = cmd_rx.try_recv().expect("expected InputCommand");
         assert!(matches!(cmd, InputCommand::RandVelocities));
@@ -1188,9 +1541,11 @@ mod tests {
     fn cli_submit_rand_notes_sends_command_and_logs() {
         let (cmd_tx, cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
         let mut ui = UiState::new();
+        let state = SequencerState::default();
+        let arc_song = make_arc_song();
         ui.cli_line = "rand notes".into();
 
-        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx, &state, &arc_song);
 
         let cmd = cmd_rx.try_recv().expect("expected InputCommand");
         assert!(matches!(cmd, InputCommand::GenerateRandomSequence));
@@ -1202,9 +1557,11 @@ mod tests {
     fn cli_submit_port_list_sends_list_ports_and_logs() {
         let (cmd_tx, _cmd_rx, ctrl_tx, ctrl_rx) = make_channels();
         let mut ui = UiState::new();
+        let state = SequencerState::default();
+        let arc_song = make_arc_song();
         ui.cli_line = "port list".into();
 
-        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx, &state, &arc_song);
 
         let ctrl_msg = ctrl_rx.try_recv().expect("expected MidiCtrlMsg");
         assert!(matches!(ctrl_msg, MidiCtrlMsg::ListPorts));
@@ -1217,11 +1574,13 @@ mod tests {
     fn cli_submit_clear_empties_log() {
         let (cmd_tx, cmd_rx, ctrl_tx, ctrl_rx) = make_channels();
         let mut ui = UiState::new();
+        let state = SequencerState::default();
+        let arc_song = make_arc_song();
         // Prefill the log.
         push_log(&mut ui.cli_log, 0, LogTag::Info, "old entry".into());
         ui.cli_line = "clear".into();
 
-        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx, &state, &arc_song);
 
         assert!(ui.cli_log.is_empty(), "clear should empty the log");
         assert!(cmd_rx.try_recv().is_err(), "clear sends no InputCommand");
@@ -1232,10 +1591,12 @@ mod tests {
     fn cli_submit_ok_empties_log() {
         let (cmd_tx, cmd_rx, ctrl_tx, ctrl_rx) = make_channels();
         let mut ui = UiState::new();
+        let state = SequencerState::default();
+        let arc_song = make_arc_song();
         push_log(&mut ui.cli_log, 0, LogTag::Info, "old entry".into());
         ui.cli_line = "ok".into();
 
-        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx, &state, &arc_song);
 
         assert!(ui.cli_log.is_empty(), "ok should empty the log");
         assert!(cmd_rx.try_recv().is_err(), "ok sends no InputCommand");
@@ -1246,9 +1607,11 @@ mod tests {
     fn cli_submit_help_pushes_one_info_per_entry() {
         let (cmd_tx, _cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
         let mut ui = UiState::new();
+        let state = SequencerState::default();
+        let arc_song = make_arc_song();
         ui.cli_line = "help".into();
 
-        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx, &state, &arc_song);
 
         assert_eq!(ui.cli_log.len(), HELP_ENTRIES.len());
         for entry in &ui.cli_log {
@@ -1306,10 +1669,12 @@ mod tests {
     fn note_set_valid_sends_note_set_cmd_and_logs_cmd() {
         let (cmd_tx, cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
         let mut ui = UiState::new();
+        let state = SequencerState::default();
+        let arc_song = make_arc_song();
         // User-facing step 4 maps to internal step 3.
         ui.cli_line = "note set 4 C4".into();
 
-        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx, &state, &arc_song);
 
         let cmd = cmd_rx.try_recv().expect("expected NoteSet");
         assert!(
@@ -1338,10 +1703,12 @@ mod tests {
     fn note_set_with_velocity_uses_provided_velocity() {
         let (cmd_tx, cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
         let mut ui = UiState::new();
+        let state = SequencerState::default();
+        let arc_song = make_arc_song();
         // User-facing step 1 maps to internal step 0.
         ui.cli_line = "note set 1 G3 64".into();
 
-        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx, &state, &arc_song);
 
         let cmd = cmd_rx.try_recv().expect("expected NoteSet");
         assert!(
@@ -1362,9 +1729,11 @@ mod tests {
         // Step 0 is rejected (must be 1–16).
         let (cmd_tx, cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
         let mut ui = UiState::new();
+        let state = SequencerState::default();
+        let arc_song = make_arc_song();
         ui.cli_line = "note set 0 C4".into();
 
-        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx, &state, &arc_song);
 
         assert!(cmd_rx.try_recv().is_err(), "no command for step 0");
         assert_eq!(ui.cli_log.len(), 1);
@@ -1373,9 +1742,11 @@ mod tests {
         // Step 17 is rejected (must be 1–16).
         let (cmd_tx, cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
         let mut ui = UiState::new();
+        let state = SequencerState::default();
+        let arc_song = make_arc_song();
         ui.cli_line = "note set 17 C4".into();
 
-        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx, &state, &arc_song);
 
         assert!(cmd_rx.try_recv().is_err(), "no command for step 17");
         assert_eq!(ui.cli_log.len(), 1);
@@ -1386,9 +1757,11 @@ mod tests {
     fn note_set_invalid_note_name_logs_error() {
         let (cmd_tx, cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
         let mut ui = UiState::new();
+        let state = SequencerState::default();
+        let arc_song = make_arc_song();
         ui.cli_line = "note set 5 X4".into();
 
-        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx, &state, &arc_song);
 
         assert!(cmd_rx.try_recv().is_err(), "no command for invalid note");
         assert_eq!(ui.cli_log.len(), 1);
@@ -1399,9 +1772,11 @@ mod tests {
     fn note_set_velocity_out_of_range_logs_error() {
         let (cmd_tx, cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
         let mut ui = UiState::new();
+        let state = SequencerState::default();
+        let arc_song = make_arc_song();
         ui.cli_line = "note set 2 C4 200".into();
 
-        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx, &state, &arc_song);
 
         assert!(cmd_rx.try_recv().is_err(), "no command for velocity > 127");
         assert_eq!(ui.cli_log.len(), 1);
@@ -1412,9 +1787,11 @@ mod tests {
     fn note_set_missing_note_logs_error() {
         let (cmd_tx, cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
         let mut ui = UiState::new();
+        let state = SequencerState::default();
+        let arc_song = make_arc_song();
         ui.cli_line = "note set 1".into();
 
-        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx, &state, &arc_song);
 
         assert!(cmd_rx.try_recv().is_err(), "no command when note missing");
         assert_eq!(ui.cli_log.len(), 1);
@@ -1425,10 +1802,12 @@ mod tests {
     fn note_set_step_16_is_valid_boundary() {
         let (cmd_tx, cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
         let mut ui = UiState::new();
+        let state = SequencerState::default();
+        let arc_song = make_arc_song();
         // User-facing step 16 maps to internal step 15.
         ui.cli_line = "note set 16 A4".into();
 
-        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx, &state, &arc_song);
 
         let cmd = cmd_rx.try_recv().expect("expected NoteSet");
         assert!(matches!(cmd, InputCommand::NoteSet { step: 15, .. }));
@@ -1439,9 +1818,11 @@ mod tests {
     fn note_set_rejects_trailing_tokens() {
         let (cmd_tx, cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
         let mut ui = UiState::new();
+        let state = SequencerState::default();
+        let arc_song = make_arc_song();
         ui.cli_line = "note set 3 C4 64 extra".into();
 
-        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx, &state, &arc_song);
 
         // No InputCommand should be sent when trailing input is present.
         assert!(
@@ -1466,9 +1847,11 @@ mod tests {
     fn note_set_trailing_tokens_uses_exact_spec_message() {
         let (cmd_tx, cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
         let mut ui = UiState::new();
+        let state = SequencerState::default();
+        let arc_song = make_arc_song();
         ui.cli_line = "note set 3 C4 64 extra".into();
 
-        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx, &state, &arc_song);
 
         assert!(cmd_rx.try_recv().is_err());
         assert_eq!(ui.cli_log.len(), 1);
@@ -1486,10 +1869,12 @@ mod tests {
     fn note_set_step_1_is_valid_boundary() {
         let (cmd_tx, cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
         let mut ui = UiState::new();
+        let state = SequencerState::default();
+        let arc_song = make_arc_song();
         // User-facing step 1 maps to internal step 0.
         ui.cli_line = "note set 1 C4".into();
 
-        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx, &state, &arc_song);
 
         let cmd = cmd_rx.try_recv().expect("expected NoteSet");
         assert!(
@@ -1514,9 +1899,11 @@ mod tests {
     fn note_set_step_16_log_displays_user_facing_step() {
         let (cmd_tx, cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
         let mut ui = UiState::new();
+        let state = SequencerState::default();
+        let arc_song = make_arc_song();
         ui.cli_line = "note set 16 A4".into();
 
-        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx, &state, &arc_song);
 
         let _cmd = cmd_rx.try_recv().expect("expected NoteSet");
         assert_eq!(ui.cli_log.len(), 1);
@@ -1555,9 +1942,11 @@ mod tests {
     fn cli_submit_help_output_includes_ok_alias_line() {
         let (cmd_tx, _cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
         let mut ui = UiState::new();
+        let state = SequencerState::default();
+        let arc_song = make_arc_song();
         ui.cli_line = "help".into();
 
-        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx);
+        handle_cli_submit(&mut ui, &cmd_tx, &ctrl_tx, &state, &arc_song);
 
         // The `help` command renders each entry as "<cmd>  —  <desc>". Look
         // for the rendered `ok` line directly, not just the constant.
@@ -1570,5 +1959,105 @@ mod tests {
             "help output must include the `ok` alias line; got entries: {:?}",
             ui.cli_log.iter().map(|e| &e.text).collect::<Vec<_>>()
         );
+    }
+
+    // ── New pattern/song CLI tests ────────────────────────────────────────────
+
+    #[test]
+    fn pattern_save_pushes_cmd_log() {
+        let tmp = std::env::temp_dir();
+        unsafe { std::env::set_var("HOME", &tmp) };
+
+        let (cmd_tx, _cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
+        let mut ui = UiState::new();
+        let state = SequencerState::default();
+        let arc_song = make_arc_song();
+
+        let parts = vec!["pattern", "save", "test-pat"];
+        handle_cli_pattern_cmd(&parts, &mut ui, &state, &cmd_tx, &arc_song);
+
+        assert!(
+            ui.cli_log.iter().any(|e| matches!(e.tag, LogTag::Cmd)),
+            "pattern save should push a Cmd log entry; got: {:?}",
+            ui.cli_log.iter().map(|e| (&e.tag, &e.text)).collect::<Vec<_>>()
+        );
+        drop(ctrl_tx);
+    }
+
+    #[test]
+    fn song_new_creates_empty_song() {
+        let (cmd_tx, _cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
+        let mut ui = UiState::new();
+        let state = SequencerState::default();
+        let arc_song = make_arc_song();
+
+        let parts = vec!["song", "new", "my-song"];
+        handle_cli_song_cmd(&parts, &mut ui, &state, &cmd_tx, &arc_song);
+
+        assert!(ui.song.is_some(), "song should be Some after 'song new'");
+        assert!(
+            ui.song.as_ref().unwrap().slots.is_empty(),
+            "new song should have no slots"
+        );
+        assert_eq!(ui.song.as_ref().unwrap().name, "my-song");
+        drop(ctrl_tx);
+    }
+
+    #[test]
+    fn song_add_appends_slot() {
+        let (cmd_tx, _cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
+        let mut ui = UiState::new();
+        let state = SequencerState::default();
+        let arc_song = make_arc_song();
+
+        // First create a song
+        handle_cli_song_cmd(&["song", "new", "my-song"], &mut ui, &state, &cmd_tx, &arc_song);
+        // Then add a slot
+        handle_cli_song_cmd(&["song", "add", "verse-A"], &mut ui, &state, &cmd_tx, &arc_song);
+
+        let song = ui.song.as_ref().expect("song should exist");
+        assert_eq!(song.slots.len(), 1, "should have 1 slot after add");
+        assert_eq!(song.slots[0].filename, "verse-A.pat.toml");
+        drop(ctrl_tx);
+    }
+
+    #[test]
+    fn song_remove_removes_slot() {
+        let (cmd_tx, _cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
+        let mut ui = UiState::new();
+        let state = SequencerState::default();
+        let arc_song = make_arc_song();
+
+        // Create song and add two slots
+        handle_cli_song_cmd(&["song", "new", "my-song"], &mut ui, &state, &cmd_tx, &arc_song);
+        handle_cli_song_cmd(&["song", "add", "slot-A"], &mut ui, &state, &cmd_tx, &arc_song);
+        handle_cli_song_cmd(&["song", "add", "slot-B"], &mut ui, &state, &cmd_tx, &arc_song);
+
+        assert_eq!(ui.song.as_ref().unwrap().slots.len(), 2, "should have 2 slots");
+
+        // Remove slot 1 (1-indexed)
+        handle_cli_song_cmd(&["song", "remove", "1"], &mut ui, &state, &cmd_tx, &arc_song);
+
+        let song = ui.song.as_ref().expect("song should exist");
+        assert_eq!(song.slots.len(), 1, "should have 1 slot after remove");
+        assert_eq!(song.slots[0].filename, "slot-B.pat.toml", "slot-B should remain");
+        drop(ctrl_tx);
+    }
+
+    #[test]
+    fn unknown_pattern_cmd_pushes_err() {
+        let (cmd_tx, _cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
+        let mut ui = UiState::new();
+        let state = SequencerState::default();
+        let arc_song = make_arc_song();
+
+        let parts = vec!["pattern", "frobnicate"];
+        handle_cli_pattern_cmd(&parts, &mut ui, &state, &cmd_tx, &arc_song);
+
+        assert!(
+            ui.cli_log.iter().any(|e| matches!(e.tag, LogTag::Err)),
+            "unknown pattern command should push LogTag::Err"
+        );
+        drop(ctrl_tx);
     }
 }

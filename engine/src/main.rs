@@ -17,6 +17,8 @@ use engine::cli::{parse_args_from_iter, CliArgs};
 use engine::input::InputCommand;
 #[cfg(feature = "hw-io")]
 use engine::midi_out::MidiCtrlMsg;
+#[cfg(feature = "hw-io")]
+use engine::pattern::Song;
 use engine::state::{MidiEvent, SequencerState};
 #[cfg(feature = "hw-io")]
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -140,6 +142,10 @@ fn main() {
     // cmd_notify (the only remaining sender) is dropped on cmd-processor exit.
     drop(ui_notify_tx);
 
+    // --- Shared song state (written by CLI song commands, read by cmd-processor) ---
+    #[cfg(feature = "hw-io")]
+    let arc_song: Arc<RwLock<Option<Song>>> = Arc::new(RwLock::new(None));
+
     // --- Thread 5: UI (hw-io only) ---
     // run_ui blocks until Ctrl-C; main blocks here waiting for it.
     //
@@ -153,9 +159,10 @@ fn main() {
         let ui_state = Arc::clone(&state);
         let ui_cmd_tx = cmd_tx.clone();
         let ui_ctrl_tx = midi_ctrl_tx.clone(); // pass clone; original stays alive in main
+        let ui_arc_song = Arc::clone(&arc_song);
         let ui_thread = std::thread::Builder::new()
             .name("ui".to_owned())
-            .spawn(move || engine::ui::run_ui(ui_state, ui_cmd_tx, ui_notify_rx, ui_ctrl_tx, midi_log_rx))
+            .spawn(move || engine::ui::run_ui(ui_state, ui_cmd_tx, ui_notify_rx, ui_ctrl_tx, midi_log_rx, ui_arc_song))
             .expect("failed to spawn ui thread");
 
         // Block until UI exits (user pressed Ctrl-C).
