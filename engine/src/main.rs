@@ -84,7 +84,7 @@ fn main() {
         let clock_midi_tx = midi_tx.clone();
         std::thread::Builder::new()
             .name("clock".to_owned())
-            .spawn(move || engine::clock::run_clock(clock_state, clock_midi_tx))
+            .spawn(move || engine::clock::run_clock(clock_state, clock_midi_tx, cmd_tx.clone()))
             .expect("failed to spawn clock thread")
     };
 
