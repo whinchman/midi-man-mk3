@@ -56,6 +56,10 @@ fn default_snapshot<'a>(log: &'a VecDeque<LogEntry>) -> UiLocalSnapshot<'a> {
         cli_log: log,
         midi_device_name: "TestDevice",
         midi_channel_display: 1,
+        play_mode: engine::state::PlayMode::Pattern,
+        song_slots: &[],
+        song_cursor: 0,
+        song_active_slot: 0,
     }
 }
 
@@ -260,6 +264,10 @@ fn title_bar_contains_midi_device_info() {
         cli_log: &log,
         midi_device_name: "USB MIDI",
         midi_channel_display: 3,
+        play_mode: engine::state::PlayMode::Pattern,
+        song_slots: &[],
+        song_cursor: 0,
+        song_active_slot: 0,
     };
     terminal
         .draw(|frame| render_frame(frame, &state, &snap))
@@ -541,6 +549,10 @@ fn f4_panel_shows_log_entries() {
         cli_log: &log,
         midi_device_name: "",
         midi_channel_display: 1,
+        play_mode: engine::state::PlayMode::Pattern,
+        song_slots: &[],
+        song_cursor: 0,
+        song_active_slot: 0,
     };
 
     let backend = TestBackend::new(120, 40);
@@ -573,6 +585,10 @@ fn f4_panel_shows_input_prompt() {
         cli_log: &log,
         midi_device_name: "",
         midi_channel_display: 1,
+        play_mode: engine::state::PlayMode::Pattern,
+        song_slots: &[],
+        song_cursor: 0,
+        song_active_slot: 0,
     };
 
     let backend = TestBackend::new(120, 30);
@@ -600,6 +616,10 @@ fn focused_f1_panel_renders_without_panic() {
         cli_log: &log,
         midi_device_name: "",
         midi_channel_display: 1,
+        play_mode: engine::state::PlayMode::Pattern,
+        song_slots: &[],
+        song_cursor: 0,
+        song_active_slot: 0,
     };
     let backend = TestBackend::new(160, 30);
     let mut terminal = Terminal::new(backend).expect("test terminal");
@@ -621,6 +641,10 @@ fn focused_f2_panel_renders_without_panic() {
         cli_log: &log,
         midi_device_name: "",
         midi_channel_display: 1,
+        play_mode: engine::state::PlayMode::Pattern,
+        song_slots: &[],
+        song_cursor: 0,
+        song_active_slot: 0,
     };
     let backend = TestBackend::new(200, 30);
     let mut terminal = Terminal::new(backend).expect("test terminal");
@@ -645,6 +669,10 @@ fn focused_f3_panel_renders_without_panic() {
         cli_log: &log,
         midi_device_name: "",
         midi_channel_display: 1,
+        play_mode: engine::state::PlayMode::Pattern,
+        song_slots: &[],
+        song_cursor: 0,
+        song_active_slot: 0,
     };
     let backend = TestBackend::new(200, 30);
     let mut terminal = Terminal::new(backend).expect("test terminal");
@@ -726,6 +754,10 @@ fn render_frame_does_not_panic_for_all_seq_param_indices() {
             cli_log: &log,
             midi_device_name: "",
             midi_channel_display: 1,
+            play_mode: engine::state::PlayMode::Pattern,
+            song_slots: &[],
+            song_cursor: 0,
+            song_active_slot: 0,
         };
         let backend = TestBackend::new(200, 30);
         let mut terminal = Terminal::new(backend).expect("test terminal");
@@ -749,6 +781,10 @@ fn render_frame_does_not_panic_for_all_rand_param_indices() {
             cli_log: &log,
             midi_device_name: "",
             midi_channel_display: 1,
+            play_mode: engine::state::PlayMode::Pattern,
+            song_slots: &[],
+            song_cursor: 0,
+            song_active_slot: 0,
         };
         let backend = TestBackend::new(200, 30);
         let mut terminal = Terminal::new(backend).expect("test terminal");
@@ -1011,6 +1047,10 @@ fn f2_selected_param_has_magenta_when_focused() {
         cli_log: &log,
         midi_device_name: "",
         midi_channel_display: 1,
+        play_mode: engine::state::PlayMode::Pattern,
+        song_slots: &[],
+        song_cursor: 0,
+        song_active_slot: 0,
     };
     let backend = TestBackend::new(200, 30);
     let mut terminal = Terminal::new(backend).expect("test terminal");
@@ -1043,6 +1083,10 @@ fn f2_no_magenta_when_focus_is_sequencer() {
         cli_log: &log,
         midi_device_name: "",
         midi_channel_display: 1,
+        play_mode: engine::state::PlayMode::Pattern,
+        song_slots: &[],
+        song_cursor: 0,
+        song_active_slot: 0,
     };
     let backend = TestBackend::new(200, 30);
     let mut terminal = Terminal::new(backend).expect("test terminal");
@@ -1105,6 +1149,10 @@ fn f3_seed_renders_with_0x_prefix_hex() {
         cli_log: &log,
         midi_device_name: "",
         midi_channel_display: 1,
+        play_mode: engine::state::PlayMode::Pattern,
+        song_slots: &[],
+        song_cursor: 0,
+        song_active_slot: 0,
     };
     let backend = TestBackend::new(200, 30);
     let mut terminal = Terminal::new(backend).expect("test terminal");
@@ -1134,6 +1182,10 @@ fn f3_seed_renders_four_digit_hex_zero_padded() {
         cli_log: &log,
         midi_device_name: "",
         midi_channel_display: 1,
+        play_mode: engine::state::PlayMode::Pattern,
+        song_slots: &[],
+        song_cursor: 0,
+        song_active_slot: 0,
     };
     let backend = TestBackend::new(200, 30);
     let mut terminal = Terminal::new(backend).expect("test terminal");
@@ -1162,6 +1214,10 @@ fn f3_selected_param_has_magenta_when_focused() {
         cli_log: &log,
         midi_device_name: "",
         midi_channel_display: 1,
+        play_mode: engine::state::PlayMode::Pattern,
+        song_slots: &[],
+        song_cursor: 0,
+        song_active_slot: 0,
     };
     let backend = TestBackend::new(200, 30);
     let mut terminal = Terminal::new(backend).expect("test terminal");
@@ -1192,6 +1248,10 @@ fn f4_cli_prompt_contains_greater_than_space() {
         cli_log: &log,
         midi_device_name: "",
         midi_channel_display: 1,
+        play_mode: engine::state::PlayMode::Pattern,
+        song_slots: &[],
+        song_cursor: 0,
+        song_active_slot: 0,
     };
     let backend = TestBackend::new(120, 40);
     let mut terminal = Terminal::new(backend).expect("test terminal");
@@ -1220,6 +1280,10 @@ fn f4_cli_line_content_appears_in_prompt() {
         cli_log: &log,
         midi_device_name: "",
         midi_channel_display: 1,
+        play_mode: engine::state::PlayMode::Pattern,
+        song_slots: &[],
+        song_cursor: 0,
+        song_active_slot: 0,
     };
     let backend = TestBackend::new(120, 40);
     let mut terminal = Terminal::new(backend).expect("test terminal");
@@ -1253,6 +1317,10 @@ fn f4_log_tag_midi_renders_with_green_color() {
         cli_log: &log,
         midi_device_name: "",
         midi_channel_display: 1,
+        play_mode: engine::state::PlayMode::Pattern,
+        song_slots: &[],
+        song_cursor: 0,
+        song_active_slot: 0,
     };
     let backend = TestBackend::new(160, 40);
     let mut terminal = Terminal::new(backend).expect("test terminal");
@@ -1286,6 +1354,10 @@ fn f4_log_tag_err_renders_with_red_color() {
         cli_log: &log,
         midi_device_name: "",
         midi_channel_display: 1,
+        play_mode: engine::state::PlayMode::Pattern,
+        song_slots: &[],
+        song_cursor: 0,
+        song_active_slot: 0,
     };
     let backend = TestBackend::new(160, 40);
     let mut terminal = Terminal::new(backend).expect("test terminal");
@@ -1315,6 +1387,10 @@ fn title_bar_shows_midi_out_with_device_and_channel() {
         cli_log: &log,
         midi_device_name: "Arturia KeyStep",
         midi_channel_display: 5,
+        play_mode: engine::state::PlayMode::Pattern,
+        song_slots: &[],
+        song_cursor: 0,
+        song_active_slot: 0,
     };
     let backend = TestBackend::new(160, 30);
     let mut terminal = Terminal::new(backend).expect("test terminal");
@@ -1354,6 +1430,10 @@ fn title_bar_shows_dash_when_no_midi_device() {
         cli_log: &log,
         midi_device_name: "",
         midi_channel_display: 1,
+        play_mode: engine::state::PlayMode::Pattern,
+        song_slots: &[],
+        song_cursor: 0,
+        song_active_slot: 0,
     };
     let backend = TestBackend::new(160, 30);
     let mut terminal = Terminal::new(backend).expect("test terminal");
@@ -1394,6 +1474,10 @@ fn f1_disabled_step_renders_with_dim_cyan() {
         cli_log: &log,
         midi_device_name: "",
         midi_channel_display: 1,
+        play_mode: engine::state::PlayMode::Pattern,
+        song_slots: &[],
+        song_cursor: 0,
+        song_active_slot: 0,
     };
     let backend = TestBackend::new(160, 40);
     let mut terminal = Terminal::new(backend).expect("test terminal");
@@ -1430,6 +1514,10 @@ fn f1_enabled_non_playhead_step_renders_with_cyan() {
         cli_log: &log,
         midi_device_name: "",
         midi_channel_display: 1,
+        play_mode: engine::state::PlayMode::Pattern,
+        song_slots: &[],
+        song_cursor: 0,
+        song_active_slot: 0,
     };
     let backend = TestBackend::new(160, 40);
     let mut terminal = Terminal::new(backend).expect("test terminal");

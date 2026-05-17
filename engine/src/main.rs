@@ -17,6 +17,8 @@ use engine::cli::{parse_args_from_iter, CliArgs};
 use engine::input::InputCommand;
 #[cfg(feature = "hw-io")]
 use engine::midi_out::MidiCtrlMsg;
+#[cfg(feature = "hw-io")]
+use engine::pattern::Song;
 use engine::state::{MidiEvent, SequencerState};
 #[cfg(feature = "hw-io")]
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -82,9 +84,10 @@ fn main() {
     let clock_thread = {
         let clock_state = Arc::clone(&state);
         let clock_midi_tx = midi_tx.clone();
+        let clock_cmd_tx = cmd_tx.clone();
         std::thread::Builder::new()
             .name("clock".to_owned())
-            .spawn(move || engine::clock::run_clock(clock_state, clock_midi_tx))
+            .spawn(move || engine::clock::run_clock(clock_state, clock_midi_tx, clock_cmd_tx))
             .expect("failed to spawn clock thread")
     };
 
@@ -116,14 +119,76 @@ fn main() {
             .expect("failed to spawn hid thread")
     };
 
+    // --- Shared song state (written by CLI song commands, read by cmd-processor) ---
+    #[cfg(feature = "hw-io")]
+    let arc_song: Arc<RwLock<Option<Song>>> = Arc::new(RwLock::new(None));
+
     // --- Thread 4: Command processor ---
     // Consumes InputCommand values, acquires write lock, applies command, notifies UI.
     let cmd_state = Arc::clone(&state);
     let cmd_notify = ui_notify_tx.clone();
+    #[cfg(feature = "hw-io")]
+    let cmd_arc_song = Arc::clone(&arc_song);
     let cmd_thread = std::thread::Builder::new()
         .name("cmd-processor".to_owned())
         .spawn(move || {
             while let Ok(cmd) = cmd_rx.recv() {
+                #[cfg(feature = "hw-io")]
+                match &cmd {
+                    InputCommand::SongAdvance => {
+                        // Read the current song and slot state under separate locks.
+                        let (slot_index, slot_repeat) = {
+                            let s = cmd_state.read().expect("cmd-processor: state RwLock poisoned");
+                            (s.song_slot_index, s.song_slot_repeat)
+                        };
+                        let next_action = {
+                            let song_guard = cmd_arc_song.read().expect("cmd-processor: song arc poisoned");
+                            song_guard.as_ref().and_then(|song| {
+                                let slot = song.slots.get(slot_index)?;
+                                Some((slot.filename.clone(), slot.repeats, song.slots.len()))
+                            })
+                        };
+                        if let Some((_filename, repeats, total_slots)) = next_action {
+                            // Determine whether to advance to next slot or repeat.
+                            let new_repeat = slot_repeat + 1;
+                            if new_repeat >= repeats {
+                                // Exhausted repeats: advance slot index (wrap around).
+                                let next_slot = (slot_index + 1) % total_slots.max(1);
+                                // Look up next slot's filename.
+                                let next_filename = {
+                                    let sg = cmd_arc_song.read().expect("cmd-processor: song arc poisoned");
+                                    sg.as_ref()
+                                        .and_then(|s| s.slots.get(next_slot))
+                                        .map(|p| p.filename.clone())
+                                };
+                                if let Some(nf) = next_filename {
+                                    match engine::pattern::load_pattern(&nf) {
+                                        Ok(data) => {
+                                            let mut s = cmd_state.write().expect("cmd-processor: state RwLock poisoned");
+                                            s.song_slot_index = next_slot;
+                                            s.song_slot_repeat = 0;
+                                            let _ = engine::pattern::apply_pattern_to_state(&data, &mut s);
+                                        }
+                                        Err(e) => {
+                                            eprintln!("cmd-processor: SongAdvance load error: {e}");
+                                        }
+                                    }
+                                }
+                            } else {
+                                // Still repeating: increment repeat counter only.
+                                let mut s = cmd_state.write().expect("cmd-processor: state RwLock poisoned");
+                                s.song_slot_repeat = new_repeat;
+                            }
+                        }
+                    }
+                    _ => {
+                        let mut s = cmd_state
+                            .write()
+                            .expect("cmd-processor: state RwLock poisoned");
+                        s.apply_command(cmd);
+                    }
+                }
+                #[cfg(not(feature = "hw-io"))]
                 {
                     let mut s = cmd_state
                         .write()
@@ -153,9 +218,10 @@ fn main() {
         let ui_state = Arc::clone(&state);
         let ui_cmd_tx = cmd_tx.clone();
         let ui_ctrl_tx = midi_ctrl_tx.clone(); // pass clone; original stays alive in main
+        let ui_arc_song = Arc::clone(&arc_song);
         let ui_thread = std::thread::Builder::new()
             .name("ui".to_owned())
-            .spawn(move || engine::ui::run_ui(ui_state, ui_cmd_tx, ui_notify_rx, ui_ctrl_tx, midi_log_rx))
+            .spawn(move || engine::ui::run_ui(ui_state, ui_cmd_tx, ui_notify_rx, ui_ctrl_tx, midi_log_rx, ui_arc_song))
             .expect("failed to spawn ui thread");
 
         // Block until UI exits (user pressed Ctrl-C).

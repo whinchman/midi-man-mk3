@@ -329,7 +329,7 @@ fn tick_no_events_sent_when_not_playing() {
     let playing = state.read().unwrap().playing;
     if playing {
         let mut s = state.write().unwrap();
-        if let Some(MidiEvent::NoteOn {
+        if let engine::state::TickResult::Note(MidiEvent::NoteOn {
             channel,
             note,
             velocity,
@@ -376,7 +376,7 @@ fn tick_no_events_sent_when_paused() {
             let mut s = state.write().unwrap();
             s.tick()
         };
-        if let Some(MidiEvent::NoteOn {
+        if let engine::state::TickResult::Note(MidiEvent::NoteOn {
             channel,
             note,
             velocity,
@@ -613,21 +613,21 @@ fn swing_120bpm_negative50_odd_step_advance_is_correct() {
 
 /// Simulates the retrigger logic from `run_clock` on a single tick.
 ///
-/// Returns the events that would be emitted for the given `maybe_event`,
+/// Returns the events that would be emitted for the given tick result,
 /// given the current `last_note` state.  Updates `last_note` in place,
 /// mirroring the production code.
 fn simulate_tick(
-    maybe_event: Option<MidiEvent>,
+    tick_result: engine::state::TickResult,
     last_note: &mut Option<(u8, u8)>,
     period: u64,
 ) -> Vec<MidiEvent> {
     let mut events = Vec::new();
-    if let Some(MidiEvent::NoteOn {
+    if let engine::state::TickResult::Note(MidiEvent::NoteOn {
         channel,
         note,
         velocity,
         ..
-    }) = maybe_event
+    }) = tick_result
     {
         if *last_note == Some((channel, note)) {
             events.push(MidiEvent::NoteOff { channel, note });
@@ -822,9 +822,10 @@ fn test_run_clock_retrigger_via_channel() {
 
     let shared = Arc::new(RwLock::new(state));
     let (tx, rx) = mpsc::sync_channel::<MidiEvent>(3);
+    let (cmd_tx, _cmd_rx) = mpsc::sync_channel::<engine::input::InputCommand>(16);
 
     let shared_clone = Arc::clone(&shared);
-    let handle = std::thread::spawn(move || run_clock(shared_clone, tx));
+    let handle = std::thread::spawn(move || run_clock(shared_clone, tx, cmd_tx));
 
     let ev1 = rx.recv().expect("event 1");
     let ev2 = rx.recv().expect("event 2");
@@ -1000,9 +1001,10 @@ fn test_tempo_bpm_never_mutated_by_run_clock() {
 
     let shared = Arc::new(RwLock::new(state));
     let (tx, rx) = mpsc::sync_channel::<MidiEvent>(32);
+    let (cmd_tx, _cmd_rx) = mpsc::sync_channel::<engine::input::InputCommand>(16);
 
     let shared_clone = Arc::clone(&shared);
-    let handle = std::thread::spawn(move || run_clock(shared_clone, tx));
+    let handle = std::thread::spawn(move || run_clock(shared_clone, tx, cmd_tx));
 
     for _ in 0..10 {
         let _ = rx.recv();
@@ -1095,7 +1097,7 @@ fn note_on_duration_nanos_set_by_period() {
     let raw = s.tick();
     assert!(raw.is_some());
 
-    if let Some(MidiEvent::NoteOn {
+    if let engine::state::TickResult::Note(MidiEvent::NoteOn {
         channel,
         note,
         velocity,

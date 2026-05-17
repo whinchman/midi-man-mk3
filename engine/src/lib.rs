@@ -13,6 +13,8 @@ pub mod midi_out;
 pub mod music_theory;
 /// Sequencer module — higher-level engine wiring and re-exports.
 pub mod sequencer;
+/// Pattern and song data model with TOML serialization and file I/O.
+pub mod pattern;
 /// Sequencer state — the shared truth for all threads.
 pub mod state;
 /// Terminal UI — ratatui render loop with keyboard event handling.

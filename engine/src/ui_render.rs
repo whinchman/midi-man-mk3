@@ -15,7 +15,8 @@ use ratatui::Frame;
 use crate::input::FocusPanel;
 use crate::music_theory::note_name;
 use crate::music_theory::{Key, Mode};
-use crate::state::{SequencerState, StepSize, TempoRandType, TempoRollPoint};
+use crate::pattern::PatternRef;
+use crate::state::{PlayMode, SequencerState, StepSize, TempoRandType, TempoRollPoint};
 
 // ── Color palette ─────────────────────────────────────────────────────────────
 
@@ -49,6 +50,14 @@ pub struct UiLocalSnapshot<'a> {
     pub midi_device_name: &'a str,
     /// MIDI channel display value (1-indexed).
     pub midi_channel_display: u8,
+    /// Current play mode (Pattern or Song).
+    pub play_mode: PlayMode,
+    /// Slots in the current song (empty slice when no song loaded).
+    pub song_slots: &'a [PatternRef],
+    /// Which slot the cursor is on.
+    pub song_cursor: usize,
+    /// Index of the currently active slot (from SequencerState::song_slot_index).
+    pub song_active_slot: usize,
 }
 
 /// A single log entry in the F4 CLI panel.
@@ -99,11 +108,14 @@ pub fn render_frame(frame: &mut Frame, state: &SequencerState, ui: &UiLocalSnaps
 
     render_title_bar(frame, state, ui, chunks[0]);
     render_transport_bar(frame, state, chunks[1]);
-    render_seq_panel(frame, state, ui, chunks[2]);
+    match ui.play_mode {
+        PlayMode::Pattern => render_seq_panel(frame, state, ui, chunks[2]),
+        PlayMode::Song    => render_song_panel(frame, ui, chunks[2]),
+    }
     render_seq_params_panel(frame, state, ui, chunks[3]);
     render_rand_params_panel(frame, state, ui, chunks[4]);
     render_cli_panel(frame, ui, chunks[5]);
-    render_keybind_bar(frame, chunks[6]);
+    render_keybind_bar(frame, ui, chunks[6]);
 }
 
 // ── Zone render functions (private) ───────────────────────────────────────────
@@ -123,6 +135,11 @@ fn render_title_bar(
         "midi-man-mk3",
         Style::default().fg(FUCHSIA).add_modifier(Modifier::BOLD),
     );
+    let mode_label = match ui.play_mode {
+        PlayMode::Pattern => " [PAT]",
+        PlayMode::Song    => " [SONG]",
+    };
+    let mode_span = Span::styled(mode_label, Style::default().fg(GRAY));
     let device = if ui.midi_device_name.is_empty() {
         "—"
     } else {
@@ -131,7 +148,7 @@ fn render_title_bar(
     let right_text = format!("  MIDI OUT {} CH:{}", device, ui.midi_channel_display);
     let right = Span::styled(right_text, Style::default().fg(GRAY));
 
-    let line = Line::from(vec![left_prefix, left_name, right]);
+    let line = Line::from(vec![left_prefix, left_name, mode_span, right]);
     let para = Paragraph::new(line).style(Style::default().bg(BG));
     frame.render_widget(para, area);
 }
@@ -250,6 +267,56 @@ fn render_seq_panel(
         let para = Paragraph::new(lines);
         frame.render_widget(para, card_inner);
     }
+}
+
+/// Render the F1 song panel — lists all slots in the current song.
+fn render_song_panel(frame: &mut Frame, snap: &UiLocalSnapshot, area: Rect) {
+    let block = Block::default()
+        .title("F1 · SONG")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(DIM_CYAN))
+        .style(Style::default().bg(BG));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    if snap.song_slots.is_empty() {
+        let empty_line = Line::from(Span::styled(
+            "  (no song loaded)",
+            Style::default().fg(DIM_CYAN),
+        ));
+        let para = Paragraph::new(vec![empty_line]);
+        frame.render_widget(para, inner);
+        return;
+    }
+
+    let mut lines: Vec<Line> = Vec::with_capacity(snap.song_slots.len());
+    for (idx, slot) in snap.song_slots.iter().enumerate() {
+        let filename: String = slot.filename.chars().take(30).collect();
+        let indicator = if idx == snap.song_active_slot {
+            "\u{25c4} playing"
+        } else {
+            ""
+        };
+        let text = format!(" [{:02}] {:<30} \u{d7}{:<3} {}", idx + 1, filename, slot.repeats, indicator);
+
+        let style = if idx == snap.song_cursor {
+            Style::default().fg(MAGENTA)
+        } else if idx == snap.song_active_slot {
+            Style::default().fg(CYAN)
+        } else {
+            Style::default().fg(DIM_CYAN)
+        };
+
+        lines.push(Line::from(Span::styled(text, style)));
+    }
+
+    let para = Paragraph::new(lines);
+    frame.render_widget(para, inner);
 }
 
 /// Render the F2 SEQ PARAMS panel.
@@ -417,8 +484,11 @@ fn render_cli_panel(frame: &mut Frame, ui: &UiLocalSnapshot<'_>, area: Rect) {
 }
 
 /// Render the bottom keybind hint bar.
-fn render_keybind_bar(frame: &mut Frame, area: Rect) {
-    let hints = "F1-F4 focus | P play | +/- BPM | \u{2190}/\u{2192} param | \u{2191}/\u{2193} adjust | space toggle | enter confirm | esc cancel | ^C quit";
+fn render_keybind_bar(frame: &mut Frame, snap: &UiLocalSnapshot, area: Rect) {
+    let hints = match snap.play_mode {
+        PlayMode::Pattern => "F1-F4 focus | P play | +/- BPM | \u{2190}/\u{2192} param | \u{2191}/\u{2193} adjust | space toggle | enter confirm | esc cancel | ^C quit",
+        PlayMode::Song    => "F1:SONG  \u{2191}\u{2193}:cursor  d:delete  [:move\u{2191}  ]:move\u{2193}  F9:PAT  F10:SONG",
+    };
     let para = Paragraph::new(hints).style(Style::default().fg(DIM_CYAN).bg(BG));
     frame.render_widget(para, area);
 }
@@ -609,6 +679,10 @@ mod tests {
             cli_log,
             midi_device_name: "TestDevice",
             midi_channel_display: 1,
+            play_mode: PlayMode::Pattern,
+            song_slots: &[],
+            song_cursor: 0,
+            song_active_slot: 0,
         }
     }
 
@@ -709,6 +783,10 @@ mod tests {
             cli_log: &log,
             midi_device_name: "",
             midi_channel_display: 1,
+            play_mode: PlayMode::Pattern,
+            song_slots: &[],
+            song_cursor: 0,
+            song_active_slot: 0,
         };
         terminal
             .draw(|frame| render_frame(frame, &state, &snapshot))
@@ -752,6 +830,10 @@ mod tests {
             cli_log: &log,
             midi_device_name: "",
             midi_channel_display: 1,
+            play_mode: PlayMode::Pattern,
+            song_slots: &[],
+            song_cursor: 0,
+            song_active_slot: 0,
         };
         terminal
             .draw(|frame| render_frame(frame, &state, &ui))
@@ -772,6 +854,149 @@ mod tests {
             magenta_found,
             "first step card (playhead=0) should render with MAGENTA color"
         );
+    }
+
+    #[test]
+    fn render_song_panel_empty_slots_does_not_panic() {
+        use crate::pattern::PatternRef;
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let state = SequencerState::default();
+        let log: VecDeque<LogEntry> = VecDeque::new();
+        let ui = UiLocalSnapshot {
+            focus: FocusPanel::Sequencer,
+            selected_step: 0,
+            seq_param_idx: 0,
+            rand_param_idx: 0,
+            cli_line: "",
+            cli_log: &log,
+            midi_device_name: "",
+            midi_channel_display: 1,
+            play_mode: PlayMode::Song,
+            song_slots: &[],
+            song_cursor: 0,
+            song_active_slot: 0,
+        };
+        terminal
+            .draw(|frame| render_frame(frame, &state, &ui))
+            .expect("render with empty song_slots must not panic");
+
+        // The rendered buffer should contain "(no song loaded)".
+        let buf = terminal.backend().buffer().clone();
+        let w = buf.area.width;
+        let h = buf.area.height;
+        let all_text: String = (0..h)
+            .flat_map(|y| (0..w).map(move |x| (x, y)))
+            .map(|(x, y)| {
+                buf.cell((x, y))
+                    .map(|c| c.symbol().chars().next().unwrap_or(' '))
+                    .unwrap_or(' ')
+            })
+            .collect();
+        assert!(
+            all_text.contains("no song loaded"),
+            "empty song_slots should render '(no song loaded)', got: {:?}",
+            &all_text[..all_text.len().min(200)]
+        );
+        // Suppress unused-import warning in test.
+        let _: Option<PatternRef> = None;
+    }
+
+    #[test]
+    fn render_song_panel_three_slots_renders_all_numbers() {
+        use crate::pattern::PatternRef;
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let state = SequencerState::default();
+        let log: VecDeque<LogEntry> = VecDeque::new();
+        let slots = vec![
+            PatternRef { filename: "a.pat.toml".into(), repeats: 1 },
+            PatternRef { filename: "b.pat.toml".into(), repeats: 2 },
+            PatternRef { filename: "c.pat.toml".into(), repeats: 3 },
+        ];
+        let ui = UiLocalSnapshot {
+            focus: FocusPanel::Sequencer,
+            selected_step: 0,
+            seq_param_idx: 0,
+            rand_param_idx: 0,
+            cli_line: "",
+            cli_log: &log,
+            midi_device_name: "",
+            midi_channel_display: 1,
+            play_mode: PlayMode::Song,
+            song_slots: &slots,
+            song_cursor: 0,
+            song_active_slot: 0,
+        };
+        terminal
+            .draw(|frame| render_frame(frame, &state, &ui))
+            .expect("draw");
+
+        let buf = terminal.backend().buffer().clone();
+        let w = buf.area.width;
+        let h = buf.area.height;
+        let all_text: String = (0..h)
+            .flat_map(|y| (0..w).map(move |x| (x, y)))
+            .map(|(x, y)| {
+                buf.cell((x, y))
+                    .map(|c| c.symbol().chars().next().unwrap_or(' '))
+                    .unwrap_or(' ')
+            })
+            .collect();
+        assert!(all_text.contains("[01]"), "should contain [01]");
+        assert!(all_text.contains("[02]"), "should contain [02]");
+        assert!(all_text.contains("[03]"), "should contain [03]");
+    }
+
+    #[test]
+    fn render_song_panel_cursor_row_differs() {
+        use crate::pattern::PatternRef;
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let state = SequencerState::default();
+        let log: VecDeque<LogEntry> = VecDeque::new();
+        let slots = vec![
+            PatternRef { filename: "a.pat.toml".into(), repeats: 1 },
+            PatternRef { filename: "b.pat.toml".into(), repeats: 1 },
+        ];
+        // cursor=1, active=0 — so slot 1 has cursor (MAGENTA) and slot 0 has CYAN (active)
+        let ui = UiLocalSnapshot {
+            focus: FocusPanel::Sequencer,
+            selected_step: 0,
+            seq_param_idx: 0,
+            rand_param_idx: 0,
+            cli_line: "",
+            cli_log: &log,
+            midi_device_name: "",
+            midi_channel_display: 1,
+            play_mode: PlayMode::Song,
+            song_slots: &slots,
+            song_cursor: 1,
+            song_active_slot: 0,
+        };
+        terminal
+            .draw(|frame| render_frame(frame, &state, &ui))
+            .expect("draw");
+
+        let buf = terminal.backend().buffer().clone();
+        let w = buf.area.width;
+        let h = buf.area.height;
+        let all_text: String = (0..h)
+            .flat_map(|y| (0..w).map(move |x| (x, y)))
+            .map(|(x, y)| {
+                buf.cell((x, y))
+                    .map(|c| c.symbol().chars().next().unwrap_or(' '))
+                    .unwrap_or(' ')
+            })
+            .collect();
+        // Active slot (slot 0) shows the playing indicator
+        assert!(
+            all_text.contains('\u{25c4}'),
+            "active slot should render the playing indicator ◀"
+        );
+        // Both slot numbers should be visible
+        assert!(all_text.contains("[01]"), "should contain [01]");
+        assert!(all_text.contains("[02]"), "should contain [02]");
     }
 
     #[test]
