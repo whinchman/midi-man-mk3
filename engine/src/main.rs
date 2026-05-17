@@ -148,8 +148,7 @@ fn main() {
                                 Some((slot.filename.clone(), slot.repeats, song.slots.len()))
                             })
                         };
-                        if let Some((filename, repeats, total_slots)) = next_action {
-                            let _ = filename; // used only for slot lookup; next slot's filename fetched below
+                        if let Some((_filename, repeats, total_slots)) = next_action {
                             // Determine whether to advance to next slot or repeat.
                             let new_repeat = slot_repeat + 1;
                             if new_repeat >= repeats {

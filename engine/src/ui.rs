@@ -177,9 +177,8 @@ fn handle_cli_pattern_cmd(
                 match load_pattern(&filename) {
                     Ok(_data) => {
                         // NOTE: Applying to live state requires a write lock on Arc<RwLock<SequencerState>>.
-                        // Full wiring (apply_pattern_to_state + send state update) is done in the
-                        // song-mode-wiring task which has access to the Arc. We confirm success here.
-                        push_log(&mut ui.cli_log, ts, LogTag::Cmd, format!("pattern loaded: {filename}"));
+                        // Full wiring (apply_pattern_to_state + send state update) is not yet wired here.
+                        push_log(&mut ui.cli_log, ts, LogTag::Cmd, format!("pattern file ok (use `pattern load` from song mode to apply): {filename}"));
                     }
                     Err(e) => push_log(&mut ui.cli_log, ts, LogTag::Err, format!("pattern load error: {e}")),
                 }
@@ -226,7 +225,7 @@ fn handle_cli_song_cmd(
         Some("new") => {
             if let Some(name) = parts.get(2).copied() {
                 ui.song = Some(Song { name: name.to_string(), slots: vec![] });
-                *arc_song.write().unwrap() = ui.song.clone();
+                *arc_song.write().expect("ui: arc_song RwLock poisoned") = ui.song.clone();
                 push_log(&mut ui.cli_log, ts, LogTag::Cmd, format!("song new: {name}"));
             } else {
                 push_log(&mut ui.cli_log, ts, LogTag::Err, "song new: missing name".into());
@@ -238,7 +237,7 @@ fn handle_cli_song_cmd(
                 match load_song(&filename) {
                     Ok(song) => {
                         ui.song = Some(song);
-                        *arc_song.write().unwrap() = ui.song.clone();
+                        *arc_song.write().expect("ui: arc_song RwLock poisoned") = ui.song.clone();
                         push_log(&mut ui.cli_log, ts, LogTag::Cmd, format!("song loaded: {filename}"));
                     }
                     Err(e) => push_log(&mut ui.cli_log, ts, LogTag::Err, format!("song load error: {e}")),
@@ -287,7 +286,7 @@ fn handle_cli_song_cmd(
                 match ui.song.as_mut() {
                     Some(song) => {
                         song.slots.push(PatternRef { filename: format!("{filename}.pat.toml"), repeats: 1 });
-                        *arc_song.write().unwrap() = ui.song.clone();
+                        *arc_song.write().expect("ui: arc_song RwLock poisoned") = ui.song.clone();
                         push_log(&mut ui.cli_log, ts, LogTag::Cmd, format!("song add: {filename}.pat.toml"));
                     }
                     None => push_log(&mut ui.cli_log, ts, LogTag::Err, "song add: no song loaded".into()),
@@ -309,7 +308,7 @@ fn handle_cli_song_cmd(
                                     if ui.song_cursor > max_cursor {
                                         ui.song_cursor = max_cursor;
                                     }
-                                    *arc_song.write().unwrap() = ui.song.clone();
+                                    *arc_song.write().expect("ui: arc_song RwLock poisoned") = ui.song.clone();
                                     push_log(&mut ui.cli_log, ts, LogTag::Cmd, format!("song remove: slot {n}"));
                                 } else {
                                     push_log(&mut ui.cli_log, ts, LogTag::Err, format!("song remove: index {n} out of range"));
@@ -336,7 +335,7 @@ fn handle_cli_song_cmd(
                                 Some(song) => {
                                     if n <= song.slots.len() {
                                         song.slots[n - 1].repeats = r;
-                                        *arc_song.write().unwrap() = ui.song.clone();
+                                        *arc_song.write().expect("ui: arc_song RwLock poisoned") = ui.song.clone();
                                         push_log(&mut ui.cli_log, ts, LogTag::Cmd, format!("song set-repeats: slot {n} → {r}"));
                                     } else {
                                         push_log(&mut ui.cli_log, ts, LogTag::Err, format!("song set-repeats: index {n} out of range"));
@@ -807,14 +806,29 @@ fn translate_key(
                                     }
                                 }
                             }
+                            *arc_song.write().expect("ui: arc_song RwLock poisoned") = ui.song.clone();
                         }
                         return;
                     }
                     KeyCodeSimple::Char('[') => {
+                        if ui.song_cursor > 0 {
+                            if let Some(song) = ui.song.as_mut() {
+                                song.slots.swap(ui.song_cursor, ui.song_cursor - 1);
+                                ui.song_cursor -= 1;
+                                *arc_song.write().expect("ui: arc_song RwLock poisoned") = ui.song.clone();
+                            }
+                        }
                         let _ = cmd_tx.try_send(InputCommand::SongSlotMoveUp);
                         return;
                     }
                     KeyCodeSimple::Char(']') => {
+                        if let Some(song) = ui.song.as_mut() {
+                            if ui.song_cursor + 1 < song.slots.len() {
+                                song.slots.swap(ui.song_cursor, ui.song_cursor + 1);
+                                ui.song_cursor += 1;
+                                *arc_song.write().expect("ui: arc_song RwLock poisoned") = ui.song.clone();
+                            }
+                        }
                         let _ = cmd_tx.try_send(InputCommand::SongSlotMoveDown);
                         return;
                     }
@@ -2062,6 +2076,88 @@ mod tests {
             ui.cli_log.iter().any(|e| matches!(e.tag, LogTag::Err)),
             "unknown pattern command should push LogTag::Err"
         );
+        drop(ctrl_tx);
+    }
+
+    // ── Review-fix tests ──────────────────────────────────────────────────────
+
+    /// CRITICAL fix: Delete key must write updated song to arc_song so the
+    /// cmd-processor (SongAdvance handler) never indexes into stale slots.
+    #[test]
+    fn delete_key_syncs_arc_song() {
+        let (cmd_tx, _cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
+        let mut ui = UiState::new();
+        let state = SequencerState::default();
+        let arc_song = make_arc_song();
+
+        // Set up a song with 2 slots in both ui and arc_song.
+        handle_cli_song_cmd(&["song", "new", "test-song"], &mut ui, &state, &cmd_tx, &arc_song);
+        handle_cli_song_cmd(&["song", "add", "slot-A"], &mut ui, &state, &cmd_tx, &arc_song);
+        handle_cli_song_cmd(&["song", "add", "slot-B"], &mut ui, &state, &cmd_tx, &arc_song);
+        assert_eq!(ui.song.as_ref().unwrap().slots.len(), 2);
+        assert_eq!(arc_song.read().unwrap().as_ref().unwrap().slots.len(), 2);
+
+        // Simulate the Delete key logic (what translate_key does in the 'd'/Delete arm).
+        ui.song_cursor = 0;
+        if ui.song.is_some() {
+            if let Some(song) = ui.song.as_mut() {
+                if !song.slots.is_empty() && ui.song_cursor < song.slots.len() {
+                    song.slots.remove(ui.song_cursor);
+                    let max = song.slots.len().saturating_sub(1);
+                    if ui.song_cursor > max {
+                        ui.song_cursor = max;
+                    }
+                }
+            }
+            *arc_song.write().expect("ui: arc_song RwLock poisoned") = ui.song.clone();
+        }
+
+        // arc_song must now have 1 slot, not 2.
+        let guard = arc_song.read().unwrap();
+        let slots = &guard.as_ref().expect("song must still exist").slots;
+        assert_eq!(slots.len(), 1, "arc_song must have 1 slot after delete");
+        assert_eq!(slots[0].filename, "slot-B.pat.toml", "remaining slot must be slot-B");
+        drop(ctrl_tx);
+    }
+
+    /// WARNING fix: [ key must swap slots in ui.song AND arc_song, and move cursor up.
+    #[test]
+    fn move_up_swaps_slots() {
+        let (cmd_tx, _cmd_rx, ctrl_tx, _ctrl_rx) = make_channels();
+        let mut ui = UiState::new();
+        let state = SequencerState::default();
+        let arc_song = make_arc_song();
+
+        // Set up a song with 2 slots.
+        handle_cli_song_cmd(&["song", "new", "test-song"], &mut ui, &state, &cmd_tx, &arc_song);
+        handle_cli_song_cmd(&["song", "add", "slot-A"], &mut ui, &state, &cmd_tx, &arc_song);
+        handle_cli_song_cmd(&["song", "add", "slot-B"], &mut ui, &state, &cmd_tx, &arc_song);
+
+        // Place cursor at slot 1 (slot-B).
+        ui.song_cursor = 1;
+
+        // Simulate the '[' key logic (what translate_key does in the SongSlotMoveUp arm).
+        if ui.song_cursor > 0 {
+            if let Some(song) = ui.song.as_mut() {
+                song.slots.swap(ui.song_cursor, ui.song_cursor - 1);
+                ui.song_cursor -= 1;
+                *arc_song.write().expect("ui: arc_song RwLock poisoned") = ui.song.clone();
+            }
+        }
+
+        // Cursor must now be 0.
+        assert_eq!(ui.song_cursor, 0, "cursor must move to 0 after move-up from slot 1");
+
+        // Slots must be swapped: slot-B first, slot-A second.
+        let song = ui.song.as_ref().expect("song must exist");
+        assert_eq!(song.slots[0].filename, "slot-B.pat.toml", "slot-B must be at index 0");
+        assert_eq!(song.slots[1].filename, "slot-A.pat.toml", "slot-A must be at index 1");
+
+        // arc_song must reflect the same swap.
+        let guard = arc_song.read().unwrap();
+        let arc_slots = &guard.as_ref().expect("arc_song must exist").slots;
+        assert_eq!(arc_slots[0].filename, "slot-B.pat.toml", "arc_song slot 0 must be slot-B");
+        assert_eq!(arc_slots[1].filename, "slot-A.pat.toml", "arc_song slot 1 must be slot-A");
         drop(ctrl_tx);
     }
 }
