@@ -419,16 +419,16 @@ fn tick_note_on_has_correct_fields() {
     let evt = {
         // Reset and re-tick cleanly
         s.playhead = 0;
-        s.tick()
+        s.tick().expect("tick_note_on_has_correct_fields: expected NoteOn")
     };
     assert_eq!(
         evt,
-        Some(MidiEvent::NoteOn {
+        MidiEvent::NoteOn {
             channel: 0,
             note: 72,
             velocity: 80,
             duration_nanos: 0
-        })
+        }
     );
 }
 
@@ -839,16 +839,15 @@ fn tick_note_on_uses_step_velocity_64() {
     s.steps[1].midi_note = 60;
     s.steps[1].velocity = 64;
     s.playhead = 0; // next tick advances to 1
-    let evt = s.tick();
+    let evt = s.tick().expect("NoteOn velocity must match step.velocity=64");
     assert_eq!(
         evt,
-        Some(MidiEvent::NoteOn {
+        MidiEvent::NoteOn {
             channel: 0,
             note: 60,
             velocity: 64,
             duration_nanos: 0
-        }),
-        "NoteOn velocity must match step.velocity=64"
+        }
     );
 }
 
@@ -861,16 +860,15 @@ fn tick_note_on_uses_step_velocity_1() {
     s.steps[1].midi_note = 48;
     s.steps[1].velocity = 1;
     s.playhead = 0;
-    let evt = s.tick();
+    let evt = s.tick().expect("NoteOn velocity must match step.velocity=1");
     assert_eq!(
         evt,
-        Some(MidiEvent::NoteOn {
+        MidiEvent::NoteOn {
             channel: 0,
             note: 48,
             velocity: 1,
             duration_nanos: 0
-        }),
-        "NoteOn velocity must match step.velocity=1"
+        }
     );
 }
 
@@ -1195,16 +1193,15 @@ fn tick_velocity_127_produces_note_on_127() {
     s.steps[1].midi_note = 60;
     s.steps[1].velocity = 127;
     s.playhead = 0;
-    let evt = s.tick();
+    let evt = s.tick().expect("NoteOn velocity must be 127 when step.velocity=127");
     assert_eq!(
         evt,
-        Some(MidiEvent::NoteOn {
+        MidiEvent::NoteOn {
             channel: 0,
             note: 60,
             velocity: 127,
             duration_nanos: 0
-        }),
-        "NoteOn velocity must be 127 when step.velocity=127"
+        }
     );
 }
 
@@ -1217,16 +1214,15 @@ fn tick_velocity_default_100_produces_note_on_100() {
     s.steps[1].midi_note = 60;
     // velocity is default 100
     s.playhead = 0;
-    let evt = s.tick();
+    let evt = s.tick().expect("NoteOn velocity must be 100 when step.velocity is default");
     assert_eq!(
         evt,
-        Some(MidiEvent::NoteOn {
+        MidiEvent::NoteOn {
             channel: 0,
             note: 60,
             velocity: 100,
             duration_nanos: 0
-        }),
-        "NoteOn velocity must be 100 when step.velocity is default"
+        }
     );
 }
 
@@ -1239,16 +1235,15 @@ fn tick_velocity_zero_produces_note_on_0() {
     s.steps[1].midi_note = 60;
     s.steps[1].velocity = 0;
     s.playhead = 0;
-    let evt = s.tick();
+    let evt = s.tick().expect("NoteOn velocity must be 0 when step.velocity=0");
     assert_eq!(
         evt,
-        Some(MidiEvent::NoteOn {
+        MidiEvent::NoteOn {
             channel: 0,
             note: 60,
             velocity: 0,
             duration_nanos: 0
-        }),
-        "NoteOn velocity must be 0 when step.velocity=0"
+        }
     );
 }
 
@@ -1268,16 +1263,15 @@ fn tick_velocity_preserved_after_velocity_edit_committed() {
         "velocity should be 55 after commit"
     );
     s.playhead = 0;
-    let evt = s.tick();
+    let evt = s.tick().expect("tick() must use committed velocity=55");
     assert_eq!(
         evt,
-        Some(MidiEvent::NoteOn {
+        MidiEvent::NoteOn {
             channel: 0,
             note: 60,
             velocity: 55,
             duration_nanos: 0
-        }),
-        "tick() must use committed velocity=55"
+        }
     );
 }
 
@@ -1759,12 +1753,12 @@ fn playing_state_with_step(midi_note: u8, velocity: u8) -> SequencerState {
     state
 }
 
-/// Advance state until it emits Some, up to `limit` ticks.
+/// Advance state until it emits a Note event, up to `limit` ticks.
 fn tick_until_some(state: &mut SequencerState, limit: usize) -> Option<MidiEvent> {
     for _ in 0..limit {
         let ev = state.tick();
         if ev.is_some() {
-            return ev;
+            return Some(ev.expect("is_some checked"));
         }
     }
     None

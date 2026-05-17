@@ -11,6 +11,7 @@
 
 use std::sync::{mpsc::SyncSender, Arc, RwLock};
 
+use crate::input::InputCommand;
 use crate::state::{MidiEvent, SequencerState, StepSize, TempoRandType, TempoRollPoint};
 
 /// Number of nanoseconds in one minute.
@@ -323,7 +324,7 @@ pub fn add_nanos_signed(ts: libc::timespec, nanos: i64) -> libc::timespec {
 ///
 /// Timing uses `libc::clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME)` with
 /// absolute wake times to prevent drift accumulation across ticks.
-pub fn run_clock(state: Arc<RwLock<SequencerState>>, midi_tx: SyncSender<MidiEvent>) {
+pub fn run_clock(state: Arc<RwLock<SequencerState>>, midi_tx: SyncSender<MidiEvent>, cmd_tx: SyncSender<InputCommand>) {
     try_set_realtime();
 
     let mut next_abs = monotonic_now();
@@ -374,39 +375,46 @@ pub fn run_clock(state: Arc<RwLock<SequencerState>>, midi_tx: SyncSender<MidiEve
 
         // --- advance sequencer (write lock, released immediately) ---
         if playing {
-            let maybe_event = {
+            let tick_result = {
                 let mut s = state.write().expect("clock: state RwLock poisoned");
                 s.tick()
             };
 
-            if let Some(MidiEvent::NoteOn {
-                channel,
-                note,
-                velocity,
-                ..
-            }) = maybe_event
-            {
-                // Retrigger: if the same note is still held, send NoteOff first
-                // so the MIDI device recognises the following NoteOn as a new note.
-                if last_note == Some((channel, note))
-                    && midi_tx.send(MidiEvent::NoteOff { channel, note }).is_err()
-                {
-                    // Receiver dropped — exit cleanly.
-                    break;
-                }
-                let event = MidiEvent::NoteOn {
+            match tick_result {
+                crate::state::TickResult::Note(MidiEvent::NoteOn {
                     channel,
                     note,
                     velocity,
-                    // 90% gate: NoteOff fires before the next tick to avoid
-                    // racing with consecutive steps at the period boundary.
-                    duration_nanos: period / 10 * 9,
-                };
-                if midi_tx.send(event).is_err() {
-                    // Receiver dropped — exit cleanly.
-                    break;
+                    ..
+                }) => {
+                    // Retrigger: if the same note is still held, send NoteOff first
+                    // so the MIDI device recognises the following NoteOn as a new note.
+                    if last_note == Some((channel, note))
+                        && midi_tx.send(MidiEvent::NoteOff { channel, note }).is_err()
+                    {
+                        // Receiver dropped — exit cleanly.
+                        break;
+                    }
+                    let event = MidiEvent::NoteOn {
+                        channel,
+                        note,
+                        velocity,
+                        // 90% gate: NoteOff fires before the next tick to avoid
+                        // racing with consecutive steps at the period boundary.
+                        duration_nanos: period / 10 * 9,
+                    };
+                    if midi_tx.send(event).is_err() {
+                        // Receiver dropped — exit cleanly.
+                        break;
+                    }
+                    last_note = Some((channel, note));
                 }
-                last_note = Some((channel, note));
+                crate::state::TickResult::PatternEnd => {
+                    if cmd_tx.send(InputCommand::SongAdvance).is_err() {
+                        break;
+                    }
+                }
+                _ => {}
             }
         }
 

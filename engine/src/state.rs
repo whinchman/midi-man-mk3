@@ -10,6 +10,14 @@ use crate::music_theory::{Key, Mode};
 // state (e.g. sequencer.rs) continues to compile without modification.
 pub use crate::input::OverlayMode;
 
+/// Whether the sequencer is playing patterns in order (Song) or looping one pattern (Pattern).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum PlayMode {
+    #[default]
+    Pattern,
+    Song,
+}
+
 /// When the tempo randomness roll fires.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TempoRollPoint {
@@ -197,6 +205,39 @@ pub enum MidiEvent {
     Continue,
 }
 
+/// Result of a single sequencer tick.
+pub enum TickResult {
+    /// No event this tick (not playing, step not enabled, or probabilistically muted).
+    Idle,
+    /// A note fired on this tick.
+    Note(MidiEvent),
+    /// Pattern wrapped and play_mode is Song: the song should advance to the next slot.
+    PatternEnd,
+}
+
+impl TickResult {
+    /// Returns `true` if this result carries a `Note` event.
+    #[inline]
+    pub fn is_some(&self) -> bool {
+        matches!(self, TickResult::Note(_))
+    }
+
+    /// Returns `true` if this result is `Idle` (no note, no pattern-end signal).
+    #[inline]
+    pub fn is_none(&self) -> bool {
+        matches!(self, TickResult::Idle)
+    }
+
+    /// Unwrap the inner `MidiEvent`, panicking with `msg` if the result is not `Note`.
+    #[inline]
+    pub fn expect(self, msg: &str) -> MidiEvent {
+        match self {
+            TickResult::Note(e) => e,
+            _ => panic!("{}", msg),
+        }
+    }
+}
+
 /// The complete sequencer state.
 ///
 /// Designed for `Arc<RwLock<SequencerState>>` wrapping by the caller.
@@ -277,6 +318,12 @@ pub struct SequencerState {
     pub midi_device_name: String,
     /// Index of the currently highlighted random parameter (0–7, F3 panel).
     pub selected_rand_param: u8,
+    /// Whether the sequencer plays patterns in order (Song) or loops one (Pattern).
+    pub play_mode: PlayMode,
+    /// Index of the currently active slot in the song sequence (0-based).
+    pub song_slot_index: usize,
+    /// How many times the current song slot has been repeated (0-based count).
+    pub song_slot_repeat: u8,
 }
 
 impl Default for SequencerState {
@@ -313,6 +360,9 @@ impl Default for SequencerState {
             rand_seed: 0x853C_49E6,
             midi_device_name: String::new(),
             selected_rand_param: 0,
+            play_mode: PlayMode::Pattern,
+            song_slot_index: 0,
+            song_slot_repeat: 0,
         }
     }
 }
@@ -357,44 +407,57 @@ impl SequencerState {
         self.steps[step].enabled = !self.steps[step].enabled;
     }
 
-    /// Advances the playhead by one step and returns a `MidiEvent::NoteOn` if
-    /// the new step is enabled, or `None` otherwise.
+    /// Advances the playhead by one step and returns a `TickResult`.
     ///
-    /// Returns `None` immediately when not playing or when paused.
+    /// Returns `TickResult::Idle` immediately when not playing or when paused.
+    ///
+    /// Returns `TickResult::PatternEnd` (without firing the step) when in Song
+    /// mode and the playhead just wrapped, so the caller can advance to the next
+    /// song slot before the first step of the new pattern fires.
     ///
     /// `duration_nanos` is set to 0 here; the clock thread must overwrite it
     /// with the actual step period before forwarding the event to `midi_out`.
-    pub fn tick(&mut self) -> Option<MidiEvent> {
+    pub fn tick(&mut self) -> TickResult {
         next_rand(&mut self.rng_seed);
         if !self.playing || self.paused {
-            return None;
+            return TickResult::Idle;
         }
 
         // Advance playhead
         let next = self.playhead + 1;
-        if self.loop_active {
+        let wrapped = if self.loop_active {
             if next > self.loop_out {
                 self.playhead = self.loop_in;
+                true
             } else {
                 self.playhead = next;
+                false
             }
         } else if next >= 16 {
             self.playhead = 0;
+            true
         } else {
             self.playhead = next;
+            false
+        };
+
+        // In Song mode, signal PatternEnd before processing the step so the
+        // caller can load the next slot before its first step fires.
+        if wrapped && self.play_mode == PlayMode::Song {
+            return TickResult::PatternEnd;
         }
 
         // Step Randomness: probabilistic mute of the whole step.
         // step_rand is the mute probability (0 = never mute, 100 = always mute).
         if prob_hit(&mut self.rng_seed, self.step_rand) {
-            return None;
+            return TickResult::Idle;
         }
 
         let step = &self.steps[self.playhead as usize];
         if step.enabled {
             // 1. Skip modifier: mute the step entirely.
             if self.skip_modifier {
-                return None;
+                return TickResult::Idle;
             }
 
             // 2. Compute base note.
@@ -423,14 +486,14 @@ impl SequencerState {
             let velocity =
                 (step.velocity as i16 + self.velocity_modifier as i16).clamp(0, 127) as u8;
 
-            Some(MidiEvent::NoteOn {
+            TickResult::Note(MidiEvent::NoteOn {
                 channel: self.midi_channel,
                 note,
                 velocity,
                 duration_nanos: 0,
             })
         } else {
-            None
+            TickResult::Idle
         }
     }
 
@@ -653,6 +716,22 @@ impl SequencerState {
                     self.steps[step].velocity = velocity;
                 }
             }
+            InputCommand::SwitchToPatternMode => {
+                self.play_mode = PlayMode::Pattern;
+            }
+            InputCommand::SwitchToSongMode => {
+                self.play_mode = PlayMode::Song;
+                self.song_slot_index = 0;
+                self.song_slot_repeat = 0;
+            }
+            // SongAdvance is handled by the command processor (has Song access); no-op here.
+            InputCommand::SongAdvance => {}
+            InputCommand::SongSlotCursorUp => {}     // UI-only; state ignores
+            InputCommand::SongSlotCursorDown => {}
+            InputCommand::SongSlotDelete => {}
+            InputCommand::SongSlotMoveUp => {}
+            InputCommand::SongSlotMoveDown => {}
+            InputCommand::SongSlotInsert(_) => {}
         }
     }
 
@@ -1420,5 +1499,45 @@ mod tests {
         state.apply_command(InputCommand::NoteSet { step: 15, midi_note: 84, velocity: 127 });
         assert_eq!(state.steps[15].midi_note, 84, "NoteSet step 15 must set midi_note");
         assert_eq!(state.steps[15].velocity, 127, "NoteSet step 15 must set velocity");
+    }
+
+    // ── PlayMode / TickResult / song-mode fields ─────────────────────────────
+
+    #[test]
+    fn tick_in_pattern_mode_returns_idle_when_not_playing() {
+        let mut state = SequencerState::default();
+        // Default state: playing = false, play_mode = Pattern.
+        let result = state.tick();
+        assert!(matches!(result, TickResult::Idle), "tick() when not playing must return Idle");
+    }
+
+    #[test]
+    fn tick_in_song_mode_returns_pattern_end_on_wrap() {
+        let mut state = SequencerState::default();
+        state.play_mode = PlayMode::Song;
+        state.playing = true;
+        state.loop_active = false;
+        // Set playhead to 14 so next tick advances to 15 (no wrap yet).
+        state.playhead = 14;
+
+        // First tick: playhead moves from 14 → 15, no wrap yet.
+        let result1 = state.tick();
+        // This tick should NOT be PatternEnd (playhead went to 15, no wrap).
+        assert!(!matches!(result1, TickResult::PatternEnd), "first tick must not return PatternEnd");
+
+        // Second tick: playhead at 15, next = 16 → wraps to 0 → PatternEnd.
+        let result2 = state.tick();
+        assert!(matches!(result2, TickResult::PatternEnd), "second tick after wrap must return PatternEnd");
+    }
+
+    #[test]
+    fn switch_to_song_mode_resets_slot_index() {
+        let mut state = SequencerState::default();
+        state.song_slot_index = 5;
+        state.song_slot_repeat = 3;
+        state.apply_command(InputCommand::SwitchToSongMode);
+        assert_eq!(state.play_mode, PlayMode::Song, "SwitchToSongMode must set play_mode to Song");
+        assert_eq!(state.song_slot_index, 0, "SwitchToSongMode must reset song_slot_index to 0");
+        assert_eq!(state.song_slot_repeat, 0, "SwitchToSongMode must reset song_slot_repeat to 0");
     }
 }
