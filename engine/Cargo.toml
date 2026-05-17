@@ -15,6 +15,8 @@ hidapi = { version = "2.6", features = ["linux-static-hidraw"], optional = true 
 ratatui = { version = "0.30", default-features = false, features = ["macros"] }
 crossterm = { version = "0.29", optional = true }
 libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
 
 [features]
 # Hardware I/O features — require system libraries (ALSA, hidraw, real terminal).
