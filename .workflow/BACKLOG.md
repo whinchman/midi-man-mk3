@@ -1,11 +1,4 @@
 # BACKLOG
-- plan for "song mode".
-  1. pattern saving/loading. 
-  2. songs = pattern chaining.
-  3. song mode - like a 8bit tracker?
-  4. songs, save/load. FileFormat?
-  5. switch between pattern/song mode? f9/f10?
-
 
 ## Test hygiene: add `parse_note_name` test for `s` sharp suffix (BUG-019)
 - **File:** `engine/src/music_theory.rs` test module.
