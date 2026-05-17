@@ -1,6 +1,6 @@
 Name: main-wiring
 Type: coder
-Status: pending
+Status: done
 Repo: /home/whinchman/experiments/midi-man-mk3
 Parallel Group: 5
 Feature Branch: feature/song-mode
@@ -138,3 +138,30 @@ Acceptance Criteria:
   - [ ] Pattern load errors during SongAdvance are logged to stderr and do not panic
 
 Dependencies: ui-state-and-cli, ui-render
+
+## Notes
+
+Completed 2026-05-16 on branch `feature/song-mode-main-wiring`.
+
+Merge conflict resolved in `engine/src/ui.rs`: the ui-state-and-cli branch and
+ui-render branch both added fields to UiState (play_mode, song, song_cursor) and
+corresponding initializers in UiState::new(). Git silently duplicated the fields
+since both branches added them in the same position. The conflict in the imports
+section (pattern imports vs. `use crate::pattern::Song`) was resolved by keeping
+the more complete import from ui-state-and-cli (which already includes Song and
+PatternRef). Duplicate UiState struct fields and new() initializers were
+deduplicated manually.
+
+Additional fix: the state-and-input merge introduced `cmd_tx.clone()` inside a
+`move` closure for the clock thread spawn, which caused `cmd_tx` to be moved into
+the closure, breaking the subsequent HID thread clone. Fixed by pre-cloning as
+`clock_cmd_tx` before the closure.
+
+Results:
+- cargo test -p engine: 192 unit tests + 57/46/19/12/29/53/179/58 integration
+  tests — all pass, 0 failures
+- cargo build -p engine --features hw-io: compiles with 1 pre-existing warning
+  in hid.rs (unused_assignments, not introduced by this task)
+- cargo build -p engine --release: compiles cleanly
+
+Acceptance criteria: all met.
