@@ -96,6 +96,24 @@ pub enum InputCommand {
     RandVelocities,
     /// Set the note and velocity for a specific step (step must be < 16).
     NoteSet { step: usize, midi_note: u8, velocity: u8 },
+    /// Switch to pattern mode (F9).
+    SwitchToPatternMode,
+    /// Switch to song mode (F10).
+    SwitchToSongMode,
+    /// Advance song to next slot (sent by clock on PatternEnd).
+    SongAdvance,
+    /// Song slot list cursor: move up.
+    SongSlotCursorUp,
+    /// Song slot list cursor: move down.
+    SongSlotCursorDown,
+    /// Insert a pattern slot at cursor position (filename only, no path).
+    SongSlotInsert(String),
+    /// Delete the slot at cursor.
+    SongSlotDelete,
+    /// Swap cursor slot with the slot above it.
+    SongSlotMoveUp,
+    /// Swap cursor slot with the slot below it.
+    SongSlotMoveDown,
 }
 
 /// Pure function: translate a root-mode key event into an `InputCommand`.
@@ -193,6 +211,16 @@ pub fn panel_key_to_command(key: KeyCodeSimple, focus: FocusPanel) -> Option<Inp
     }
 }
 
+/// Translate a key event that is always active regardless of focus or overlay.
+/// Currently handles F9/F10 mode switching.
+pub fn global_key_to_command(key: KeyCodeSimple) -> Option<InputCommand> {
+    match key {
+        KeyCodeSimple::F9  => Some(InputCommand::SwitchToPatternMode),
+        KeyCodeSimple::F10 => Some(InputCommand::SwitchToSongMode),
+        _ => None,
+    }
+}
+
 /// Returns the char that a key inserts into the CLI line, if any.
 ///
 /// Used by `translate_key` (hw-io) and unit tests (no feature gate).
@@ -235,6 +263,12 @@ pub enum KeyCodeSimple {
     F3,
     /// F4.
     F4,
+    /// F9 — switch to pattern mode.
+    F9,
+    /// F10 — switch to song mode.
+    F10,
+    /// Delete key.
+    Delete,
     /// `+` or `=` key (BPM up).
     Plus,
     /// `-` key (BPM down).
@@ -468,6 +502,26 @@ mod tests {
         assert!(panel_key_to_command(KeyCodeSimple::Esc, FocusPanel::RandParams).is_none());
         assert!(panel_key_to_command(KeyCodeSimple::Space, FocusPanel::RandParams).is_none());
         assert!(panel_key_to_command(KeyCodeSimple::Backspace, FocusPanel::RandParams).is_none());
+    }
+
+    // ── global_key_to_command ────────────────────────────────────────────────
+
+    #[test]
+    fn global_key_f9_maps_to_switch_to_pattern_mode() {
+        let cmd = global_key_to_command(KeyCodeSimple::F9);
+        assert!(matches!(cmd, Some(InputCommand::SwitchToPatternMode)));
+    }
+
+    #[test]
+    fn global_key_f10_maps_to_switch_to_song_mode() {
+        let cmd = global_key_to_command(KeyCodeSimple::F10);
+        assert!(matches!(cmd, Some(InputCommand::SwitchToSongMode)));
+    }
+
+    #[test]
+    fn global_key_other_returns_none() {
+        let cmd = global_key_to_command(KeyCodeSimple::F1);
+        assert!(cmd.is_none());
     }
 
     // ── KeyCodeSimple::Backspace — present and handled ────────────────────────
